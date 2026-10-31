@@ -409,7 +409,7 @@ fn world_affine(world: &World, entity: Entity, view: Entity) -> Result<Affine3A,
     }
     let mut affine = world.get::<GlobalTransform>(view).ok_or("FixtureView has no world transform")?.affine();
     for node in chain.into_iter().rev() {
-        affine = affine * world.get::<Transform>(node).ok_or("lane node has no Transform")?.compute_affine();
+        affine *= world.get::<Transform>(node).ok_or("lane node has no Transform")?.compute_affine();
     }
     Ok(affine)
 }

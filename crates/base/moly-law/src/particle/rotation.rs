@@ -37,7 +37,7 @@
 //! therefore does not reuse that evaluation.
 
 use crate::particle::value::MinMaxCurve;
-pub use super::curve::{BakedCurve, CurveSampler as AngularVelocityLaw, CurveTime, eval_curve, normalized_age};
+pub use super::curve::{BakedCurve, CurveSampler as AngularVelocityLaw, CurveTime, normalized_age};
 pub(crate) use super::random::hash_mix;
 
 // ---- Hash kernels (constants pinned by bit) ----

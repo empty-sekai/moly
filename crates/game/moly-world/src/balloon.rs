@@ -1,112 +1,164 @@
-//! 头顶 tweet 气泡：tweet 主表 → 选取律 → 排版律 → Sprite 呈现。
+//! Head tweet balloons: tweet master table → selection → layout → sprite
+//! presentation.
 //!
-//! 呈现参数按真源预制体取证的 SPEC 落值（此前的替身已全部换掉）：
-//! * **文本**：字号 32（`m_fontSize`，min/max 同 32、autoSizing 关）、
-//!   行距 -80（`lineSpacing`，经 [`moly_law::text`] 行量律的行距参数换算）、
-//!   色 #555577FF、对齐 = 单行居中多行居左（垂直恒 Middle，靠 bg 上下
-//!   对称 padding 成立）。硬断行即真源主形态（源实现无软换行，tweet 文本
-//!   73.5% 自带 `\n`，且盒宽由内容首选尺寸驱动、折行条件不成立）。
-//! * **盒几何**：真源是 Layout 链（ContentSizeFitter Preferred + bg VLG
-//!   padding 左 40 右 40、上 32 下 32 + 行距 2.5）；此处取其近似式——
-//!   文本宽 + 80 水平 / 文本高 + 64 垂直（= padding 之和），**注明近似**。
-//! * **时序**：入场 DOScale 0→1 与收场 →0 各 0.2s Linear，作用在
-//!   animation 中间节点（真源 `_animationRoot`，非根）。NPC 头顶 tweet
-//!   的显示时长不归气泡：真源 HUD 无自定时器，生死由 NPC 状态机发的
-//!   HUD 事件（类型 25，[`crate::npc_state::TweetHudEvent`]）驱动——进
-//!   tweet / 问候状态即显示，出状态即收场（问候在过 3.0s 的第一帧先收，
-//!   状态本身活到 5.0s）。收场从当前缩放起缩（补间从起始时刻的当前值
-//!   出发）。摆设编辑反应与家具前置动作两条链仍按 5.0s 保持（tweet
-//!   状态的时长）。无点击跳过/关闭语义（真源 tweet 路径无打字机，点击
-//!   只挂回调与音效）。
-//! * **canvas 缩放**：SPEC 的盒几何/字号是 canvas 单位，根 UI canvas 以
-//!   ScaleWithScreenSize（参考 1920×1080、MatchWidthOrHeight）缩放上屏；
-//!   match 按屏幕纵横比定（H/W ≥ 1080/1920 → 高度匹配 H/1080，更宽 →
-//!   宽度匹配 W/1920）。尺寸缩、锚点屏幕位不缩（乘在根上与顶边缩放相乘）。
-//! * **顶边缩放与背面剔除**：屏幕 y>H/2 时整体缩（顶边收 0.5×）；
-//!   目标在相机背面时 alpha=0（不销毁）。
-//! * **两层绘制序**（气泡之间的覆盖语义）：跨气泡 = 真源 HUD 层的逐帧
-//!   重排——`ScreenLayerMysekaiHUD.Update` 每帧调 `SetSiblingTweetHUD`，
-//!   键 = 场地相机 transform 到各 HUD 目标（avatar 视图根；投影偏移
-//!   (0,1,0) 不参与，排序键与投影锚是两个量）的欧氏距离，按距离**降序**
-//!   逐个 `SetSiblingIndex(0..)`，uGUI 兄弟序后者在上 ⇒ **近者的气泡
-//!   画在最上、盖住远者**。此处对应到部件 z：按名次分档步进（近者整套
-//!   更高，任意两只的部件 z 区间恒不相交——同气泡整体成层，不与另一只
-//!   交错）。同气泡内 = 预制体 `animation` 节点的子序（bg 子树在前——
-//!   正文文本件是 bg 的**子节点**，箭头容器最后）⇒ **背板 < 正文 <
-//!   箭头**（箭头最顶，盖在与背板下沿重叠的 9px 上）。跨 UI 档（对话
-//!   窗体、摇杆）在本仓的覆盖相机上按 z 分层，气泡档恒在它们之下
-//!   （根部 z 有天花板常量，见 [`BALLOON_LAYER_CEILING`]）。
+//! Presentation parameters (values from the HUD prefab):
+//! * **Text**: font size 32 (`m_fontSize`, min/max both 32, autoSizing off),
+//!   line spacing -80 (`lineSpacing`, converted by the line-spacing
+//!   parameter of the [`moly_law::text`] line law), colour #555577FF,
+//!   alignment = centered on one line, left-aligned on several (vertically
+//!   always Middle, met by the bg's symmetric top and bottom padding). Hard
+//!   line breaks are the only form: the text is not soft-wrapped, 73.5% of
+//!   tweet texts already carry `\n`, and the box width follows the content's
+//!   preferred size, so no wrap condition arises.
+//! * **Box geometry**: a Layout chain (ContentSizeFitter Preferred + bg VLG
+//!   padding left 40, right 40, top 32, bottom 32 + row spacing 2.5) is
+//!   approximated here by text width + 80 horizontally / text height + 64
+//!   vertically (the sum of the paddings); **an approximation**.
+//! * **Timing**: entry DOScale 0→1 and exit →0 each take 0.2s Linear and act
+//!   on the animation intermediate node (`_animationRoot`, not the root). An
+//!   NPC head tweet's display time does not belong to the balloon: the HUD
+//!   has no timer of its own, and the NPC state machine's HUD events
+//!   (type 25, [`crate::npc_state::TweetHudEvent`]) drive it — entering a
+//!   tweet / greeting state shows it, leaving the state closes it (a
+//!   greeting closes on the first frame past 3.0s, while the state itself
+//!   lives to 5.0s). The exit shrinks from the current scale (the tween
+//!   starts at the value current at its start time). The layout after-edit
+//!   reactions and the furniture pre-actions still hold for 5.0s (the tweet
+//!   state's duration). No click-to-skip or close semantics (the tweet path
+//!   has no typewriter; a click only attaches a callback and a sound).
+//! * **canvas scaling**: the box geometry and font size are in canvas
+//!   units; the root UI canvas scales them on screen with
+//!   ScaleWithScreenSize (reference 1920×1080, MatchWidthOrHeight); the
+//!   match follows the screen aspect ratio (H/W ≥ 1080/1920 → match height
+//!   H/1080, wider → match width W/1920). The sizes scale, the anchor's
+//!   screen position does not (it multiplies into the root and multiplies
+//!   with the top-edge scale).
+//! * **Top-edge scale and back-face culling**: when screen y>H/2 the
+//!   balloon shrinks as a whole (the top edge contracts 0.5×); while the
+//!   target is behind the camera alpha=0 (not despawned).
+//! * **Two-level draw order** (how balloons cover each other): across
+//!   balloons the HUD layer reorders its children every frame —
+//!   `ScreenLayerMysekaiHUD.Update` calls `SetSiblingTweetHUD` each frame;
+//!   the key is the Euclidean distance from the field camera transform to
+//!   each HUD target (the avatar view root; the projection offset (0,1,0)
+//!   takes no part, the sort key and the projection anchor are two different
+//!   values), and the targets are given `SetSiblingIndex(0..)` in
+//!   **descending** distance order, uGUI draws later siblings on top, so the
+//!   **nearer balloon draws on top and covers the farther one**. Here this
+//!   maps to part z: a stride per rank (the nearer one's whole set sits
+//!   higher, and any two balloons' part z ranges never intersect — one
+//!   balloon forms one layer and does not interleave with another). Within a
+//!   balloon the order is the `animation` node's child order (the bg subtree
+//!   first — the body text is a **child** of bg — the arrow container last),
+//!   so **backdrop < body < arrow** (the arrow on top, covering the 9px it
+//!   shares with the backdrop's bottom edge). The screen-UI bands (dialogue
+//!   window, joystick) are layered by z on this crate's overlay camera, and
+//!   the balloon band always stays below them (the root z has a ceiling
+//!   constant, see [`BALLOON_LAYER_CEILING`]).
 //!
-//! 字体按裁决保持**开源自烘图集**（仓内 OFL 字体；真源是商业 SDF 字体，
-//! 资产永不进开源仓）——只还原字号/行距/色/对齐与字重档语义（tweet 正文
-//! 只用常规档，粗体档属公告/哭喊变体不在本路径）。图集**两遍光栅化**：
-//! 先量字符集实际墨迹的上下左右界再定格边；字号与格几何不随容量缩小。
-//! 每页边长不超过当前 RenderDevice 的二维纹理上限，完整字符集按码点
-//! 顺序装入多页；字形格记录所属页，排版仍只读原推进与页内矩形。
-//! 同数据、同设备限制 ⇒ 同图集。
+//! The font stays an **open-source, locally baked atlas** (an OFL font in the
+//! repository; the product uses a commercial SDF font whose assets never
+//! enter this repository) — only the font size/line spacing/colour/alignment
+//! and the weight-band semantics are reproduced (the tweet body uses the
+//! regular band only; bold belongs to the announcement/cry variants, not to
+//! this path). The atlas is rasterised in **two passes**: first the
+//! character set's actual ink bounds are measured (top, bottom, left, right)
+//! and the cell edge is fixed; the font size and the cell geometry do not
+//! shrink with capacity. Each page's edge stays within the current
+//! RenderDevice's 2D texture limit, and the full character set is packed
+//! into pages in code-point order; a glyph cell records its page, and layout
+//! reads only the advance and the in-page rectangle. Same data and same
+//! device limits ⇒ same atlas.
 //!
-//! 背景与箭头用 UI atlas 裁件的**真源纹源**（此前是程序化替身，已整块
-//! 换掉）：背景 `btn_r30_wh`（CommonAtlas 裁件 80×80、四边 border 38、
-//! 真源 Image 组件按 Sliced 九宫渲染）按九宫摆；箭头
-//! `balloon_direction_triangle_wh`（同 atlas 裁件 40×20、border 0、
-//! Simple 整图）。**选族按引用定，不按名字定**：真源 HUD 预制体里背景
-//! 件与箭头件的序列化 sprite 引用（打包身份对齐的账本落名）恰好指向
-//! 这两件，而 HUD 类的状态机从不改 sprite 名（按名取图的 setter 在此
-//! 路径零调用 ⇒ 序列化引用即所渲染）。名字最像气泡的另一族
-//! （思考/哭喊/公告那套 T/S × S/M/L 定尺图）只被共享区域地图的对话
-//! 气泡组件引用，不属于本路径——其选档律见下方存档。两者颜色 =
-//! 白 × α0.9019608（真源 `m_Color`，sprite 染色，纹理只供像素）。
+//! The background and the arrow use the UI atlas crops: the background
+//! `btn_r30_wh` (a CommonAtlas crop of 80×80, border 38 on all four edges, rendered as a Sliced nine-slice by
+//! its Image component) is placed as a nine-slice; the arrow
+//! `balloon_direction_triangle_wh` (a crop of the same atlas, 40×20, border
+//! 0, Simple whole image). **The family is chosen by reference, not by
+//! name**: in the HUD prefab the background and arrow pieces' serialized
+//! sprite references (names taken from the ledger aligned by pack identity)
+//! point exactly at these two, and the HUD state machine never changes a
+//! sprite name (no by-name sprite setter runs on this path, so the
+//! serialized reference is what is drawn). The other family whose names
+//! look most like balloons (the thinking/cry/announcement fixed-size set
+//! T/S × S/M/L) is referenced only by the shared area map's dialogue
+//! balloon component and is not on this path — its band selection is
+//! recorded below. Both pieces' colour = white × α0.9019608 (`m_Color`, a
+//! sprite tint; the texture only supplies pixels).
 //!
-//! **名栏：真源头顶气泡无此构件**。取证三面：① HUD 预制体整树（根、
-//! 动画节点、bg、bg 覆盖件、正文文本、按钮、按钮覆盖、箭头容器、
-//! 箭头、箭头覆盖，共 10 节点）只有一件文本件（正文），HUD 类的字段
-//! 表里也没有名字文本项；② `label` 步在真源只属于对话窗链——窗体
-//! 引擎的名字栏方法是**裸文本 SetText、无背板图**，且窗体只被玩家
-//! 点击链、档案回放页、多人房与教程处理器初始化（自主对话链构造上
-//! 开不了窗）；③ 名字形候选纹源（`bg_base_mysekainame_h48` /
-//! `balloon_mysekaitag_dbl` / `label_framebottom_r14_wh`）在代码调用点
-//! 与字符串字面量两处都零引用（字面量检索空间经阳性对照确认存活），
-//! 不是 label 步的背板。⇒ 气泡域的 label 步保持具名不呈现（对话模块
-//! 的具名跳过日志），**不因盘上有名字形裁片就贴图**。
+//! **Name column: the head balloon has no such part.** Three checks: (a) the
+//! whole HUD prefab tree (root, animation node, bg, bg overlay, body text,
+//! button, button overlay, arrow container, arrow, arrow overlay, 10 nodes
+//! in all) holds one text object (the body), and the HUD class's field table
+//! has no name text entry either; (b) the `label` step belongs to the
+//! dialogue window chain only — the window engine's name column method is a
+//! **bare text SetText with no backdrop image**, and the window is only
+//! initialised by the player click chain, the archive replay screen, the
+//! multiplayer room and the tutorial handlers (the autonomous dialogue chain
+//! cannot open it); (c) the name-shaped candidate textures
+//! (`bg_base_mysekainame_h48` / `balloon_mysekaitag_dbl` /
+//! `label_framebottom_r14_wh`) have zero references both at code call sites
+//! and among string literals (the literal search space was checked with a
+//! positive control), so none is the label step's backdrop. ⇒ The balloon
+//! domain's label step stays named and is not drawn (a named skip log in the
+//! dialogue module); **a name-shaped crop on disk is not enough to place
+//! it**.
 //!
-//! **共享区域地图气泡的选档律（取证存档；真源属于区域地图的对话
-//! 气泡组件，本仓当前无消费者，记此防重推导）**：
-//! * 路由（表情类型枚举 None/Announce/AnnounceBig/Thinking/Cry/
-//!   CryBig = 0..5）：None → 通用底图；Announce 与 AnnounceBig →
-//!   公告幅；Thinking → 思考族；Cry 与 CryBig → 哭喊族；其余取值记
-//!   错误日志。播放入口先落基础字号 32 与默认字体档，再按型覆盖。
-//! * 思考/哭喊族名 = `"balloon_" + thinking|cry + "_" + 竖档 + "_" +
-//!   横档`：竖档按**行数**恰 2 取 T 否则 S（枚举 T=0/S=1）；横档按
-//!   **定行字符数**（不是像素宽）：<8 → S、8–10 → M、≥11 → L（枚举
-//!   L=0/M=1/S=2）。定行字符数默认取**首行**；文本恰 2 字符且含断行
-//!   时取前两行中的较长者。
-//! * 公告幅整图 `balloon_announce`（该族唯一带 border 的件，四边
-//!   40/42/41/40，九宫）；通用底图 `bg_base_r30_wh`。公告与哭喊的
-//!   Big 型把字号抬到 40 并换 EB 字体档，否则 32。
-//! * 幅面尺寸不走 Layout：组件构造时硬编码三张 `(型, 量) → 值` 查找
-//!   表——宽（思考/哭喊按定行字符数 1..12 与 1..10）、高（按行数 1/2）、
-//!   底图 Y 偏移（按行数 1/2），查表失败记错误日志。
+//! **Band selection of the shared area map balloon (recorded reference; the
+//! area map has its own dialogue balloon component, this crate has no
+//! consumer yet, and this note is kept so the derivation is not redone)**:
+//! * Routing (expression type enum None/Announce/AnnounceBig/Thinking/Cry/
+//!   CryBig = 0..5): None → the generic backdrop; Announce and AnnounceBig →
+//!   the announcement image; Thinking → the thinking family; Cry and CryBig
+//!   → the cry family; any other value logs an error. Playback sets the base
+//!   font size 32 and the default font band first, then overrides them by
+//!   type.
+//! * Thinking/cry family name =
+//!   `"balloon_" + thinking|cry + "_" + <vertical> + "_" + <horizontal>`: the vertical band is T for exactly 2 **lines**
+//!   and S otherwise (enum T=0/S=1); the horizontal band follows the
+//!   **character count of the sizing line** (not the pixel width): <8 → S,
+//!   8–10 → M, ≥11 → L (enum L=0/M=1/S=2). The sizing line is the
+//!   **first line** by default; when the text is exactly 2 characters and
+//!   contains a break, it is the longer of the first two lines.
+//! * The announcement image `balloon_announce` (the only piece of that
+//!   family with a border: 40/42/41/40 on the four edges, nine-slice); the
+//!   generic backdrop `bg_base_r30_wh`. The Big types of announcement and cry
+//!   raise the font size to 40 and switch to the EB font band, others stay
+//!   at 32.
+//! * The image sizes do not use Layout: the component hard-codes three
+//!   `(type, quantity) → value` lookup tables at construction — width
+//!   (thinking/cry by the sizing-line character count 1..12 and 1..10),
+//!   height (by line count 1/2), backdrop Y offset (by line count 1/2); a
+//!   failed lookup logs an error.
 //!
-//! 数据/触发/定位：tweet 主表与问候链三表归 NPC 侧
-//! （[`crate::npc_tweet::TweetTables`]，同两份提取文件）；问候的门、选取
-//! 与计时都在 NPC 状态机（`npc_presenter` 的问候门、`npc_state` 的问候
-//! 状态），气泡只消费它发的 HUD 事件：Show 上屏、Hide 收场、Retire
-//! （宿主换站重置）立即撤。每名成员只有一只 HUD 气泡：新的 Show 替换
-//! 在屏那只（入场从 0 起；真源 HUD 重入的形状未读）。
-//! 摆设编辑链走真源域链——保存回执
-//! （`crate::field_modes::LayoutSaved`）→ 反应者抽签（编辑站点上的成员按
-//! 到玩家距离排序，取最近的 `Random.Range(1, ceil(n/2)+1)` 名）→ 逐名
-//! 放行（取消判定为真才放行，放行后等 `Random.Range(500, 1000)` 毫秒再
-//! 轮下一名）→ 池选取（[`moly_law::tweet::pick_after_edit_tweet`]）→
-//! 同一呈现链上屏 → 5.0s 驻留（[`AFTER_EDIT_REACTION_DELAY_SECONDS`]）后
-//! 收场。驻留在上屏**之后**（真源 objective 的序：选取 → 看向玩家 →
-//! 上屏 → 延迟等待 → 收场）。反应目标本身仍在 NPC 目标循环之外跑（真源
-//! 是目标 2，取消当前目标并置 after-edit 对话数据），具名缺口，见
-//! [`after_edit_reaction`]。
-//! 定位 = avatar 根位 + 世界偏移
-//! (0,1,0) → 主相机投影到屏幕像素 → 盖到只画气泡层的 2D 相机（世界
-//! 单位 = 逻辑像素），每帧跟随。日志只打 id、行数、量法、参数实际值——文本内容不进日志
-//! （文本含非中英文字符）。
+//! Data / triggers / placement: the tweet master table and the three
+//! greeting tables belong to the NPC side
+//! ([`crate::npc_tweet::TweetTables`], two files together); the greeting
+//! gate, selection and timing live in the NPC state machine (the greeting
+//! gate in `npc_presenter`, the greeting state in `npc_state`), and the
+//! balloon only consumes the HUD events it sends: Show shows, Hide closes,
+//! Retire (a host site reset) takes down at once. Each member has only one
+//! HUD balloon: a new Show replaces the one on screen (the entry starts from
+//! 0; the shape of a HUD re-entry is not modelled).
+//! The layout-edit chain follows the product's order — save receipt
+//! (`crate::field_modes::LayoutSaved`) → reactor draw (the members on the
+//! edited site sorted by distance to the player, the nearest
+//! `Random.Range(1, ceil(n/2)+1)` of them taken) → release one by one (a
+//! member is released only when the cancel check reports true, and after a
+//! release the next waits `Random.Range(500, 1000)` milliseconds) → pool
+//! pick ([`moly_law::tweet::pick_after_edit_tweet`]) → shown on the same
+//! presentation chain → held for 5.0s ([`AFTER_EDIT_REACTION_DELAY_SECONDS`])
+//! then closed. The hold comes **after** showing (the objective's order:
+//! pick → look at the player → show → delay → close). The reaction objective
+//! itself still runs outside the NPC objective loop (it is objective 2: it
+//! cancels the current objective and sets the after-edit talk data), a named
+//! gap, see [`after_edit_reaction`].
+//! Placement = avatar root position + world offset (0,1,0) → projected by
+//! the main camera to screen pixels → drawn by the 2D camera that renders
+//! only the balloon layer (world unit = logical pixel), following every
+//! frame. The log carries only ids, line counts, the measure and the actual
+//! parameter values — text content never enters it (texts contain non-CJK
+//! characters too).
 
 use crate::character::CharacterShell;
 use crate::npc::CharacterUnitId;
@@ -131,16 +183,20 @@ use std::collections::HashMap;
 
 pub use crate::ui_inputs::atlas::{BALLOON_LAYER, BAKE_PPEM, SCREEN_UI_LAYER};
 
-/// 排版字号（排版像素）。真值：真源文本件 `m_fontSize` = 32（min/max
-/// 同 32，autoSizing 关）。取与图集烘制字号同值（1:1 显示）。
+/// Layout font size (layout pixels). The text object's `m_fontSize` = 32
+/// (min/max both 32, autoSizing off). Equal to the atlas bake size (drawn
+/// 1:1).
 const FONT_SIZE: f32 = 32.0;
 
-/// 排版行距。真值：真源文本件 `lineSpacing` = -80（序列化原值，换算在
-/// 行量律内部——每行偏移的增量项）。
+/// Layout line spacing. The text object's `lineSpacing` = -80 (the
+/// serialized value; converted inside the line law — the per-line offset
+/// increment).
 const LINE_SPACING: f32 = -80.0;
 
-/// 排版字族名：进推进律（只影响空格回退推进比）。真源是商业字体的
-/// 常规档；开源自烘字体走默认档（`space_advance_ratio` 的 5/24 支）。
+/// Layout font family name: feeds the advance law (it only affects the
+/// fallback space advance ratio). The product uses the regular band of a
+/// commercial font; the open-source baked font takes the default band (the
+/// 5/24 branch of `space_advance_ratio`).
 pub const FONT_FAMILY: &str = "Sans";
 
 /// 单元格内边距（px）：字形墨迹离格边的留白。
@@ -151,15 +207,18 @@ const MIN_ATLAS_SIZE: usize = 2048;
 /// 文字色（真值：`fontColor` #555577FF）。
 const TEXT_COLOR: [f32; 3] = [85.0 / 255.0, 85.0 / 255.0, 119.0 / 255.0];
 
-/// 背景与箭头的颜色：白 × α0.9019608（真值：两件 CustomImage 的
-/// `m_Color`）。sprite 染色乘在纹理像素上（含纹理自己的透明圆角），
-/// 与真源 ugui 的顶点色 × 纹理同式。
+/// Colour of the background and the arrow: white × α0.9019608 (the
+/// `m_Color` of the two CustomImage pieces). The sprite tint multiplies the texture pixels (including
+/// their own transparent corners), the same formula as uGUI's vertex colour
+/// × texture.
 const SHAPE_ALPHA: f32 = 0.9019608;
 const SHAPE_COLOR: Color = Color::srgba(1.0, 1.0, 1.0, SHAPE_ALPHA);
 
-/// 背景 9-slice 源图边长与四边 border（真值：`btn_r30_wh` 80×80、
-/// border 38/38/38/38——UI atlas 裁件账本按打包身份对齐读出；真源
-/// Image 组件按 Sliced 渲染）。border 是采样几何，不随换图变。
+/// Side length and four-edge border of the background 9-slice source
+/// (`btn_r30_wh` 80×80,
+/// border 38/38/38/38 — read from the UI atlas crop ledger by pack identity;
+/// the Image component renders it as Sliced). The border is sampling
+/// geometry and does not change with the image.
 const BG_SPRITE: f32 = 80.0;
 const BG_BORDER: f32 = 38.0;
 
@@ -207,16 +266,19 @@ const BALLOON_LAYER_CEILING: f32 = -0.5;
 /// 视线射线两倍距离处 ⇒ 两只锚点投影到同一屏幕点（完全重叠）。
 const ORDER_PROBE_NEAR: f32 = 4.0;
 
-/// 锚点世界偏移（真值：HUD 基类的 (0, 1, 0)——投影**前**加在目标位置上，
-/// 近大远小；锚的是 avatar 根位，不是头骨）。真源锚式 =
-/// 单员对话取 avatar 根位 + 偏移；多员取成员根位均值 + 偏移（配置对
-/// 话时另有目标 fixture 项参与均值，此处单员式）。
+/// Anchor world offset (the HUD base class's (0, 1, 0) — added to the target
+/// position **before** projection, so it scales with distance; the anchor is
+/// the avatar root position, not the skull). The anchor is the avatar root
+/// position + offset for a one-member dialogue; for several members it is
+/// the mean of the members' root positions + offset (a configured dialogue
+/// also averages in a target fixture item; here the one-member form).
 const ANCHOR_OFFSET: Vec3 = Vec3::new(0.0, 1.0, 0.0);
 
-/// 真源 TextMeshPro 排版的坐标倍率（行量法的内部常数；摆位换算要
-/// 与它同一坐标系）。
+/// The coordinate scale of the TextMeshPro layout (an internal constant of
+/// the line law; placement conversions use the same coordinate system).
 pub const TEXT_SCALE: f32 = 2.0;
-/// 行量法的上/下行线比例（真源常数 66/75、9/75 两形）。
+/// The ascent/descent line ratios of the line law (two forms, 66/75 and
+/// 9/75).
 pub const ASCENT_RATIO: f32 = 66.0 / 75.0;
 pub const DESCENT_RATIO: f32 = 9.0 / 75.0;
 
@@ -226,19 +288,21 @@ use crate::ui_font::UI_FONT as FONT_BYTES;
 pub use crate::ui_inputs::atlas::{ascii_or, tmp_zero_metric};
 
 // ---------------------------------------------------------------------------
-// 真源纹源的装载（tweet 主表与问候链三表归 NPC 侧：`crate::npc_tweet`）
+// Balloon skin loading (the tweet master table and the three greeting tables
+// belong to the NPC side: `crate::npc_tweet`)
 // ---------------------------------------------------------------------------
 
-/// 真源纹源两件的装载句柄（bg 九宫源图 + 箭头）。Startup 请求，
-/// `bake_atlas` 在两件都到齐后才落 `BalloonArt`——资源在即是闩，
-/// 装载失败响亮 panic，不回落任何替身（程序化替身已删）。
+/// Load handles for the two balloon skin images (bg nine-slice source +
+/// arrow). Requested at Startup; `bake_atlas` inserts `BalloonArt` only once
+/// both are present — the resource's presence is the latch, a failed load
+/// panics loudly and falls back to no stand-in.
 #[derive(Resource)]
 pub struct SkinHandle {
     bg: Handle<Image>,
     arrow: Handle<Image>,
 }
 
-/// Startup：请求装载气泡两件真源纹源。
+/// Startup: requests the load of the two balloon skin images.
 pub fn load(mut commands: Commands, server: Res<AssetServer>) {
     commands.insert_resource(SkinHandle {
         bg: load_image(&server, moly_assets::ui_atlas_sprite("CommonAtlas", "btn_r30_wh")),
@@ -250,7 +314,7 @@ pub fn load(mut commands: Commands, server: Res<AssetServer>) {
 }
 
 // ---------------------------------------------------------------------------
-// 字形图集与真源纹源（UI atlas 裁件）的装载
+// Loading of the glyph atlas and the balloon skin (UI atlas crops)
 // ---------------------------------------------------------------------------
 
 pub use crate::ui_inputs::atlas::{BalloonArt, GlyphCell};
@@ -492,11 +556,14 @@ const ATLAS_BAKE: crate::hold::HoldSite = crate::hold::HoldSite {
     quiet: &[],
 };
 
-/// Update：主表就绪即烘一次图集（资源在即是闩）。字体在仓内
-/// （include_bytes），光栅走 swash 的 `scale::Render`。烘制次序按码点
-/// 升序——同数据同图。真源纹源两件（bg/箭头裁图）在同一次调用里
-/// 定门：装载失败具名拒绝，未到齐等下一帧——BalloonArt 只在两者
-/// 都在场后落，之后没有任何路径再生成替身图。
+/// Update: bakes the atlas once the master table is ready (the resource's
+/// presence is the latch). The font is in the repository (include_bytes) and
+/// is rasterised by swash's `scale::Render`. Glyphs are baked in ascending
+/// code-point order; the two skin images, same image. The two skin images
+/// (the bg and arrow crops) are gated in the same call: a failed load is
+/// refused with a named message, and while they are incomplete the next frame
+/// waits — BalloonArt is inserted only once both are present, and no path
+/// generates a stand-in image afterwards.
 pub fn bake_atlas(
     mut commands: Commands,
     server: Res<AssetServer>,
@@ -556,8 +623,10 @@ pub fn bake_atlas(
     if !(loaded(&skin.bg) && loaded(&skin.arrow)) {
         return hold.hold(&ATLAS_BAKE, "the balloon skin images are still loading", now);
     }
-    // 尺寸核验：裁件尺寸与九宫/箭头采样常量脱节时，错采样是静默的——
-    // 具名拒绝。两值都读自真源（sprite 账本按打包身份对齐）。
+    // Size check: when a crop's size drifts from the nine-slice/arrow
+    // sampling constants, sampling is wrong silently —
+    // a named refusal. Both values are read from the sprite ledger aligned by
+    // pack identity.
     if art.is_none() {
     let bg_image = images
         .get(&skin.bg)
@@ -1022,8 +1091,8 @@ pub fn hud_event(
     }
 }
 
-/// after-edit 反应驻留：上屏后的保持段（真源 objective 的静态
-/// `_waitTime` 5.0s，乘 1000 入延迟等待）。
+/// After-edit reaction hold: the keep segment after showing (the objective's
+/// static `_waitTime` 5.0s, multiplied by 1000 into the delay wait).
 #[derive(Component)]
 pub struct AfterEditHold {
     /// 剩余驻留（秒）。
@@ -1108,13 +1177,14 @@ fn lottery_after_edit_reactors(
     )
 }
 
-/// Update：摆设编辑保存回执 → 反应者抽签 → 逐名错峰 → after-edit 池选取
-/// → tweet 上屏 → 5.0s 驻留收场（呈现复用 [`spawn_balloon`]，与问候链
-/// 同一管线）。
+/// Update: layout save receipt → reactor draw → staggered release one by one
+/// → after-edit pool pick → tweet shown → 5.0s hold then close (the
+/// presentation reuses [`spawn_balloon`], the same pipeline as the greeting
+/// chain).
 ///
-/// The source pass, per receipt (read in the game's native code):
+/// The product's pass, per receipt:
 /// 1. `LotteryHighPriorityReactionTalk(updateFixtures)` first; a talk there
-///    takes the high-priority path (not ported: the updated-fixture list and
+///    takes the high-priority path (unsupported: the updated-fixture list and
 ///    the condition-type-2 talk lookup are not carried here, named).
 /// 2. Otherwise [`lottery_after_edit_reactors`] on the edited site; if any
 ///    chosen NPC is in the tutorial wait objective (19) the pass ends with no
@@ -1136,11 +1206,14 @@ fn lottery_after_edit_reactors(
 /// made, and the look at the player is not carried. Those need the objective
 /// loop's after-edit route, named as a gap.
 ///
-/// The objective body: **开始即选取**（`RandomPick` 恰一次，律
-/// [`pick_after_edit_tweet`] 逐条对齐）→ 上屏 → 5.0s 驻留 → 收场。驻留在上屏
-/// 之后。池空真源静默收场（不显示也不驻留），这里同语义具名一行。上屏前该
-/// 成员头上的在屏气泡先关（objective 槽位只有一个——HUD 事件消费与本链在
-/// schedule 里链式定序加显式同步点，同帧铺出的 HUD 气泡当帧可见、当帧让位）。
+/// The objective body: **pick at the start** (`RandomPick` exactly once, the
+/// law [`pick_after_edit_tweet`] matched row by row) → show → 5.0s hold →
+/// close. The hold comes after showing. An empty pool closes silently with no
+/// display and no hold; here the same semantics with one named line. Before
+/// showing, the balloon on that member's head is closed first (there is one
+/// objective slot — the HUD event consumer and this chain are ordered in
+/// sequence in the schedule with an explicit sync point, so a HUD balloon
+/// spawned in the same frame is visible and gives way in that frame).
 pub fn after_edit_reaction(
     mut commands: Commands,
     time: Res<Time>,
@@ -1195,8 +1268,9 @@ pub fn after_edit_reaction(
         .filter(|clock| clock.ready())
         .map_or_else(|| time.delta_secs(), |clock| clock.delta());
     let frame = frames.0;
-    // 驻留收段先走（真源延迟等待到点 → ForceUpdateObjective）：到点
-    // 让位；同帧新反应的驻留从满值重起。
+    // The hold's closing segment runs first (the delay wait elapses →
+    // ForceUpdateObjective): on expiry it gives way; a new reaction in the
+    // same frame restarts the hold at the full value.
     for (npc, unit, mut hold) in &mut holds {
         hold.remaining -= dt;
         if hold.remaining <= 0.0 {
@@ -1318,7 +1392,7 @@ pub fn after_edit_reaction(
                 pick_after_edit_tweet(after_edit, &tables.wrt, tables.tweets(), unit_id, &mut draw);
             let Some(row) = picked else {
                 info!(
-                    "[tweet] after-edit unit={} 保存 #{}：可解析池空（角色无池条目=数据缺席），不抽签跳过（真源 objective 直接收场同语义）",
+                    "[tweet] after-edit unit={} save #{}: the resolvable pool is empty (no pool entries for this unit = no data); skipped without a draw (the objective closes with the same semantics)",
                     unit.0, pass.sequence
                 );
                 continue;
@@ -1406,12 +1480,14 @@ pub struct BalloonAnchor {
     /// 探针根位（层序探针直供固定世界位，不走 npc 变换）；普通气泡
     /// 为 None（根位 = npc 的全局变换，每帧现读）。
     probe_root: Option<Vec3>,
-    /// 层序探针气泡（判据脚本按它过滤掉同屏的普通气泡）。
+    /// Layer-order probe balloon (the check script uses it to filter out the
+    /// ordinary balloons on screen).
     probe: bool,
 }
 
-/// DOScale 的作用节点（真源 `_animationRoot`：入场/收场缩放打在它上，
-/// 不打根）。原点取 bg 中心——缩放向气泡中心收。
+/// The node DOScale acts on (`_animationRoot`: the entry/exit scale is
+/// applied to it, not to the root). Its origin is the bg centre, so the
+/// balloon shrinks toward its centre.
 #[derive(Component)]
 // The detached root's reversible editor Visibility must reach its Sprite
 // descendants through this non-rendering intermediate node. Bevy stops
@@ -1447,7 +1523,8 @@ pub enum PartKind {
 }
 
 impl PartKind {
-    /// 部件层 z（局部，乘在 animation 节点之下；真源子序的对应）。
+    /// Part layer z (local, multiplied under the animation node; mirrors the
+    /// animation node's child order).
     fn layer_z(self) -> f32 {
         match self {
             PartKind::Bg => PART_Z_BG,
@@ -1456,7 +1533,8 @@ impl PartKind {
         }
     }
 
-    /// 日志名（ASCII——判据脚本按它解析，非 ASCII 不进日志）。
+    /// Log name (ASCII — the check script parses it, non-ASCII never enters
+    /// the log).
     fn tag(self) -> &'static str {
         match self {
             PartKind::Bg => "bg",
@@ -1502,26 +1580,32 @@ fn starts_with(left: &[char], prefix: &[char]) -> bool {
     left.len() >= prefix.len() && left.iter().zip(prefix.iter()).all(|(a, b)| a == b)
 }
 
-/// 逐字走一遍文本：行、段消费次序、笔点推进全按行量法的次序——
-/// 推进逐式同源（`resolve_glyph_advance` × 段缩放；`cspace` 每字一笔、
-/// 行尾再补一次；`<space=N>` 固定段无消费跟踪）。字形 quad 只对字形表
-/// 命中的字符出。
+/// Walks the text glyph by glyph: the lines, the segment consumption order
+/// and the pen advance all follow the line law's order — the advance uses the
+/// same formula (`resolve_glyph_advance` × segment scale; `cspace` once per
+/// character and again at the line end; a `<space=N>` fixed segment has no
+/// consumption tracking). A glyph quad is emitted only for characters found
+/// in the glyph table.
 ///
-/// Characters the open font lacks follow the source's TMP lookup, not a
-/// guess: the code points TMP synthesizes into the game's static base asset
-/// ([`crate::ui_inputs::atlas::TMP_ZERO_METRIC`]) advance zero and draw nothing. Every other character
-/// is answered in the source by the base asset's fallback chain (the static
-/// on-demand asset, then the dynamic asset that adds glyphs from the game's
-/// own font file), so TMP's missing-glyph replacement (U+25A1, then U+0020)
-/// never fires on these texts; drawing a white square here would be a
-/// replacement the source does not make. Such a character keeps the law's
+/// Characters the open font lacks follow the TMP lookup rather than a guess:
+/// the code points TMP synthesizes into the static base asset
+/// ([`crate::ui_inputs::atlas::TMP_ZERO_METRIC`]) advance zero and draw
+/// nothing. Every other character is answered by the base asset's fallback
+/// chain (the static on-demand asset, then the dynamic asset that adds glyphs
+/// from the game's own font file), so TMP's missing-glyph replacement (U+25A1,
+/// then U+0020) never fires on these texts; drawing a white square here
+/// would be a replacement the product does not make. Such a character keeps the law's
 /// fallback advance and is counted: its image is missing only because the
 /// open font subset does not carry it.
-/// `char_extra`/`word_extra` 是真源字距的增量（`m_characterSpacing` 与
-/// `m_wordSpacing` 的消费式：值 × 0.01 × 字号，正交字体乘 1；空白字
-/// 后另补 word 一笔）——气泡两值皆 0，对话窗体带非 0 值进来。
-/// 返回（每行的字形、笔点与**原文下标**，缺字形数）。原文下标供打字机
-/// 按 `text[i]` 的 i 序揭示（换行占一拍：原文下标把 `\n` 计入）。
+/// `char_extra`/`word_extra` are the letter-spacing increments
+/// (`m_characterSpacing` and `m_wordSpacing`, used as value × 0.01 × font
+/// size, times 1 for the orthogonal font; a word increment is added after
+/// each whitespace character) — both are 0 for balloons, and the dialogue
+/// window passes non-zero values.
+/// Returns (each line's glyphs, pen positions and **raw-text indices**, the
+/// missing-glyph count). The raw-text index drives the typewriter's reveal
+/// in the order of `text[i]` (a line break takes one step; the raw indices
+/// count `\n`).
 pub fn walk_glyphs(
     text: &str,
     art: &BalloonArt,
@@ -1656,7 +1740,8 @@ fn walk_segments(
                     }
                     pen += step;
                     pen += cspace;
-                    // 空白字后补 word 一笔（真源：空白与零宽空格触发）。
+                    // A word increment after each whitespace character
+                    // (whitespace and zero-width space trigger it).
                     if rendered_ch.is_whitespace() || rendered_ch == '\u{200b}' {
                         pen += word_extra;
                     }
@@ -1804,12 +1889,15 @@ pub fn spawn_balloon_on(
         );
     }
 
-    // 盒几何：基线 y（相对盒中心，向上为正）= 锚基 − 行偏移；顶 =
-    // 首行基线 + 首行字号×上行线，底 = 末行基线 − 末行字号×下行线
-    // （66/75、9/75 是真源常数）。行字号取该行摆位字号的最大者，
-    // 空行回退层字号（行量法同款）。
-    // line_offsets 是 2x 单位（律侧累加不折），消费时除 TEXT_SCALE——
-    // 与排版律参考实现的消费式一致（锚基原样、行偏移除 2）。
+    // Box geometry: baseline y (relative to the box centre, up positive) =
+    // anchor base − line offset; top = first-line baseline + first-line font
+    // size × ascent ratio, bottom = last-line baseline − last-line font size
+    // × descent ratio (ratio constants 66/75 and 9/75). A line's font size is
+    // the largest placement size on it; an empty line falls back to the
+    // layer font size (as the line law does).
+    // line_offsets are in 2x units (the law accumulates without folding), so
+    // they are divided by TEXT_SCALE when used — the same use as in the
+    // layout law (anchor base as is, line offsets divided by 2).
     let baseline_up = |i: usize| metrics.anchor_base - metrics.line_offsets[i] / TEXT_SCALE;
     let size_of_line = |i: usize| -> f32 {
         lines
@@ -1825,14 +1913,16 @@ pub fn spawn_balloon_on(
     let box_top = baseline_up(0) + size_of_line(0) * ASCENT_RATIO;
     let box_bottom = baseline_up(line_count - 1) - size_of_line(line_count - 1) * DESCENT_RATIO;
     let text_h = (box_top - box_bottom).max(1.0);
-    // 律的盒宽自带 32px 内边距常数（可见宽最大值 + 32），扣除得文本宽。
+    // The law's box width includes a 32px padding constant (the widest
+    // visible line + 32); subtracting it gives the text width.
     let text_w = (metrics.box_w - 32.0).max(1.0);
-    // 盒尺寸 = Layout preferred-size 的近似式：文本宽 + L40+R40、
-    // 文本高 + 上 32 下 32（真源经 ContentSizeFitter/VLG 链驱动，近似注明）。
+    // Box size = an approximation of the Layout preferred size: text width +
+    // L40 + R40, text height + top 32 + bottom 32 (the product drives it
+    // through the ContentSizeFitter/VLG chain; an approximation is noted).
     let bg_w = text_w + BG_PAD_LEFT + BG_PAD_RIGHT;
     let bg_h = text_h + BG_PAD_TOP + BG_PAD_BOTTOM;
-    // 对齐律（真值）：单行 Center、多行 Left；垂直 Middle 由上下对称
-    // padding（32/32）成立。
+    // Alignment: Center on one line, Left on several; vertical Middle is met
+    // by the symmetric top and bottom padding (32/32).
     let single_line = line_count <= 1;
 
     let root = commands
@@ -1859,8 +1949,8 @@ pub fn spawn_balloon_on(
             RenderLayers::layer(layer),
         ))
         .id();
-    // animation 节点：入场/收场 DOScale 的作用点（真源 _animationRoot）。
-    // 初值 0（DOScale 从 0 起）；tick 每帧覆写。
+    // animation node: the target of the entry/exit DOScale (_animationRoot).
+    // Starts at 0 (DOScale starts from 0); tick overwrites it every frame.
     let anim = commands
         .spawn((
             BalloonAnim,
@@ -1943,10 +2033,12 @@ pub fn spawn_balloon_on(
         }
     }
 
-    // 箭头：行高 0 越界画出——行顶 = bg 下沿 − 行距 2.5，箭头顶 =
-    // 行顶 + 11.5 ⇒ 与 bg 重叠 9px（无缝衔接）。部件层序里箭头最顶
-    // （真源预制体 `animation` 子序：箭头容器在 bg 子树之后，后者画
-    // 在上——箭头盖在与 bg 重叠的 9px 上）。
+    // Arrow: drawn outside its zero-height row — the row top = bg bottom
+    // edge − row spacing 2.5, the arrow top = row top + 11.5 ⇒ it overlaps bg
+    // by 9px (a seamless join). In the part layer order the arrow is on top
+    // (the prefab `animation` child order: the arrow container comes after
+    // the bg subtree, which therefore draws below — the arrow covers the 9px
+    // it shares with bg).
     let arrow_top = -bg_h / 2.0 + (ARROW_POS_Y - ROW_SPACING);
     let arrow = commands
         .spawn((
@@ -2012,10 +2104,12 @@ pub fn spawn_balloon_on(
     root
 }
 
-/// 九宫件清单：4 角 + 4 边 + 中心（`btn_r30_wh` 的 border 38 语义——
-/// 角与边不缩放、中段拉伸；与真源 Image 组件的 Sliced 同式，中段近
-/// 均匀白、拉伸无可见梯度）。返回
-/// (源图矩形, 显示尺寸, 相对 bg 中心位置)。
+/// The nine-slice pieces: 4 corners + 4 edges + centre (the border 38 of
+/// `btn_r30_wh` —
+/// corners and edges are not scaled, the middle stretches; the same formula
+/// as the Image component's Sliced mode, the middle is nearly uniform white
+/// and stretched without a visible gradient). Returns
+/// (source rectangle, display size, position relative to the bg centre).
 fn nine_slice_pieces(bg_w: f32, bg_h: f32) -> Vec<(Rect, Vec2, Vec2)> {
     let b = BG_BORDER;
     let s = BG_SPRITE;
@@ -2230,19 +2324,27 @@ fn apply_bubble_layer(
     }
 }
 
-/// PostUpdate：avatar 根位 + 世界偏移 → 主相机屏幕像素 → 气泡层世界
-/// 坐标（1 单位 = 1 逻辑像素，原点在窗心）。根位每帧现读，气泡跟随。
-/// 每帧三件事（真源 Update 的两条 + canvas 缩放）：
-/// * **相机背面剔除**：目标在相机背面（视线方向点积 ≤ 0）时 alpha=0
-///   （不销毁，位置沿用上一帧）；回到前方恢复。
-/// * **顶边缩放**：屏幕 y>H/2 时整体缩（顶边收 0.5×），y≤H/2 恒 1——
-///   写在根上（与 DOScale 的 animation 节点分层，二者相乘）。
-/// * **canvas 缩放**：见 [`crate::canvas::RootCanvas::scale`]。
-/// 无屏幕边缘钳制（出界照画；投影失败帧沿用上一帧位置）。
+/// PostUpdate: avatar root position + world offset → main camera screen
+/// pixels → balloon layer world coordinates (1 unit = 1 logical pixel, origin
+/// at the window centre). The root position is read every frame and the
+/// balloon follows it.
+/// Three things per frame (the two of the HUD's Update + canvas scaling):
+/// * **Camera back-side culling**: while the target is behind the camera
+///   (view-direction dot product ≤ 0) alpha=0 (not despawned; the position
+///   stays at the previous frame's); restored when it returns to the front.
+/// * **Top-edge scale**: when screen y>H/2 the balloon shrinks as a whole
+///   (the top edge contracts 0.5×), y≤H/2 stays 1 — written on the root
+///   (layered with the DOScale animation node, the two multiply).
+/// * **canvas scaling**: see [`crate::canvas::RootCanvas::scale`].
 ///
-/// world_to_viewport 返回的已经是逻辑像素（bevy 走 logical_viewport_rect），
-/// 不能再除 scale_factor——那是对逻辑像素的二次换算，高 DPI 机器上会把
-/// 气泡整体向窗心压缩（sf=1.5 实测每个气泡向左上偏约 1/1.5）。
+/// No screen-edge clamp (drawn out of bounds; a frame with a failed
+/// projection keeps the previous frame's position).
+///
+/// world_to_viewport already returns logical pixels (bevy uses
+/// logical_viewport_rect), so dividing by scale_factor again would convert
+/// them a second time; on a high-DPI machine that compresses every balloon
+/// toward the window centre (measured at sf=1.5: each balloon shifts up-left
+/// by about 1/1.5).
 pub fn place(
     mut commands: Commands,
     mut balloons: Query<(
@@ -2285,13 +2387,18 @@ pub fn place(
     let sf = window.scale_factor();
     let (width, height) = (window.width(), window.height());
     let canvas = root_canvas.scale(window);
-    // 跨气泡层序（真源 `SetSiblingTweetHUD` 每帧重排的对应）：键 = 相机
-    // transform 到各气泡目标的欧氏距离（avatar 视图根；投影偏移不参与
-    // ——真源排序键与投影锚是两个量），按距离降序 → 远的名次 0；
-    // uGUI 兄弟序后者在上 ⇒ 近的最后画、盖住远的。bevy 2D 透明相位按
-    // 全局 z 升序画（同向）⇒ 名次折进根部 z：近者高（天花板 − 档位 ×
-    // 步进）。真源只在 ≥2 只时重排；单只时名次 0 = 最低档，与不排无差。
-    // 反向臂旋钮把根部 z 全喂 0（= 接线前的恒 0），判据 ① 的负向臂。
+    // Cross-balloon layer order (the reorder `SetSiblingTweetHUD` makes
+    // every frame): key = the Euclidean distance from the camera transform to
+    // each balloon target (the avatar view root; the projection offset does
+    // not take part — the sort key and the projection anchor are two
+    // different values), sorted by descending distance → the far one is rank
+    // 0; uGUI draws later siblings on top ⇒ the near one draws last and
+    // covers the far one. bevy's 2D transparent phase draws in ascending
+    // global z (same direction) ⇒ the rank folds into the root z: the nearer
+    // is higher (ceiling − rank × stride). The HUD only reorders with ≥2
+    // balloons; with one, rank 0 = the lowest band, the same as no reorder.
+    // The reverse switch feeds 0 to every root z (the constant 0 before it
+    // was wired), the negative arm of check ①.
     let no_layer = std::env::var("MOLY_BALLOON_ORDER_NO_LAYER").is_ok();
     let order_log = matches!(env_secs_opt("MOLY_BALLOON_ORDER_SECS"), Some(v) if v > 0.0);
     let mut ranked: Vec<(Entity, f32)> = Vec::new();
@@ -2315,19 +2422,23 @@ pub fn place(
         }
     };
     for (entity, mut anchor, mut transform, elapsed, placed, layer) in &mut balloons {
-        // 锚点（真值式）：avatar 根位 + 世界偏移 (0,1,0)——偏移在投影前加，
-        // 近大远小；骨锚定的旧式已按真源换掉（真源取的是 avatar 根位）。
+        // Anchor: avatar root position + world offset (0,1,0) — the offset
+        // is added before projection, so it scales with distance.
         let Some(root) = balloon_root(&anchor, &transforms) else {
             continue; // 变换还没传播（根位未就绪 = 恒等；探针根位直供）
         };
         let world = root + ANCHOR_OFFSET;
-        // 相机背面（IsNeedShow 门之一）：alpha=0 不销毁。真源只此一门
-        // （视线点积）；近平面**不剔除**——Unity 的 WorldToScreenPoint 对
-        // 近平面前方的点照常出坐标（贴脸的目标会把气泡投影到画面外/
-        // 极大，无屏幕钳制）。据此不用 `world_to_viewport`：它对
-        // NDC z>1（近平面之前）返 `PastNearPlane` 错，会把真源会画的
-        // 气泡静默丢掉（实测：跟随相机经过身侧的成员，头离相机 0.34m
-        // < near 1.0，15/45 只气泡从未上屏）。改自折 NDC→视口像素。
+        // Camera back side (one IsNeedShow gate): alpha=0, not despawned. This
+        // is the only gate (the view-direction dot product); the near plane
+        // is **not** culled — Unity's WorldToScreenPoint still yields
+        // coordinates for points in front of the near plane (a target close to
+        // the face projects the balloon off screen or very large, with no
+        // screen clamp). So `world_to_viewport` is not used: it returns the
+        // `PastNearPlane` error for NDC z>1 (in front of the near plane) and
+        // would silently drop balloons that are drawn (measured: following
+        // the camera past a member at the side, the head 0.34m from the camera
+        // < near 1.0, made 15 of 45 balloons never appear). Instead NDC is
+        // folded to viewport pixels here.
         let view_z = (world - eye).dot(*fwd);
         let on_other_site = actors.get(anchor.npc).is_ok_and(|(actions, hidden)|
             hidden || site.as_deref().is_none_or(|site| site.site_type != actions.site_type));
@@ -2368,9 +2479,12 @@ pub fn place(
             (1.0 - ndc.y) / 2.0 * target.y,
         );
         let depth = view_z;
-        // 根位 = 锚点屏幕位（盒中心过锚：世界偏移 (0,1,0) 已在投影前加，
-        // 近大远小，把气泡中心钉在锚上方）。z = 跨气泡层序的名次档
-        // （近者高、远者低；见函数头的真源出处）。
+        // Root position = the anchor's screen position (the box centre lies
+        // on the anchor: the world offset (0,1,0) is added before projection
+        // and scales with distance, pinning the balloon centre above the
+        // anchor). z = the cross-balloon rank band
+        // (the nearer is higher, the farther lower; see the reorder described
+        // in the function's header).
         let base = base_of(entity);
         transform.translation = Vec3::new(px.x - width / 2.0, height / 2.0 - px.y, base);
         // 顶边缩放（真值式）：y>H/2 时 scale = clamp((H−y)/(H/2))×0.5+0.5。
@@ -2379,10 +2493,11 @@ pub fn place(
         } else {
             1.0
         };
-        // 根上的总缩放 = 顶边缩放 × canvas 缩放（真源里前者是 HUD 自己的
-        // UpdateScale、后者是根 canvas 的 ScaleWithScreenSize，两层相乘；
-        // 锚点屏幕位不参与——真源的 localPosition 已除过 canvas 缩放，
-        // 乘回去净值为屏幕像素）。
+        // The root's total scale = top-edge scale × canvas scale (the first
+        // is the HUD's own UpdateScale, the second the root canvas's
+        // ScaleWithScreenSize, the two multiply; the anchor's screen position
+        // takes no part — the localPosition is already divided by the canvas
+        // scale, and multiplying it back nets screen pixels).
         // Same authored canvas/HUD scale in browser and native rendering.
         crate::canvas::set_scale(&mut transform, top_scale * canvas);
         if placed.is_none() {
@@ -2433,11 +2548,16 @@ pub fn place(
                 height
             );
         }
-        // 层序探针（MOLY_BALLOON_ORDER_SECS 才开）：稳态闩一次，逐部件报
-        // 最终排序键。键与渲染器同式：根 z + 根缩放 × animation 节点缩放
-        // × 部件层 z（animation 节点无 z 平移）——入场 DOScale=1 的保持段
-        // 恰是传播值；t=0 缩放为 0 会把部件层差缩没，无从比，故闩在入场
-        // 完成后。行全 ASCII（判据脚本按它解析；文本内容照例不进日志）。
+        // Layer-order probe (on only with MOLY_BALLOON_ORDER_SECS): latched
+        // once in the steady state, reporting each part's final sort key. The
+        // key uses the renderer's formula: root z + root scale × animation
+        // node scale × part layer z (the animation node has no z
+        // translation) — the keep segment with the entry DOScale=1 is exactly
+        // the propagated value; at t=0 the scale is 0 and shrinks the part
+        // layer differences away, so there is nothing to compare, and the
+        // latch waits until the entry is
+        // complete. The lines are all ASCII (the check script parses them;
+        // text content does not enter the log).
         if order_log && elapsed.entered && !elapsed.exiting && layer.is_none() {
             commands.entity(entity).insert(LayerLogged);
             let k = top_scale * canvas;
@@ -2554,14 +2674,19 @@ fn env_secs_opt(name: &str) -> Option<f32> {
 #[derive(Component)]
 pub struct OrderProbe;
 
-/// Update：层序探针（`MOLY_BALLOON_ORDER_SECS` 秒 > 0 启用）：就绪后造
-/// 一对屏幕上完全重叠的探针气泡——近根取相机正前方 [`ORDER_PROBE_NEAR`]
-/// 米（视线轴上），远锚取**过近锚点的同一视线射线**两倍距离处（两只
-/// 锚点投影到同一屏幕点 = 用户目视报障的完全重叠场景），真实 tweet 行
-/// 上屏（主表前两行——选取律不进这条链；字形必有，文本不进日志）。
-/// 到秒数 `AppExit::Success` 退出（无头验收）；窗口耗尽仍未就绪（主表/
-/// 图集/相机未齐）同样退出，判据侧从日志缺行现形（fail-closed：探针
-/// 没造出来就一个键都没有）。
+/// Update: the layer-order probe (enabled when `MOLY_BALLOON_ORDER_SECS` is
+/// greater than 0 seconds): once ready it spawns a pair of probe balloons
+/// that overlap exactly on screen — the near root is [`ORDER_PROBE_NEAR`] metres straight
+/// > ahead of the camera (on the view axis), the far anchor is twice that
+/// > distance along **the same view ray through the near anchor** (both
+/// > anchors project to the same screen point, the fully overlapping case
+/// > seen in a user report), showing real tweet rows (the first two of the
+/// > master table — the selection does not enter this chain; glyphs always
+/// > exist and the text does not enter the log). On reaching the seconds it
+/// > exits with `AppExit::Success` (headless acceptance); when the window runs
+/// > out while still not ready (master table / atlas / camera not all ready)
+/// > it also exits, and the check side sees it as missing log lines
+/// > (fail-closed: with no probe there is no key at all).
 pub fn order_smoke(
     mut commands: Commands,
     tables: Option<Res<crate::npc_tweet::TweetTables>>,
@@ -2578,8 +2703,9 @@ pub fn order_smoke(
         return;
     }
     if time.elapsed_secs() >= secs {
-        // 已造过 → 窗口到点收工；没造过 → 就绪面缺席，同样收工（缺行
-        // 就是判据侧的响亮失败）。
+        // Spawned before → the window is reached, so stop; never spawned →
+        // the readiness inputs were absent, so stop the same way (a missing
+        // line is the loud failure on the check side).
         info!(
             "[tweet-order] probe window {:.1}s reached, exiting (spawned={})",
             secs, *spawned as u8

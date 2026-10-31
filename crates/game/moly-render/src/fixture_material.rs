@@ -1,122 +1,169 @@
-//! 家具 Basic / Rug / Fence 材质：`Mysekai/Fixture/Basic` 的 Base 程序 Bevy Material。
+//! Furniture Basic / Rug / Fence materials: the Bevy material of the
+//! `Mysekai/Fixture/Basic` base program.
 //!
-//! 材质值来自 glb 场景展开实体上的 `GltfMaterialExtras`（提取侧把 Unity
-//! 属性原样写进 glTF 材质 extras：`floats` 一张浮点表、顶层
-//! `fixtureShaderUsage`、`shader` 名）与 `GltfMaterialName`；主贴图句柄取
-//! glb 材质本身的 `baseColorTexture`（提取侧把 `_MainTex` 写进它）。
-//! 变体由 `FixtureMaterialKey` 编码进管线特化；WGSL 在
-//! `shaders/fixture_material.wesl`。
+//! Material values come from `GltfMaterialExtras` on the entities expanded
+//! from a glb scene (the extractor writes the Unity properties into the glTF
+//! material extras: `floats`, a table of floats; the top-level
+//! `fixtureShaderUsage`; the `shader` name) and from `GltfMaterialName`; the
+//! main texture handle is the glb material's own `baseColorTexture` (the
+//! extractor writes `_MainTex` into it). The variant is encoded into the
+//! pipeline specialization by `FixtureMaterialKey`; the WGSL is in
+//! `shaders/fixture_material.wesl`.
 //!
-//! 拒绝语义：族门（shader 名闭集 + 具名拒绝 URP/Lit）不过、必需浮点
-//! 缺失、(usage, blend) 二维选择越界或与混合模式矛盾、glb 材质没有
-//! 主贴图——都按材质名具名拒绝，该实体保留原材质，不用默认值近似。
+//! Refusal semantics: a failed family gate (closed set of shader names plus
+//! the named URP/Lit refusal), a missing required float, an out-of-range
+//! (usage, blend) table selection or one contradicting the blend mode, a glb
+//! material without a main texture — each is refused by material name, and
+//! the entity keeps its original material rather than a default-based
+//! approximation.
 //! Exception for the main texture: when the source slot is empty (the
 //! extras carry no `_MainTex` key), the engine binds the shader's declared
 //! default, and a `white` default is bound as a 1x1 white image. A key with a
 //! null value is a texture bound in a dependency package that the extractor
-//! did not export; that stays a named refusal.
+//! did not write; that stays a named refusal.
 //!
-//! JP client crystal variant (`_ENABLE_CRYSTAL_FIXTURE`, with the JP
+//! Crystal variant (`_ENABLE_CRYSTAL_FIXTURE`, together with the shader's
 //! normal-map block): see `FIXTURE_CRYSTAL` / `FIXTURE_NORMAL_MAP` in the
 //! WGSL. Its second colour target (the colour-picker emission, the
 //! normal-driven emission and the centre damp) is drawn by the emission pass
 //! from the same [`CrystalParams`]; a blocked crystal draws no second target.
 //!
-//! JP `_ENABLE_MULTI_UV_SCROLL` variant: the base colour is not `_MainTex`
+//! `_ENABLE_MULTI_UV_SCROLL` variant: the base colour is not `_MainTex`
 //! but up to three `_LayerTex*` layers. `_LayerTex1` is always on;
-//! `_UseLayerTex2/3` gate the other two, and a gated-off layer's slot is
+//! `_UseLayerTex2/3` gate the others, and a gated-off layer's slot is
 //! never read, so it binds the engine fallback. The ST comes from the
 //! material's own `textureScaleOffset`.
-//! 闭集内但非 Basic 的族（ShadowMesh / Road / Object 等）是本单范围外：
-//! 具名记数保留原材质，不是拒绝。两个例外，都按「源里像素贡献恒 0」
-//! 隐藏而不是保留原材质：
-//! - 渲染状态「写零」的 pass（见 [`StencilOnlyPass`]）：保留原材质会把
-//!   一个源里不可见的网格画成白板，按 Unity 渲染状态隐藏。
-//! - ShadowMesh 族（见 [`ShadowMeshGated`]）：源的片元以材质浮点
-//!   `_Show` 为门，低于 0.5 全部 discard；live 数据里该族全部材质的
-//!   `_Show` 恒 0.0（提取侧对创作浮点逐字拷贝），且 1,429 条
-//!   AnimationClip 的浮点曲线里没有一条指向它——没有运行时改写者。
+//! Families inside the closed set but not Basic (ShadowMesh / Road / Object
+//! and so on) are out of scope: they are counted by name and keep their
+//! original material; that is not a refusal. Their pixel contribution is
+//! always zero, so the exceptions are hidden rather than kept:
+//! - a pass whose render state writes nothing (see [`StencilOnlyPass`]):
+//!   this pass makes the mesh invisible in the game, and hiding it per the
+//!   Unity render state avoids drawing it as a white surface.
+//! - the ShadowMesh family (see [`ShadowMeshGated`]): its fragment gates on
+//!   the material float `_Show` and discards everything below 0.5; `_Show`
+//!   is 0.0 on every material of that family in live data (the extractor
+//!   copies the floats as authored), and none of the 1,429
+//!   AnimationClip float curves targets it, so nothing rewrites it at run
+//!   time.
 //!
-//! 窗外观支路（`fixtureShaderUsage` = 1 → 二维表落点 26/27）：源以模板
-//! 缓冲把它裁进窗洞（窗包自己的写零面先在窗洞上写 ref4，外观网按
-//! Equal ref4 只在洞里画）。本管线没有模板缓冲，等价门在片元里做：
-//! 写零面是平面凸四边形，顶点里把四角与本顶点投到 NDC，片元做「点在
-//! 凸四边形内」判定，窗外 discard。四角在换装时从同一 glb 的写零面
-//! 网格读出（两个节点的局部变换均为恒等，四角即原始顶点位置），烘进
-//! 材质 uniform 尾部四个槽。
+//! Window-outside arm (`fixtureShaderUsage` = 1 → table selection 26/27):
+//! the game clips it to the window opening with the stencil buffer (the
+//! window package's own zero-write surface writes ref4 over the opening
+//! first, and the appearance mesh draws only inside it at Equal ref4). This
+//! pipeline has no stencil buffer, so the equivalent gate runs in the
+//! fragment: the zero-write surface is a planar convex quad, the vertex
+//! stage projects the four corners and the current vertex to NDC, the
+//! fragment tests "point inside the convex quad" and discards outside the
+//! window. At swap time the four corners are read from the zero-write
+//! surface mesh of the same glb (both nodes have identity local
+//! transforms, so the corners are the original vertex positions) and baked
+//! into the last four slots of the material uniform.
 //!
-//! 变体开关盘：glb extras 顶层 `validKeywords` 列是源运行态 shader 变体
-//! 开关的唯一来源（源在材质构建时按整型属性重派生 keyword；`invalidKeywords`
-//! 列是「曾经有效现禁用」的编辑器残留，运行态不认——工具生成的
-//! `_SHOW_*` 预览门族全在那侧，零消费）。本管线的处置分三档：
+//! Variant switch panel: the top-level `validKeywords` list of the glb
+//! extras is the only source of the game's runtime shader variant switches
+//! (the game re-derives the keywords from integer properties when the
+//! material is built; the `invalidKeywords` list is an editor leftover of
+//! keywords once valid and now disabled, and is not read at run time — the
+//! tool-generated `_SHOW_*` preview gates all live there and are never
+//! consumed). This pipeline handles them in three groups:
 //! - `_USE_ALPHA_CLIP` / `_DISABLE_DITHER` / `_ENABLE_MODULE_FRESNEL` /
-//!   `_ENABLE_MODULE_REFLECTION`：已实现的四个编译期变体（alpha 丢弃 /
-//!   Bayer 抖动块 / 菲涅尔加色 / 反射加色），开关取 keyword 在场与否
-//!   （反射那条另有一个数据面前提，见下）；
-//! - `_RECEIVE_SHADOWS_OFF`：源 Basic 程序全部组合的编译产物里这个
-//!   开关逐字节无差——该程序任何变体都不采样主光阴影贴图，开关是
-//!   引擎侧「不接收阴影」标记，程序级零效果；本管线构造同形（无阴影
-//!   接收 pass），只入账不动画面；
-//! - 其余 keyword：逐材质具名入账（换装日志 + 计数），不静默吞，
-//!   见挂账清单。
+//!   `_ENABLE_MODULE_REFLECTION`: the four implemented compile-time variants
+//!   (alpha discard / Bayer dither block / fresnel additive colour /
+//!   reflection additive colour), each toggled by the presence of its
+//!   keyword (the reflection one has an additional data-side condition, see
+//!   below);
+//! - `_RECEIVE_SHADOWS_OFF`: byte-for-byte identical output in every
+//!   compiled combination of the Basic program — no variant of that program
+//!   samples the main-light shadow map, so the switch is the engine's "does
+//!   not receive shadows" marker with no program-level effect; this pipeline
+//!   has the same shape (no shadow-receiving pass) and only accounts for the
+//!   switch without changing the image;
+//! - every other keyword: accounted per material by name (swap log + count),
+//!   never swallowed silently, see the accounting list.
 //!
-//! 质感分支有两条并列的加色支路，各自一个 keyword，可单开也可同开。
-//! 逐句律与逐位比对在 `moly_law::fixture::fresnel`。
+//! The texture branch has parallel additive arms, each with its own keyword,
+//! usable alone or together. The rules and the bitwise comparison are in
+//! `moly_law::fixture::fresnel`.
 //!
-//! fresnel（`_ENABLE_MODULE_FRESNEL`）：开关打开的变体在宝藏阴影之后、
-//! 雾之前往 rgb 上加色 exp2(log2(clamp(1−N·V, 0, 1)) × `_FresnelPower`)
-//! × `_FresnelColor.rgb` × `_FresnelColor.a`——先钳再取对数（N·V 略超 1
-//! 时负数进 log2 是 NaN），alpha 是因子不是摆设；视线方向分透视（相机位
-//! 减片元位归一化，无 epsilon 钳制）与正交（视图矩阵第三行，
-//! unity_OrthoParams.w 非零时）两支。⚠ live 全量带它的 3 个材质全是载具
-//! （bike/car/flyingcar 的 *_ref），**摆放表里一个都没有**——修完的当前
-//! 画面上看不见它的效果，这是为载具摆入准备的。
+//! fresnel (`_ENABLE_MODULE_FRESNEL`): the variant with the switch on adds
+//! to rgb after the treasure shadow and before fog
+//! exp2(log2(clamp(1−N·V, 0, 1)) × `_FresnelPower`)
+//! × `_FresnelColor.rgb` × `_FresnelColor.a` — clamp first, then take the
+//! logarithm (when N·V slightly exceeds 1, a negative number reaches log2
+//! and yields NaN), and alpha is a factor, not decoration. Perspective (camera
+//! position minus fragment position, normalized, with no epsilon clamp) and
+//! orthographic (the third row of the
+//! view matrix, when unity_OrthoParams.w is non-zero). ⚠ All 3 live materials
+//! that carry it belong to vehicles (`*_ref` of bike/car/flyingcar) and
+//! **none is in the placement table** — its effect is not visible in the
+//! current scene; it is ready for vehicle placement.
 //!
-//! reflection（`_ENABLE_MODULE_REFLECTION`）：紧跟在 fresnel 支之后、雾
-//! 之前加 min(pow(1−N·V, `_ReflectionFresnelPower`), 1) × 立方图采样 ×
-//! `_ReflectionIntensity`。三个承重点：这一支的 log2 **入参不钳**（与
-//! fresnel 支相反），只有上钳 min(·, 1)；两支在源里**共用同一个 1−N·V**
-//! （同开的变体里那个减法只算一次，fresnel 吃钳后副本、反射吃未钳原件）；
-//! 立方图那一项**折叠成了常数**——材质没给那个槽位绑对象，引擎按纹理维度
-//! 顶上自己的内建默认立方图，而那张是六面同色的 ⇒ 采样值与方向、mip、
-//! mip 偏置全都无关 ⇒ 源里那个反射向量在本管线连算都不用算。
-//! ⚠ **折叠只对槽位为空的材质成立**：live 全量 19 个材质开着这条分支，
-//! 16 个（egg 系，摆放表里全在）槽位是空引用 ⇒ 走折叠形；3 个（载具的
-//! *_ref）绑了一张真立方图 ⇒ 折叠对它们是错的，**分支不开、按名字入账**
-//! （换装收尾的具名告警一行），需要真采样那条路，
-//! 未实现；它们当前也全未摆放。判据是提取侧写进 extras 纹理引用表的
-//! `_ReflectionCubeMap` **键在不在**，与真源侧 PPtr 空/非空逐条一致。
+//! reflection (`_ENABLE_MODULE_REFLECTION`): right after the fresnel arm and
+//! before fog, adds min(pow(1−N·V, `_ReflectionFresnelPower`), 1) × cube-map
+//! sample × `_ReflectionIntensity`. Three points must be kept: this arm's
+//! log2 **input is not clamped** (unlike the fresnel arm), only the upper
+//! clamp min(·, 1) applies; all arms **share one 1−N·V** (in a variant
+//! the clamped copy and reflection the unclamped original); the
+//! cube-map term **folds to a constant** — the material binds no object to
+//! that slot, so the engine substitutes its built-in default cube map, and
+//! that map has the same colour on all six faces ⇒ the sampled value does not
+//! depend on direction, mip or mip bias ⇒ the reflection vector is never
+//! computed in this pipeline.
+//! ⚠ **The fold holds only for materials whose slot is empty**: 19 live
+//! materials have this branch on, 16 of them (the egg family, all in the
+//! placement table) have an empty reference in the slot ⇒ folded form; the
+//! 3 (`*_ref` of the vehicles) bind a real cube map ⇒ the fold is wrong for
+//! them, so **the branch stays off and they are accounted by name** (one
+//! named warning line at the end of the swap), and the path with a real
+//! sample is not implemented; none of them is placed either. The check is
+//! whether the `_ReflectionCubeMap` **key is present** in the texture
+//! reference table the extractor writes into the extras, which agrees
+//! entry by entry with the empty/non-empty object reference in the game.
 //!
-//! 挂账（源 Base 程序里有、本管线没有的消费方）：
+//! Unsupported list (consumers the Basic program has and this pipeline does
+//! not):
 //!
-//! 裁定（数据面有、程序面不接，与为什么）：
-//! - 顶点色混合不接线：源 Basic 族的编译产物里片元/顶点程序都没有
-//!   COLOR0 的消费点。glb 里的顶点 COLOR_0 属性是提取侧对全族统一的
-//!   数据面，「数据里有活值」不等于「程序消费它」。阳性对照在另外
-//!   两族：FieldObject 族 14 个浮点属性里 12 个进 COLOR0 语义、Tree
-//!   族 59 个里 56 个进——那两族程序真消费顶点色，Basic 不消费；给
-//!   Basic 接上会把一个源里没有的乘法加进片元。
-//! - `_NormalShadingIntensity` / `_ShadingNormalBlend` / 裸 `_Edge*` /
-//!   `_ReceiveShadow`：在源 Base 程序的编译产物里被翻译器加上
-//!   「声明了但未被引用」的重名前缀（死 uniform 标记，随产物一起
-//!   下发）。按死键具名入账，不进管线。
+//! Decisions (present in the data, not wired into the program, and why):
+//! - Vertex colour blending is not wired: neither the fragment nor the vertex
+//!   program of the Basic family consumes COLOR0. The vertex COLOR_0
+//!   attribute in the glb is a data surface the extractor provides uniformly
+//!   for the whole family; "a live value exists in the data" does not mean
+//!   "the program consumes it". Positive controls are other families, given
+//!   as (attributes reaching COLOR0, float attributes in total): FieldObject
+//!   12 of 14 and Tree 56 of 59
+//!   reach COLOR0 semantics — those programs sit on vertex colour,
+//!   Basic does not; wiring it into Basic would add a multiplication to the
+//!   fragment that the game does not perform.
+//! - `_NormalShadingIntensity` / `_ShadingNormalBlend` / bare `_Edge*` /
+//!   `_ReceiveShadow`: in the compiled Basic program the translator gives
+//!   them a "declared but unreferenced" renamed prefix (a dead-uniform
+//!   marker, shipped with the program). They are accounted by dead key and
+//!   never enter the pipeline.
 //!
-//! 第二颜色目标（源 Base 程序的 SV_Target1 = 自发射遮罩 × 现象自发光
-//! 开关链）由自建的 emission pass 承接（[`crate::fixture_emission`]）：
-//! 类型 1 时门 = bright==1、类型 2 时门 = dark==1、其余 0；两个目标的
-//! alpha 都 = 主贴图 alpha。三个材质 int（`_BrightPhenomenaEmission` /
-//! `_DarkPhenomenaEmission` / `_PhenomenaEmissionOverrideMode`）与
-//! `_EmissionMaskTex` 贴图在换装时读出：门 int 进 [`FixtureEmission`]
-//! 组件（着色器消费），遮罩均值进 [`EmissionAccount`]（初始材质账目）。
-//! 初始 override 为 0；机关动画事件可在实际实例上强制开/关，动态值由
-//! emission pass 的独立实例属性承接，不用初始材质表推断没有写者。遮罩缺失而
-//! 门 int 非零的材质按零贡献处理并具名告警（fail-closed：不静默取空白
-//! 遮罩）。
+//! The second colour target (SV_Target1 of the Basic program = emission mask
+//! × phenomena emission switch chain) is provided by a dedicated emission
+//! pass ([`crate::fixture_emission`]): for type 1 the gate is bright==1, for
+//! type 2 the gate is dark==1, otherwise 0; the alpha of both targets equals
+//! the main texture alpha. Three material ints (`_BrightPhenomenaEmission` /
+//! `_DarkPhenomenaEmission` / `_PhenomenaEmissionOverrideMode`) and the
+//! `_EmissionMaskTex` texture are read at swap time: the gate ints enter
+//! the [`FixtureEmission`] component (consumed by the shader), the mask mean
+//! into [`EmissionAccount`] (the initial material account). The initial
+//! override is 0; gimmick animation events can force it on or off on an
+//! actual instance, and that dynamic value goes through the emission pass's
+//! per-instance attribute, not inferred from the initial material table,
+//! which has no writer. A material with a missing mask texture and non-zero
+//! gate ints is treated as zero contribution with a named warning
+//! (fail-closed: never a silently sampled blank mask).
 //!
-//! 挂账（源 Base 程序里有、本管线没有的消费方）：
-//! - 墙布局 ShadowCaster 运行时关闭：源在墙布局时逐材质关 ShadowCaster
-//!   pass；本单没有影子 pass（prepass 与阴影接收全关，与站点族同形），
-//!   标记面是 [`WallLayoutShadowCasterOff`]，见 `fixture.rs`。
+//! Unsupported list (consumers the Basic program has and this pipeline does
+//! not):
+//! - Wall layout turns ShadowCaster off at run time: in the game each
+//!   material's ShadowCaster pass is not drawn while a wall layout is active;
+//!   this pipeline has no shadow pass (prepass and shadow receiving are off,
+//!   the same shape as the site family), and the marker component is
+//!   `WallLayoutShadowCasterOff` (defined in `fixture.rs`).
 
 #[path = "fixture_surfaces.rs"]
 pub mod surfaces;
@@ -146,32 +193,36 @@ use crate::render_inputs::{FixtureScenesReady, FixtureVisualRoot, FixtureVisualS
 use crate::render_inputs::FixtureVisualReady;
 use crate::fixture_emission::FixtureEmission;
 
-/// 本单交付的族键：源 shader 名，与律里族闭集的「Basic」同名。
-/// 闭集内其他名字是范围外（换装时具名保留）。
+/// Family key handled here: the shader name, the "Basic" entry of the closed
+/// family set. Other names in the closed set are out of scope (counted by name
+/// and kept at swap time).
 const BASIC_SHADER: &str = "Mysekai/Fixture/Basic";
 
-/// ShadowMesh 族的源 shader 名：整族按材质浮点 `_Show` 门恒 0 像素，
-/// 见 [`ShadowMeshGated`]。
+/// Shader name of the ShadowMesh family: the whole family always contributes 0
+/// pixels because of the material float `_Show` gate, see [`ShadowMeshGated`].
 const SHADOWMESH_SHADER: &str = "Mysekai/Fixture/ShadowMesh";
 const RUG_SHADER: &str = "Mysekai/Fixture/Rug";
 const FENCE_SHADER: &str = "Mysekai/Fixture/Fence";
 
-/// 材质 uniform 的槽数与字节数。槽序是本文件与
-/// `shaders/fixture_material.wesl` 里 `FixtureParams` 结构体之间的契约，
-/// 两边同改。
+/// Slot count and byte size of the material uniform. The slot order is a
+/// contract between this file and the `FixtureParams` struct in
+/// `shaders/fixture_material.wesl`; change both together.
 pub const PARAMS_SLOTS: usize = 12;
 pub const PARAMS_BYTES: usize = PARAMS_SLOTS * 16;
 
-/// 前七个槽是「每条 Unity 属性一个 vec4 槽」；变体不消费的槽（关着的
-/// dither 门）照写。尾部四个槽是窗外观门的四角（不是 Unity 属性，
-/// 挂在同一块 uniform 尾部，见模块注释「窗外观支路」）。
+/// The first seven slots hold one vec4 per Unity property; a slot the variant
+/// does not consume (a dither gate that is off) is still written. The last
+/// four slots are the window-outside gate corners (not Unity properties, but
+/// appended to the tail of the same uniform, see the module note on the
+/// window-outside arm).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FixtureParams {
-    /// `(_MainTexOffsetX, _MainTexOffsetY)`：顶点里加进 uv0。
+    /// `(_MainTexOffsetX, _MainTexOffsetY)`: added to uv0 in the vertex stage.
     pub main_tex_offset: [f32; 2],
     /// Source UV scroll velocity; packed in the unused zw of the UV slot.
     pub uv_scroll: [f32; 2],
-    /// `_DitherAlpha`。抖动变体关着时源不消费它；照写数据值。
+    /// `_DitherAlpha`. The game does not consume it when the dither variant is
+    /// off; the data value is still written.
     pub dither_alpha: f32,
     pub use_phenomena_lighting: f32,
     pub override_shading_parameter: f32,
@@ -181,14 +232,16 @@ pub struct FixtureParams {
     /// Fixture meshes retain source UVs; exported PNG rows begin at the top.
     /// This conversion applies to every material, including emissive masks.
     pub uv_v_flip: f32,
-    /// 窗外观门四角：写零面网格顶点在本网格局部系里的位置，已排成
-    /// 平面凸环序。非窗材质全零（消费代码由 `FIXTURE_WINDOW_CLIP`
-    /// 变体整块编译期移除，四角不会被读）。
+    /// Window-outside gate corners: the zero-write surface mesh vertices
+    /// expressed in this mesh's local frame, already ordered as a planar
+    /// convex ring. All zero for non-window materials (the consuming code is
+    /// removed at compile time by the `FIXTURE_WINDOW_CLIP` variant, so the
+    /// corners are never read).
     pub clip_corners: [[f32; 3]; 4],
 }
 
 impl FixtureParams {
-    /// 按上面的槽序摊平成字节。
+    /// Flattens the values into bytes in the slot order above.
     pub fn bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(PARAMS_BYTES);
         let mut push = |slot: [f32; 4]| {
@@ -212,54 +265,63 @@ impl FixtureParams {
     }
 }
 
-/// 管线特化键：族内变体。作为 `AsBindGroup::Data` 进管线缓存。
+/// Pipeline specialization key: the variant within the family. It enters the
+/// pipeline cache as `AsBindGroup::Data`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FixtureMaterialKey {
     pub fence: bool,
     /// None = Basic; Some(blended) = Rug, with source queue 2007/2008.
     pub rug: Option<bool>,
     pub render_queue: u32,
-    /// `_USE_ALPHA_CLIP`：被采 alpha − 0.5 < 0 丢弃（阈值编译期常量）。
+    /// `_USE_ALPHA_CLIP`: a sampled alpha with alpha − 0.5 < 0 is discarded
+    /// (the threshold is a compile-time constant).
     pub alpha_clip: bool,
-    /// `_DISABLE_DITHER` 的反：Bayer 抖动块在着色器里编译期开/关。
-    /// live 数据里全体材质关抖动（`_DisableDither` = 1），块保留给
-    /// 未关的变体。
+    /// The inverse of `_DISABLE_DITHER`: the Bayer dither block is switched on
+    /// or off at compile time in the shader. In live data every material has
+    /// dithering off (`_DisableDither` = 1), and the block is kept for variants
+    /// that do not disable it.
     pub dither: bool,
-    /// 窗外观支路（usage=1 → 落点 26/27）：屏空间四边形门整块编入
-    /// （`FIXTURE_WINDOW_CLIP`）。
+    /// Window-outside arm (usage=1 → table selection 26/27): the screen-space
+    /// quad gate compiled in (`FIXTURE_WINDOW_CLIP`).
     pub window_clip: bool,
-    /// `_ENABLE_MODULE_FRESNEL`：菲涅尔加色块（`FIXTURE_MODULE_FRESNEL`，
-    /// 宝藏阴影后、雾前）。live 带它的 3 个材质全是载具、均未摆放。
+    /// `_ENABLE_MODULE_FRESNEL`: the fresnel additive-colour block
+    /// (`FIXTURE_MODULE_FRESNEL`, after the treasure shadow and before fog). All
+    /// 3 live materials carrying it are vehicles, none placed.
     pub fresnel: bool,
-    /// `_ENABLE_MODULE_REFLECTION`：反射加色块
-    /// （`FIXTURE_MODULE_REFLECTION`，紧跟在菲涅尔支之后、雾之前）。
-    /// 只对**立方图槽位为空**的材质开——那时源那次立方图采样折叠成常数
-    /// （见 [`moly_law::fixture::fresnel::UNBOUND_CUBE_SAMPLE`]）。绑了真
-    /// 立方图的材质（载具那 3 个）走不了这条：分支不开，换装收尾按名字
-    /// 具名告警。
+    /// `_ENABLE_MODULE_REFLECTION`: the reflection additive-colour block
+    /// (`FIXTURE_MODULE_REFLECTION`, right after the fresnel arm and before
+    /// fog). On only for materials whose **cube-map slot is empty** — there the
+    /// cube-map sample folds to a constant (see
+    /// [`moly_law::fixture::fresnel::UNBOUND_CUBE_SAMPLE`]). Materials that bind
+    /// a real cube map (the 3 vehicles) cannot take this path: the branch stays
+    /// off and the swap end warns by name.
     pub reflection: bool,
 }
 
-/// 家具 Basic 族的材质资产。
+/// The material asset of the furniture Basic family.
 #[derive(Debug, Clone, TypePath, Asset)]
 pub struct FixtureMaterial {
     pub key: FixtureMaterialKey,
     pub params: FixtureParams,
     pub main_tex: Handle<Image>,
-    /// `_FixtureObjectBlendMode` 的布尔形状：`AlphaMode::Blend` 的开关。
-    /// 二维选择表的落点（5/6/26/27）在 resolve 时已与此对过账。
+    /// Boolean form of `_FixtureObjectBlendMode`: the `AlphaMode::Blend`
+    /// switch. The two-dimensional table selections (5/6/26/27) have already
+    /// been checked against it during resolution.
     pub blend: bool,
-    /// 质感分支 fresnel 的两参（`_FresnelPower` / `_FresnelColor`）。
-    /// 分支关着的材质填 0（块被特化整块移除，值不被读）。**不进
-    /// `params.bytes()`**：那 12 槽的序是主 pass 与自发光 pass 共用的
-    /// 前缀契约（emission 对象池把 params 内嵌在 64+192+16 的摊平布局
-    /// 里，扩槽会错位那侧的 emission 字段）——两条质感分支的参数合用
-    /// 主 pass 的独立 binding 4，见 [`Self::shading_branch_bytes`]。
+    /// The fresnel branch parameters (`_FresnelPower` / `_FresnelColor`).
+    /// Filled with 0 when the branch is off (the block is removed by
+    /// specialization and the values are not read). **Not part of
+    /// `params.bytes()`**: the order of those 12 slots is the prefix contract
+    /// shared by the main pass and the emission pass (the emission object pool
+    /// embeds params in a 64+192+16 flat layout, and growing the slots would
+    /// shift the emission fields on that side) — the texture-branch parameters
+    /// share the main pass's separate binding 4, see
+    /// [`Self::shading_branch_bytes`].
     pub fresnel_power: f32,
     pub fresnel_color: [f32; 4],
-    /// 质感分支反射的两参（`_ReflectionFresnelPower` /
-    /// `_ReflectionIntensity`）。立方图那一项不在这里——它折叠成了着色器
-    /// 里的常数（见 [`FixtureMaterialKey::reflection`]）。
+    /// The reflection branch parameters (`_ReflectionFresnelPower` /
+    /// `_ReflectionIntensity`). The cube-map term is not here — it folds to a
+    /// constant in the shader (see [`FixtureMaterialKey::reflection`]).
     pub reflection_power: f32,
     pub reflection_intensity: f32,
     /// JP `_ENABLE_CRYSTAL_FIXTURE` variant (main pass only). Kept outside
@@ -336,10 +398,11 @@ pub struct FixturePipelineKey {
 }
 
 impl FixtureMaterial {
-    /// 两条质感分支参数的序列化（binding 4，3×vec4）。与 params 分块的
-    /// 缘故见字段注释——那是跨 pass 的字节契约，不能扩；这一块只在主
-    /// pass 的片元里读，可以扩。槽序与 WGSL 的 `FixtureShadingBranch`
-    /// 是契约，两边同改。
+    /// Serialization of the texture-branch parameters (binding 4, 3×vec4). The
+    /// reason it is split from params is given in the field comments — that
+    /// part is a byte contract across passes and cannot grow; this block is
+    /// read only in the main pass fragment and can grow. The slot order is a
+    /// contract with `FixtureShadingBranch` in the WGSL; change both together.
     fn shading_branch_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(192);
         let crystal = self.crystal.as_ref();
@@ -432,12 +495,14 @@ impl AsBindGroup for FixtureMaterial {
                 .ok_or(AsBindGroupError::RetryNextUpdate)?,
             None => &fallback.d2,
         };
-        // 唯一的纹理槽永远有真实贴图——缺主贴图的材质在建计划时已拒，
-        // 不需要 fallback 绑定。
+        // The single main texture slot always holds a real texture — a material
+        // without a main texture is refused while its entry is planned — so no
+        // fallback binding is needed.
         let mut bindings = UnpreparedBindingResources(vec![
-            // binding 0：材质自己的参数块。
+            // binding 0: the material's own parameter block.
             (0, crate::render::gpu::push_data(output, &self.params.bytes())),
-            // binding 1：全局量，与站点材质共用同一个 buffer。
+            // binding 1: the global values, sharing one buffer with site
+            // materials.
             (1, UnpreparedBindingResource::Buffer(env_buffer.buffer.clone())),
             (
                 2,
@@ -450,8 +515,9 @@ impl AsBindGroup for FixtureMaterial {
                 SamplerBindingType::Filtering,
                 if self.site_sampler { samplers.repeat_linear.clone() } else { main.sampler.clone() },
             )),
-            // binding 4：两条质感分支的参数（分支关着的变体不读它，照绑
-            // ——布局是全变体共享的，多的绑定合法）。
+            // binding 4: the texture-branch parameters (a variant with the
+            // branches off does not read it but binds it anyway — the layout is
+            // shared by every variant, so an extra binding is valid).
             (4, crate::render::gpu::push_data(output, &self.shading_branch_bytes())),
             (
                 5,
@@ -515,7 +581,8 @@ impl AsBindGroup for FixtureMaterial {
             ty: BindingType::Sampler(SamplerBindingType::Filtering),
             count: None,
         };
-        // binding 4 只在片元里读（两条质感分支的加色块）。
+        // binding 4 is read only in the fragment (the additive blocks of the
+        // texture branches).
         let fragment_uniform = |binding: u32| BindGroupLayoutEntry {
             binding,
             visibility: ShaderStages::FRAGMENT,
@@ -545,7 +612,8 @@ impl AsBindGroup for FixtureMaterial {
 }
 
 impl Material for FixtureMaterial {
-    // embedded 源的键前缀是 lib 名（连字符转下划线），见 site 材质同注。
+    // The key prefix of an embedded source is the lib name (hyphens turned
+    // into underscores), as noted for the site material.
     fn vertex_shader() -> ShaderRef {
         "embedded://moly_render/shaders/fixture_material.wesl".into()
     }
@@ -554,8 +622,8 @@ impl Material for FixtureMaterial {
         "embedded://moly_render/shaders/fixture_material.wesl".into()
     }
 
-    /// 混合模式：`_FixtureObjectBlendMode` = 1（AlphaBlended）的材质走
-    /// alpha 混合管线；0（Opaque）走不透明。
+    /// Blend mode: a material with `_FixtureObjectBlendMode` = 1 (AlphaBlended)
+    /// uses the alpha-blend pipeline; 0 (Opaque) is drawn opaque.
     fn alpha_mode(&self) -> AlphaMode {
         // Rug blending belongs between ground and objects in the source's
         // opaque queue range; its actual blend state is installed in specialize.
@@ -568,7 +636,8 @@ impl Material for FixtureMaterial {
         }
     }
 
-    /// 家具族不进 prepass：本单只交付 Base 片元，阴影消费方不在范围里。
+    /// The furniture family stays out of the prepass: only the Base fragment is
+    /// implemented here, and shadow consumers are out of scope.
     fn enable_prepass() -> bool {
         false
     }
@@ -614,10 +683,12 @@ impl Material for FixtureMaterial {
         if base.reflection {
             defs.push("FIXTURE_MODULE_REFLECTION");
         }
-        // 视线方向的顶点输出：两条质感分支读的是同一个输出，任一开着就
-        // 要它。**从那两个键派生而不是另设一个开关**——漏推它时着色器会
-        // 引用一个不存在的标识符，那是运行期才喊的一条管线错误，而
-        // `cargo build` 一个 wgsl 字节都不校验。
+        // Vertex output for the view direction: both texture branches read the
+        // same output and need it whenever either is on. **Derived from those
+        // keys rather than a separate switch** — if it is missed, the shader
+        // references an identifier that does not exist, which only surfaces as
+        // a pipeline error at run time, and `cargo build` does not validate a
+        // single wgsl byte.
         if base.fresnel || base.reflection {
             defs.push("FIXTURE_VIEW_DIR");
         }
@@ -643,35 +714,46 @@ impl Material for FixtureMaterial {
     }
 }
 
-// ---- 墙布局的 ShadowCaster 标记面 ----
+// ---- Wall-layout ShadowCaster marker ----
 
-/// 墙布局（LayoutType 命中 0xF0 任一位）摆放的网格实体标记。
-/// 源在墙布局时对逐材质关 ShadowCaster pass（SetupRenderer 律）；
-/// 主光阴影消费者按这个运行时状态排除墙面家具，不改其颜色 pass 显隐。
+/// Marker on mesh entities placed by a wall layout (LayoutType has any bit of
+/// 0xF0 set). The game disables the ShadowCaster pass of each material while a
+/// wall layout is active (`SetupRenderer`); the main-light shadow consumer
+/// excludes wall furniture by this run-time state and leaves the visibility of
+/// its colour pass alone.
 #[derive(Component)]
 pub struct WallLayoutShadowCasterOff;
 
-/// 渲染状态「写零」pass 的网格实体标记：材质 `_ColorMask` = 0（颜色通道
-/// 全关）且 `_ZWrite` = 0（深度不写）。这样的 pass 在源里只写模板缓冲，
-/// 对颜色与深度的贡献恒为零，主 pass 里隐藏即与源输出逐值相等；它们的
-/// 模板写入由模板重放按挂上的 [`SourceStencilAttribute`] 重现。注意判据是 **CPU 侧渲染状态浮点**，不是 shader
-/// 名：Unity 由这些浮点配渲染状态，shader 程序本身不消费它们；按名字
-/// （「stencil 材质该藏」）或按纹理在场（白板材质没贴图）判断都是错门
-/// ——与变体门只认 keyword 是同族教训。
+/// Marker on mesh entities whose pass writes nothing: material `_ColorMask` = 0
+/// (all colour channels off) and `_ZWrite` = 0 (depth not written). Such a pass
+/// writes only the stencil buffer in the game, its contribution to colour and
+/// depth is always zero, and hiding it in the main pass gives value-for-value
+/// the same output; its stencil writes are reproduced by stencil replay from
+/// the attached [`SourceStencilAttribute`]. The check uses the **CPU-side
+/// render-state floats**, not the shader name: Unity configures the render
+/// state from these floats and the shader program does not consume them;
+/// deciding by name ("stencil materials should be hidden") or by texture
+/// presence (a white-surface material has no texture) is the wrong gate — the
+/// same lesson as the variant gate that reads only keywords.
 #[derive(Component)]
 pub struct StencilOnlyPass;
 
-/// ShadowMesh 族的网格实体标记：该族片元以材质浮点 `_Show` 为门，低于
-/// 0.5 全部 discard；live 数据里这族全部材质的 `_Show` 恒 0.0（提取侧
-/// 对创作浮点逐字拷贝，不改写），全部 AnimationClip 的浮点曲线里也没
-/// 有指向它的曲线——源渲染里像素贡献恒 0。本管线未移植该族 shader，
-/// 保留 glb 默认材质会把这套投影网画成错误的实心面；隐藏即与源输出
-/// 逐值相等，不是近似。影子网消费方接进来时按此标记找回这些网格。
+/// Marker on mesh entities of the ShadowMesh family: its fragment gates on the
+/// material float `_Show` and discards everything below 0.5; in live data
+/// `_Show` is 0.0 on every material of the family (the extractor copies the
+/// authored floats as they are and never rewrites them), and no AnimationClip
+/// float curve targets it — the pixel contribution is always 0 in the game.
+/// This pipeline does not implement the family's shader; keeping the glb
+/// default material would draw this projection mesh as a wrong solid surface,
+/// while hiding it gives value-for-value the same output, not an
+/// approximation. The shadow-mesh consumer can find these meshes again by this
+/// marker.
 #[derive(Component)]
 pub struct ShadowMeshGated;
 
-/// 渲染状态「写零」签名：`_ColorMask` = 0 且 `_ZWrite` = 0。
-/// 混合因子在无通道可写时不参与输出，不必检查。
+/// The render-state "writes nothing" signature: `_ColorMask` = 0 and
+/// `_ZWrite` = 0. Blend factors do not reach the output when no channel can be
+/// written, so they need no check.
 fn is_stencil_only(extras: &serde_json::Value) -> bool {
     matches!(
         (extras_float(extras, "_ColorMask"), extras_float(extras, "_ZWrite")),
@@ -679,9 +761,9 @@ fn is_stencil_only(extras: &serde_json::Value) -> bool {
     )
 }
 
-// ---- 解析 ----
+// ---- Resolution ----
 
-/// glb 材质 extras 里提取侧约定的浮点表列。
+/// The float table entry of the glb material extras.
 fn extras_float(extras: &serde_json::Value, key: &str) -> Option<f64> {
     extras
         .get("floats")
@@ -689,8 +771,9 @@ fn extras_float(extras: &serde_json::Value, key: &str) -> Option<f64> {
         .and_then(|value| value.as_f64())
 }
 
-/// glb 材质 extras 里提取侧约定的颜色表列（四元组）。长度不是 4 的
-/// 数组按缺键处理（fail-closed 由调用方具名拒绝，不截不补）。
+/// The colour table entry of the glb material extras (a 4-tuple). An array
+/// whose length is not 4 is treated as a missing key (fail-closed: the caller
+/// refuses by name, with no truncation and no padding).
 fn extras_color(extras: &serde_json::Value, key: &str) -> Option<[f64; 4]> {
     let array = extras
         .get("colors")
@@ -703,16 +786,17 @@ fn extras_color(extras: &serde_json::Value, key: &str) -> Option<[f64; 4]> {
     Some(color)
 }
 
-/// glb 材质 extras 里提取侧约定的顶层 usage 列。
+/// The top-level usage entry of the glb material extras.
 fn extras_usage(extras: &serde_json::Value) -> Option<f64> {
     extras
         .get("fixtureShaderUsage")
         .and_then(|value| value.as_f64())
 }
 
-/// glb 材质 extras 顶层 `validKeywords` 列（源运行态的 shader 变体开关
-/// 来源，见模块注释）。None = 列缺失：fail-closed 由调用方具名拒绝，
-/// 不猜空列。
+/// The top-level `validKeywords` list of the glb material extras (the source of
+/// the game's runtime shader variant switches, see the module note). None =
+/// the list is missing: fail-closed, the caller refuses by name rather than
+/// guessing an empty list.
 fn extras_valid_keywords(extras: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
     extras
         .get("validKeywords")
@@ -743,39 +827,47 @@ fn empty_main_tex_default(extras: &serde_json::Value) -> Result<(), String> {
     }
 }
 
-/// 解析一条 Basic 家具材质的产出：GPU 材质、二维表落点（日志对账用）、
-/// 自发光三 int（挂账日志用——本管线没有第二颜色目标，不进材质）、
-/// 变体开关盘对账件（日志用）。
-/// 自发光两 int（进 [`FixtureEmission`] 组件的材质侧值）、遮罩贴图的
-/// glTF 纹理下标（build 阶段据此建句柄）。
+/// What resolving one Basic furniture material yields: the GPU material, the
+/// two-dimensional table selection (compared against the log), the emission
+/// ints recorded in the log, the variant switch panel items compared against the
+/// log, the emission ints that go into the [`FixtureEmission`] component as the
+/// material-side value, and the glTF texture index of the mask texture (from
+/// which the build stage creates the handle).
 struct ResolvedBasic {
     force_emission: bool,
     material: FixtureMaterial,
     attribute: u32,
     emission: EmissionInts,
-    /// `_RECEIVE_SHADOWS_OFF` 在场与否（源程序级零效果，只入账）。
+    /// Whether `_RECEIVE_SHADOWS_OFF` is present (no program-level effect, only
+    /// accounted).
     receive_shadows_off: bool,
-    /// 开关三件之外仍出现的 keyword 逐个名字（live 数据里是两个未实现
-    /// 质感分支，模块注释挂账）；出现别的名字也走同一账，不猜语义。
+    /// Name of each keyword that appears beyond the handled switches (live data
+    /// lists unimplemented texture branches, see the module note); any other
+    /// name follows the same accounting, without guessing its meaning.
     unported_keywords: Vec<String>,
-    /// 反射分支开着、但材质**绑了一张真立方图**——折叠形对它是错的，
-    /// 本管线没有真采样那条路 ⇒ 不开分支，按名字入账（keyword 也留在
-    /// `unported_keywords` 里）。live 数据里是载具那 3 个材质，全未摆放。
+    /// The reflection keyword is on but the material **binds a real cube map**
+    /// — the folded form is wrong for it and this pipeline has no path with a
+    /// real sample ⇒ the branch stays off and the material is accounted by name
+    /// (the keyword also stays in `unported_keywords`). In live data these are
+    /// the 3 vehicle materials, none placed.
     reflection_needs_cubemap: bool,
     /// The crystal keyword is on but its branch cannot be drawn (named
     /// reason). The keyword then stays in `unported_keywords`.
     crystal_blocked: Option<String>,
-    /// extras 纹理表里 `_EmissionMaskTex` 的 glTF 纹理下标；缺键 None
-    /// （门 int 全零的材质无所谓；非零的组合按零贡献具名告警）。
+    /// glTF texture index of `_EmissionMaskTex` in the extras texture table;
+    /// None when the key is missing (irrelevant for materials whose gate ints
+    /// are all zero; a non-zero gate is treated as zero contribution with a
+    /// named warning).
     mask_index: Option<u32>,
     /// JP `_UseEmissionColorPicker` on: `_EmissionColor.rgb *
     /// _EmissionIntensity`, which replaces the mask texel in the second target.
     colour_picker: Option<[f32; 3]>,
 }
 
-/// 驱动源第二颜色目标开关链的两个材质 int（数据侧是 0/1 浮点）。
-/// 换装时进 [`FixtureEmission`]，emission pass 的片元里按现象类型比较。
-/// 缺哪个浮点记 None，不静默取 0。
+/// The material ints that drive the switch chain of the second colour target
+/// (stored as 0/1 floats). They go into [`FixtureEmission`] at swap time and
+/// are compared by phenomena type in the emission pass fragment. A missing
+/// float records None, never a silent 0.
 /// The initial material flags are separate from the per-instance override
 /// written later by fixture animation events.
 #[derive(Debug, Clone, Copy)]
@@ -784,8 +876,10 @@ struct EmissionInts {
     dark: Option<f64>,
 }
 
-/// 现象自发光门值：源第二颜色目标的开关链逐句翻译（类型 1 比 bright、
-/// 类型 2 比 dark、其余 0）。日志与切档账目共用这一条推导。
+/// Phenomena emission gate value: implements the switch chain of the second
+/// colour target (at phenomena type 1 bright is compared against 1, at type 2
+/// dark against 1, any other type gives 0). The tier-switch account and its
+/// log take the gate from this one function.
 fn emission_gate(emission: &EmissionInts, emission_type: i32) -> Option<i32> {
     let (bright, dark) = (emission.bright?, emission.dark?);
     Some(match emission_type {
@@ -795,16 +889,19 @@ fn emission_gate(emission: &EmissionInts, emission_type: i32) -> Option<i32> {
     })
 }
 
-/// 换装完成时收账的自发光账目：逐材质的亮/暗臂、遮罩线性均值。天气
-/// 切档日志按当前现象类型读它推导逐材质贡献行——「切档后自发光账目
-/// 可从日志推导」的数据面（着色器侧另有一份门，两处同一条开关链）。
+/// The emission account gathered when a swap completes: the bright/dark arms
+/// and the linear mask mean of each material. The weather tier-switch log
+/// reads it with the current phenomena type to derive each material's
+/// contribution row, so the post-switch emission account follows from the log
+/// (the shader side has its own gate; both evaluate the same switch chain).
 #[derive(Resource, Default)]
 pub struct EmissionAccount {
     pub rows: Vec<EmissionRow>,
 }
 
-/// 一条账目行。`mask_mean` 是遮罩贴图解码进线性域后的逐通道均值
-/// （alpha 丢弃）；遮罩缺失（或纹素未到）记 None。
+/// One account row. `mask_mean` is the per-channel mean of the mask texture
+/// after decoding into the linear domain (alpha dropped); a missing mask (or
+/// texels not yet available) records None.
 pub struct EmissionRow {
     pub name: String,
     pub bright: Option<f64>,
@@ -818,8 +915,9 @@ pub struct EmissionRow {
 pub struct EmissionAccountKept(pub EmissionAccount);
 
 impl EmissionAccount {
-    /// 按现象类型推逐材质贡献行（切档日志用）：门 × 遮罩均值。门缺
-    /// （int 缺键）或遮罩缺的行原样带 None，不静默取 0。
+    /// Derives each material's contribution row by phenomena type (for the
+    /// tier-switch log): gate × mask mean. A row whose gate (an int key) or
+    /// mask is missing keeps None as is, never a silent 0.
     pub fn contribution_lines(&self, emission_type: i32) -> Vec<String> {
         self.rows
             .iter()
@@ -852,12 +950,17 @@ impl EmissionAccount {
     }
 }
 
-/// 解析一条 Basic 家具材质：族门 → 二维选择表对账 → 窗外观门四角 →
-/// 变体键与 uniform 槽。失败返回具名报错，调用方保留原材质。
+/// Resolves one Basic furniture material: family gate → two-dimensional
+/// selection table check → window-outside clip corners → variant key and
+/// uniform slots. A failure returns a named error and the caller keeps the
+/// original material.
 ///
-/// `clip_quad` 是该材质所在 glb 根下写零面的四角（按首见根取），仅在
-/// usage=1（窗外观支路）时必需：缺写零面或四角不可用都是具名拒绝，
-/// 不静默放行——放行会把整片窗外网画到没有墙的场景里。
+/// `clip_quad` is the four corners of the zero-write surface under the glb
+/// root the material belongs to (taken from the first root seen); it is
+/// required only at usage=1 (the window-outside arm): a missing zero-write
+/// surface or unusable corners is a named refusal, never a silent pass —
+/// passing would draw the whole window-outside mesh into a scene that has no
+/// wall.
 fn resolve_basic(
     name: &str,
     extras: &serde_json::Value,
@@ -867,9 +970,10 @@ fn resolve_basic(
 ) -> Result<ResolvedBasic, String> {
     let source_texture = |key: &str| source_textures.and_then(|textures| textures.0.get(key)).cloned();
     let normal_map_texture = source_texture("_NormalMap");
-    // 二维选择表：(usage, blend) → ShaderAttribute。越界即拒；落点的
-    // 低位（5/26 不透明、6/27 混合）必须与 blend 模式一致——不一致说明
-    // 两列数据互相矛盾，响亮拒绝。
+    // Two-dimensional selection table: (usage, blend) → ShaderAttribute. Out of
+    // range is refused; the selection's opaque/blended pair (5/26 opaque,
+    // 6/27 blended) must agree with the blend mode — a mismatch means the data
+    // contradicts itself and is refused loudly.
     let usage = extras_usage(extras)
         .ok_or_else(|| format!("家具材质 {name} 的 extras 缺 fixtureShaderUsage"))?;
     let blend_raw = extras_float(extras, "_FixtureObjectBlendMode")
@@ -877,9 +981,10 @@ fn resolve_basic(
     let attribute = basic_fixture_shader_attribute(usage as i32, blend_raw as i32)
         .map_err(|err| format!("家具材质 {name}：{err}"))?;
     let blend = blend_raw >= 0.5;
-    // 落点与混合模式的一致性对账：源表里 5/26 是不透明格、6/27 是
-    // 混合格。落点由 (usage, blend) 查表得出，这里只核表输出与 blend
-    // 列一致——表或列哪边错都会在这里响亮。
+    // Consistency check of the selection against the blend mode: in the table
+    // 5/26 is the opaque slot and 6/27 the blended slot. The selection comes
+    // from looking up (usage, blend); this only checks that the table output
+    // agrees with the blend column — an error in either shows up loudly here.
     let expected = if blend { 6 } else { 5 };
     if attribute != expected && attribute != expected + 21 {
         return Err(format!(
@@ -887,9 +992,11 @@ fn resolve_basic(
              {blend_raw} 互相矛盾"
         ));
     }
-    // 窗外观支路：usage=1 → 落点 26/27，源按模板 Equal 只画窗洞内。
-    // 四角来自同一 glb 的写零面；没有或不可用即拒（具名），该材质保留
-    // 原材质——比静默画整片窗外网更响亮。
+    // Window-outside arm: usage=1 → selection 26/27; in the game it draws only
+    // inside the opening at stencil Equal. The corners come from the zero-write
+    // surface of the same glb; a missing or unusable quad is a named refusal and
+    // the material keeps its original material — louder than drawing the whole
+    // window-outside mesh silently.
     let window_clip = usage as i32 == 1;
     let clip_corners = if window_clip {
         match clip_quad {
@@ -914,10 +1021,12 @@ fn resolve_basic(
     } else {
         [[0.0; 3]; 4]
     };
-    // 变体开关盘：keyword 型开关，源运行态只认 valid keyword（材质构建
-    // 时按整型属性重派生；invalid 列是编辑器残留，不读）。两个开关的
-    // 旧读法（`_UseAlphaClip`/`_DisableDither` 浮点）与 keyword 侧在
-    // 全量 Basic 材质上逐项一致——换的是「读哪个源」，不是值变化。
+    // Variant switch panel: keyword switches; the game at run time honours only
+    // valid keywords (re-derived from integer properties when the material is
+    // built; the invalid list is an editor leftover and is not read). The older
+    // way of reading these switches (the `_UseAlphaClip`/`_DisableDither`
+    // floats) agrees item by item with the keyword side on every Basic
+    // material — what changes is which source is read, not the value.
     let valid = extras_valid_keywords(extras)
         .ok_or_else(|| format!("家具材质 {name} 的 extras 缺 validKeywords 列"))?;
     let keyword_on = |keyword: &str| {
@@ -926,19 +1035,25 @@ fn resolve_basic(
             .any(|item| item.as_str() == Some(keyword))
     };
     let alpha_clip = keyword_on("_USE_ALPHA_CLIP");
-    // 关抖动的 keyword 在场即 `_DISABLE_DITHER`，抖动变体取反。
+    // The keyword that disables dithering is `_DISABLE_DITHER`; the dither
+    // variant is its inverse.
     let dither = !keyword_on("_DISABLE_DITHER");
     let receive_shadows_off = keyword_on("_RECEIVE_SHADOWS_OFF");
     let fresnel = keyword_on("_ENABLE_MODULE_FRESNEL");
-    // 反射支：keyword 开着**且**立方图槽位为空时才走本管线的折叠形。
-    // 槽位状态从提取侧写进 extras 的纹理引用表读——**键在不在**就是判据：
-    // 键不在 = 源材质那个 TexEnv 是空引用（折叠成立，采样是常数）；
-    // 键在（值是 null，因为 glTF 没有立方图这个类型，提取侧只能记下
-    // 「这里引了一个对象」）= 材质绑了一张真立方图 ⇒ **折叠对它是错的**，
-    // 必须真采样，本管线没有那条路 ⇒ 不开分支、按名字挂账。
-    // 这个判据与真源侧的 PPtr 空/非空逐条一致（16 空 / 3 非空），且是
-    // 两条独立读取路径；同一张表里 `_MainTex` 每条都是真下标，所以
-    // 「键不在」是真的不在，不是表坏了。
+    // Reflection arm: this pipeline's folded form applies only when the keyword
+    // is on **and** the cube-map slot is empty. The slot state is read from the
+    // texture reference table the extractor writes into the extras — **whether
+    // the key is present** is the check: key absent = that texture slot of the
+    // game material is an empty reference (the fold holds, the sample is a
+    // constant); key present (value null, because glTF has no cube-map type,
+    // so the extractor can only record "an object is referenced here") = the
+    // material binds a real cube map ⇒ **the fold is wrong for it**, a real
+    // sample is required and this pipeline has no such path ⇒ the branch stays
+    // off and the material is accounted by name.
+    // The check agrees entry by entry with the empty/non-empty object
+    // reference in the game (16 empty / 3 non-empty) and is a separate read
+    // path from it; `_MainTex` in the same table always has a real index, so
+    // "key absent" really is absent, not a broken table.
     let reflection_keyword = keyword_on("_ENABLE_MODULE_REFLECTION");
     let cube_bound = extras
         .get("textures")
@@ -955,8 +1070,8 @@ fn resolve_basic(
     let use_normal_map = extras_float(extras, "_UseNormalMap").is_some_and(|value| value > 0.5);
     if use_normal_map && !crystal_keyword {
         return Err(format!(
-            "家具材质 {name} 的 _UseNormalMap 开着但没有 _ENABLE_CRYSTAL_FIXTURE：\
-             这个组合的源程序未移植"
+            "furniture material {name}: _UseNormalMap is on while \
+             _ENABLE_CRYSTAL_FIXTURE is off; that combination is not supported"
         ));
     }
     let (crystal, crystal_blocked) = if crystal_keyword {
@@ -1080,8 +1195,9 @@ fn resolve_basic(
         .filter_map(|item| item.as_str())
         .filter(|keyword| {
             if *keyword == "_ENABLE_MODULE_REFLECTION" {
-                // 折叠形接上的那 16 条不再算未实现；绑了真立方图的那几条
-                // 仍然算——对它们这条分支确实没实现。
+                // The 16 entries that take the folded form no longer count as
+                // unimplemented; the few that bind a real cube map still do —
+                // for them this branch really is not implemented.
                 return !reflection;
             }
             if *keyword == "_ENABLE_CRYSTAL_FIXTURE" {
@@ -1120,9 +1236,11 @@ fn resolve_basic(
         uv_v_flip: 1.0,
         clip_corners,
     };
-    // fresnel 两参：分支开着时必需（缺任一即具名拒绝——开关与数据
-    // 互相矛盾，静默取默认会把一个源里没有的加色画上去）；关着时填 0
-    // （块被特化移除，值不被读）。
+    // The fresnel parameters: required while the branch is on (either one
+    // missing is a named refusal — the switch contradicts the data, and a
+    // silent default would add colour the game does not add); filled with 0
+    // while it is off (the block is removed by specialization and the values
+    // are not read).
     let (fresnel_power, fresnel_color) = if fresnel {
         (
             get("_FresnelPower")?,
@@ -1135,9 +1253,10 @@ fn resolve_basic(
     } else {
         (0.0, [0.0; 4])
     };
-    // 反射两参：分支开着时必需（缺任一即具名拒绝，与 fresnel 同形——
-    // 静默取默认会把一个源里没有的加色画上去）；关着时填 0（块被特化
-    // 移除，值不被读）。
+    // The reflection parameters: required while the branch is on (either one
+    // missing is a named refusal, the same shape as fresnel — a silent default
+    // would add colour the game does not add); filled with 0 while it is off
+    // (the block is removed by specialization and the values are not read).
     let (reflection_power, reflection_intensity) = if reflection {
         (
             get("_ReflectionFresnelPower")?,
@@ -1150,8 +1269,9 @@ fn resolve_basic(
         bright: extras_float(extras, "_BrightPhenomenaEmission"),
         dark: extras_float(extras, "_DarkPhenomenaEmission"),
     };
-    // 遮罩贴图的 glTF 纹理下标：提取侧把材质纹理引用写进 extras 的
-    // textures 表（纹理名 → glTF 纹理下标）。缺键 = 该材质没有遮罩。
+    // glTF texture index of the mask texture: the extractor writes the material
+    // texture references into the extras `textures` table (texture name → glTF
+    // texture index). A missing key means the material has no mask.
     let mask_index = extras
         .get("textures")
         .and_then(|textures| textures.get("_EmissionMaskTex"))
@@ -1264,7 +1384,7 @@ pub fn resolve_site_basic(
     let resolved = resolve_basic(&slot.name, &extras, main_tex, None, None)?;
     if !resolved.unported_keywords.is_empty() {
         return Err(format!(
-            "站点上的家具材质 {} 带未移植 keyword {:?}",
+            "furniture material {} on a site has unsupported keywords {:?}",
             slot.name, resolved.unported_keywords
         ));
     }
@@ -1282,7 +1402,7 @@ pub fn resolve_site_basic(
 
 /// Fence Base shares the toon equation and UV offset with Basic, but has no
 /// alpha clip, fragment normal normalization, treasure shadow, fog or emission.
-/// All 16 CN Base variants reduce to two fragment programs (dither on/off).
+/// All 16 Basic variants reduce to a single fragment program.
 fn resolve_fence(name: &str, extras: &serde_json::Value, main_tex: Handle<Image>) -> Result<ResolvedBasic, String> {
     let get = |key: &str| extras_float(extras, key)
         .map(|v| v as f32).ok_or_else(|| format!("Fence 材质 {name} 缺属性 {key}"));
@@ -1367,10 +1487,12 @@ fn resolve_rug(name: &str, extras: &serde_json::Value, main_tex: Handle<Image>) 
     })
 }
 
-/// 把写零面的四个唯一顶点排成平面凸环序（绕质心按平面极角，从第一条
-/// 边的法向看逆时针）。环序是片元「点在凸四边形内」判定的前提；非
-/// 平面 / 退化 / 非凸在这里具名拒绝——那是数据不该出现的形状，不静默
-/// 近似。
+/// Orders the four unique vertices of the zero-write surface into a planar
+/// convex ring (by planar polar angle about the centroid, counter-clockwise
+/// seen from the normal of the first edge). The ring order is a precondition
+/// of the fragment's "point inside the convex quad" test; non-planar / 
+/// degenerate / non-convex input is refused here by name — a shape the data
+/// should not contain, never silently approximated.
 fn order_clip_quad(points: [Vec3; 4]) -> Result<[Vec3; 4], String> {
     let normal = (points[1] - points[0]).cross(points[2] - points[0]);
     let scale = normal.length();
@@ -1393,14 +1515,17 @@ fn order_clip_quad(points: [Vec3; 4]) -> Result<[Vec3; 4], String> {
     let centroid = (points[0] + points[1] + points[2] + points[3]) * 0.25;
     let angle = |point: Vec3| {
         let delta = point - centroid;
-        // atan2(对 v 的分量, 对 u 的分量)：从 u 轴向 v 轴量角——(u, v, n̂)
-        // 右手系下绕 +n̂ 逆时针。两个参数写反会把环序镜像成顺时针，
-        // 凸性判据随之全负（每个凸四边形都被拒）。
+        // atan2(component along v, component along u): the angle is measured
+        // from the u axis towards the v axis — counter-clockwise about +n̂ in
+        // the right-handed frame (u, v, n̂). Swapping the two arguments mirrors
+        // the ring order to clockwise and every convexity test then comes out
+        // negative (every convex quad is refused).
         delta.dot(v).atan2(delta.dot(u))
     };
     let mut ring = points;
     ring.sort_by(|a, b| angle(*a).total_cmp(&angle(*b)));
-    // 凸性：绕环相邻三点在面法向上的叉积同号（严格同号，退化边拒绝）。
+    // Convexity: the cross product of three adjacent ring points along the face
+    // normal keeps one sign (strictly one sign; a degenerate edge is refused).
     for i in 0..4 {
         let a = ring[i];
         let b = ring[(i + 1) % 4];
@@ -1415,10 +1540,11 @@ fn order_clip_quad(points: [Vec3; 4]) -> Result<[Vec3; 4], String> {
     Ok(ring)
 }
 
-// ---- mip 链 ----
+// ---- Mip chain ----
 
-/// sRGB EOTF 的解码/编码（GPU 采样 sRGB 格式纹素用的同一条曲线）。
-/// 生成 mip 的 box 滤波要在采样输出的域（线性）里做，alpha 不经 gamma。
+/// Decode and encode of the sRGB EOTF (the same curve the GPU uses for sRGB
+/// texels). The box filter that generates mips works in the domain of the
+/// sampled output (linear), and alpha does not pass through gamma.
 fn srgb_decode(c: f32) -> f32 {
     if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
 }
@@ -1427,28 +1553,35 @@ fn srgb_encode(c: f32) -> f32 {
     if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
 }
 
-/// 8 位存储值的解码表：第 `v` 项就是 `srgb_decode(v / 255)`，由同一个函数对
-/// 同一个 f32 输入算出。存储值只有 256 种，所以查表与逐纹素现算逐位相同；
-/// 滤波里的累加次序不变，链上每一级的字节也就不变。编码一侧的输入是均值，
-/// 不是有限集，仍逐值现算。
+/// Decode table for 8-bit stored values: entry `v` is `srgb_decode(v / 255)`,
+/// computed by the same function on the same f32 input. There are only 256
+/// stored values, so a table lookup is bit-identical to computing per texel;
+/// the accumulation order in filtering is unchanged, so the bytes of every
+/// level of the chain are unchanged too. On the encoding side the input is a
+/// mean, not a finite set, so it is still computed value by value.
 fn srgb_decode_table() -> &'static [f32; 256] {
     static TABLE: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
     TABLE.get_or_init(|| std::array::from_fn(|value| srgb_decode(value as f32 / 255.0)))
 }
 
-/// CPU 生成完整 2×2 box mip 链：对 2 的幂形状（含非方形——级数按最长
-/// 边，短边先到 1 就保持 1）的 RGBA8 主贴图，在采样输出的域里滤波
-/// （sRGB 格式先解码后平均再编码），纹素按 LayerMajor 的 dense mip 序
-/// 紧密排进同一份 data（wgpu 的 `create_texture_with_data` 正是这个
-/// 约定，行对齐由它内部补）。
+/// Generates the full 2×2 box mip chain on the CPU: for RGBA8 main textures of
+/// power-of-two shapes (non-square included — the level count follows the
+/// longest edge, and a side that reaches 1 first stays 1), filtering happens in
+/// the domain of the sampled output (sRGB formats are decoded, averaged, then
+/// encoded), and the texels are packed tightly into one data buffer in the
+/// LayerMajor dense mip order (the layout wgpu's
+/// `create_texture_with_data` expects, which pads row alignment internally).
 ///
-/// 不可处理的形状具名返回（不做静默近似）：`AlreadyChained`（ktx/dds
-/// 路径已有链）、`BadShape`（任一边为 0 或非 2 的幂——这种形状源侧
-/// 不出链）、`BadFormat`（非 RGBA8 两格式）、`NoData`（纹素不在——被
-/// 渲染提取取走，晚于「查到 Loaded 的同一帧」）、`BadLength`（数据
-/// 长度与尺寸不符）。级数律与「源序列化的 mip 计数逐值一致」的 corpus
-/// 判据在 `moly_law::fixture::mip`：live 摆放面四种形状 256²→9、
-/// 512²→10、2048²→12、2048×1024→12（45 行材质→贴图全对上）。
+/// A shape that cannot be handled is returned by name (no silent
+/// approximation): `AlreadyChained` (the ktx/dds path already has a chain),
+/// `BadShape` (either side is 0 or not a power of two — the game keeps no
+/// chain for such a shape), `BadFormat` (neither RGBA8 format), `NoData` (the
+/// texels are gone — taken by render extraction, later than the frame `Loaded`
+/// was observed), `BadLength` (the data length does not match the size). The
+/// level rule and the corpus check that every serialized mip count matches
+/// value for value are in `moly_law::fixture::mip`: the four live placement
+/// shapes give 256²→9, 512²→10, 2048²→12 and 2048×1024→12 (all 45
+/// material→texture rows match).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MipSkip {
     AlreadyChained,
@@ -1456,23 +1589,27 @@ pub enum MipSkip {
     BadFormat,
     NoData,
     BadLength,
-    /// 只由 [`mask_storage_mean`] 用：纹理不是 sRGB 格式，而着色器那侧的
-    /// 编回存储域是无条件的 ⇒ 那一步会多编一次。见该函数的联锁说明。
+    /// Used only by [`mask_storage_mean`]: the texture is not in an sRGB
+    /// format, while the shader always encodes back to the stored domain ⇒ that
+    /// step would encode a second time. See the guard note on that function.
     NotSrgb,
 }
 
-/// 补链前的只读核验：拒绝理由与次序即 [`generate_mip_chain`] 的，另给出补链
-/// 要用的量。`Assets::get_mut` 无条件发 Modified，而一次被 Modified 的贴图
-/// 会整份重新提取、另建 GPU 纹理——已补好链或补不了的贴图应当先经共享借用
-/// 在这里判掉。
+/// Read-only check before filling the chain: the refusal reasons and their order
+/// are those of [`generate_mip_chain`], and the values the fill needs are also
+/// returned. `Assets::get_mut` emits Modified unconditionally, and a texture hit
+/// by Modified is fully re-extracted with a new GPU texture — a texture that
+/// already has its chain, or cannot get one, should be screened out here first
+/// through a shared borrow.
 pub fn mip_chain_plan(image: &Image) -> Result<MipChainPlan, MipSkip> {
     let width = image.texture_descriptor.size.width;
     let height = image.texture_descriptor.size.height;
     if image.texture_descriptor.mip_level_count > 1 {
         return Err(MipSkip::AlreadyChained);
     }
-    // 级数律（moly-law）：非零 2 的幂即有完整链，级数按最长边。非方形
-    // 不是坏形状——源序列化的 mip 计数就是这么给的。
+    // Level rule: a non-zero power of two has the full chain, and the level
+    // count follows the longest edge. A non-square shape is not a bad shape —
+    // the serialized mip counts are given that way.
     let levels = mip_levels(width, height).ok_or(MipSkip::BadShape)?;
     let srgb = match image.texture_descriptor.format {
         TextureFormat::Rgba8UnormSrgb => true,
@@ -1495,8 +1632,8 @@ pub fn mip_chain_plan(image: &Image) -> Result<MipChainPlan, MipSkip> {
     Ok(MipChainPlan { levels, srgb, base_len, chain_len })
 }
 
-/// [`mip_chain_plan`] 核过的一条链：级数、是否 sRGB 格式、第 0 级与整条链
-/// 的字节数。
+/// A chain checked by [`mip_chain_plan`]: the level count, whether the format
+/// is sRGB, and the byte size of level 0 and of the whole chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MipChainPlan {
     levels: u32,
@@ -1522,8 +1659,9 @@ pub fn generate_mip_chain(image: &mut Image) -> Result<u32, MipSkip> {
     while w > 1 || h > 1 {
         let cw = (w / 2).max(1);
         let ch = (h / 2).max(1);
-        // 每轴的采样数：父级该轴还有 ≥2 纹素时是 2（box 2×2），已到 1
-        // 就退化为 1（直拷）。方形时恒 2×2，与旧实现同一滤波。
+        // Taps per axis: 2 (box 2×2) while the parent still has ≥2 texels on
+        // that axis, falling back to 1 (a direct copy) once it reaches 1. For a
+        // square the filter is always 2×2, the same filter as before.
         let taps_x = w / cw;
         let taps_y = h / ch;
         let mean_scale = 1.0 / (taps_x * taps_y) as f32;
@@ -1659,12 +1797,16 @@ mod mip_tests {
     }
 }
 
-/// 补链并把纹素交给渲染世界：本帧的提取把整条链搬过去而不是复制一份，
-/// 主世界只留描述符。补不了或已补好的贴图先经 [`mip_chain_plan`] 判掉，
-/// 不借可变、不发 Modified。句柄不在 Assets 里记 `NoData`。
+/// Fills the chain and hands the texels to the render world: extraction in this
+/// frame moves the whole chain instead of copying it, leaving only the
+/// descriptor in the main world. A texture that cannot be chained, or already
+/// is, is screened out by [`mip_chain_plan`] first — no mutable borrow, no
+/// Modified event. A handle not in Assets is reported as `NoData`.
 ///
-/// 纹素交出后，主世界里只剩一种读者会再要它们：后来的换装批次要遮罩
-/// 均值。均值在交出的那一帧（数据还在）就算过并记下，见 [`MaskMeans`]。
+/// After the texels are handed over, only one reader in the main world wants
+/// them again: later swap batches need the mask mean. The mean is computed and
+/// recorded in the frame of the hand-over (while the data is still there), see
+/// [`MaskMeans`].
 ///
 /// The chained upload replaces the single-level texture the image already
 /// has on the GPU; the replacement is recorded so that the old texture is
@@ -1682,9 +1824,11 @@ fn chain_and_release(
     Ok(levels)
 }
 
-/// 已算出的遮罩均值，按贴图资产记。均值只取第 0 级的存储值，而第 0 级在
-/// 一个资产的一生里不变（补链只在其后追加），所以纹素交给渲染世界之后，
-/// 后来的换装批次读这份记录与读纹素得到同一个数。资产被移除即丢弃。
+/// The mask means already computed, recorded per texture asset. The mean reads
+/// only the stored values of level 0, and level 0 never changes during an
+/// asset's life (chain filling only appends after it), so after the texels are
+/// handed to the render world a later swap batch gets the same number from this
+/// record as from the texels. Dropped when the asset is removed.
 #[derive(Default)]
 struct MaskMeans(HashMap<AssetId<Image>, [f32; 3]>);
 
@@ -1701,23 +1845,33 @@ impl MaskMeans {
     }
 }
 
-/// 遮罩贴图第 0 级的逐通道均值，**在存储（gamma）域**上取——自发光缓冲
-/// 存的就是存储域的值（`shaders/fixture_emission.wesl` 采样后编回存储域，
-/// 而那张缓冲是 `Rgba16Float`、硬件不再编码），账目均值同一域才可比。
-/// 8 位纹素本身就是存储值，所以这里**不解码**。alpha 丢弃。
+/// Per-channel mean of level 0 of the mask texture, taken **in the stored
+/// (gamma) domain** — the emission buffer holds stored-domain values
+/// (`shaders/fixture_emission.wesl` encodes back to the stored domain after
+/// sampling, and that buffer is `Rgba16Float`, which the hardware no longer
+/// encodes), and the account mean is comparable only in the same domain. An
+/// 8-bit texel already is the stored value, so nothing is **decoded** here.
+/// Alpha is dropped.
 ///
-/// ⚠ 此前这里解码进线性域，那是**旧的缓冲域**下正确的量法；缓冲域一改，
-/// 这条量法必须跟着改，否则账目报的是一个缓冲里已经不存在的域的数。
+/// ⚠ Decoding into the linear domain used to be done here, and that was the
+/// right measure for an earlier buffer domain; whenever the buffer domain
+/// changes, this measure must change with it, or the account reports numbers
+/// in a domain the buffer no longer holds.
 ///
-/// 形状不可处理（非 RGBA8 两格式/纹素不在/长度不符）具名返回——账目行记
-/// None，不静默取 0。mip 链生成不改第 0 级，链补完再读也一致。
+/// An unhandleable shape (neither RGBA8 format / texels missing / length
+/// mismatch) is returned by name — the account row then records None, never a
+/// silent 0. Mip chain generation does not change level 0, so reading after the
+/// chain is filled gives the same result.
 ///
-/// **`NotSrgb` 是一道 fail-closed 联锁，不是形状拒绝**：着色器那侧
-/// **无条件**把采样值编回存储域，那一步只有在硬件确实解码过（= 纹理按
-/// sRGB 装载）时才是恒等的往返。遮罩走 glb 子资产 label 直载
-/// （bevy_gltf 对没被任何材质按线性用途引用的纹理按 sRGB 装载），所以
-/// 常态是 sRGB；万一某张进来是线性格式，着色器会**多编一次**、自发光整片
-/// 偏亮，而那是个静默的错。⇒ 在这里具名喊出来，别让它静默漂。
+/// **`NotSrgb` is a fail-closed guard, not a shape refusal**: on the shader
+/// side the encode back to the stored domain is **unconditional**, and that
+/// step is an identity round trip only when the hardware really decoded first
+/// (= the texture was loaded as sRGB). The mask is loaded through its glb
+/// sub-asset label (bevy_gltf loads as sRGB a texture that no material
+/// references with a linear usage), so the normal case is sRGB; if one ever
+/// arrives in a linear format, the shader **encodes once more**, the whole
+/// emission turns too bright, and that is a silent error. ⇒ report it here by
+/// name instead of letting it drift silently.
 fn mask_storage_mean(image: &Image) -> Result<[f32; 3], MipSkip> {
     match image.texture_descriptor.format {
         TextureFormat::Rgba8UnormSrgb => {}
@@ -1727,8 +1881,10 @@ fn mask_storage_mean(image: &Image) -> Result<[f32; 3], MipSkip> {
     let data = image.data.as_ref().ok_or(MipSkip::NoData)?;
     let width = image.texture_descriptor.size.width;
     let height = image.texture_descriptor.size.height;
-    // mip 链生成后 data 含全链；均值只读第 0 级（账目行的量法是「遮罩
-    // 整体亮度」，第 0 级全图均值即它的推导基）。短于一级才是真缺数据。
+    // After mip generation the data holds the whole chain; the mean reads only
+    // level 0 (the account row measures the overall mask brightness, and the
+    // whole-image mean of level 0 is the basis of that derivation). Data shorter
+    // than one level is genuinely missing data.
     let level0 = (width * height * 4) as usize;
     if data.len() < level0 {
         return Err(MipSkip::BadLength);
@@ -1743,28 +1899,32 @@ fn mask_storage_mean(image: &Image) -> Result<[f32; 3], MipSkip> {
     Ok([acc[0] / count, acc[1] / count, acc[2] / count])
 }
 
-// ---- 换装 ----
+// ---- Swap ----
 
-/// 换装完成标记。
+/// Completion marker of the material swap.
 #[derive(Resource)]
 pub struct FixtureMaterialsSwapped;
 
-/// 一条换装计划：解析好的家具材质与它的 glb 原材质句柄。
+/// One entry of the swap plan: the resolved furniture material and its glb
+/// material handle.
 struct Planned {
     force_emission: bool,
     name: String,
     material: FixtureMaterial,
-    /// 解析用的 glb 原材质句柄：换装按它换。
+    /// glb material handle the entry was resolved from: the swap replaces by
+    /// it.
     source: Handle<StandardMaterial>,
-    /// 二维选择表的落点（5/6 普通家具、26/27 窗外观）——采样日志对账
-    /// 「窗族走对支路」用。
+    /// Two-dimensional selection table result (5/6 ordinary furniture, 26/27
+    /// window outside), compared in the sampling log to confirm the window
+    /// family takes the right arm.
     attribute: u32,
-    /// 自发光两 int（进 [`FixtureEmission`] 组件）。
+    /// The emission ints (they enter the [`FixtureEmission`] component).
     emission: EmissionInts,
-    /// 变体开关盘对账件（采样日志用，见 [`ResolvedBasic`]）。
+    /// Variant switch panel entry of the sampling log, see [`ResolvedBasic`].
     receive_shadows_off: bool,
     unported_keywords: Vec<String>,
-    /// 反射分支开着但材质绑了真立方图（折叠形对它是错的，分支未开）。
+    /// The reflection branch is on but the material binds a real cube map (the
+    /// folded form is wrong for it, so the branch is off).
     reflection_needs_cubemap: bool,
     /// Crystal keyword on, branch off (named reason).
     crystal_blocked: Option<String>,
@@ -1773,24 +1933,28 @@ struct Planned {
     /// The main texture is the shader's declared default (`white`) because
     /// the material's `_MainTex` slot is empty.
     default_main_tex: bool,
-    /// 自发射遮罩句柄：build 阶段按 extras 的纹理下标从同一 glb 装载。
-    /// None = 材质没有遮罩（门 int 全零时无贡献损失；非零组合按零贡献
-    /// 具名告警，fail-closed）。
+    /// Emission mask handle: loaded at build time from the same glb by the
+    /// texture index in the extras. None = the material has no mask (no
+    /// contribution is lost when the gate ints are all zero; a non-zero gate is
+    /// treated as zero contribution with a named warning, fail-closed).
     mask: Option<Handle<Image>>,
-    /// 数据侧 `_MainTex` 的 scale/offset 四元组（extras 的
-    /// textureScaleOffset），仅供换装完成的采样日志对账——源 Base 变体
-    /// 不消费 `_MainTex_ST`（编译期剔除），shader 侧只有 uv 偏移加法。
-    /// 缺失时记 None，不静默取恒等。
+    /// The data-side scale/offset 4-tuple of `_MainTex` (the extras'
+    /// `textureScaleOffset`), used only for comparison in the swap's sampling
+    /// log — the Basic variant does not consume `_MainTex_ST` (it is culled at
+    /// compile time), and the shader only adds the uv offset. A missing value is
+    /// recorded as None, never silently taken as identity.
     main_tex_st: Option<[f64; 4]>,
 }
 
-/// 一次换装的全部状态。
+/// The complete state of one swap.
 struct SwapPlan {
     planned: Vec<Planned>,
-    /// 渲染状态写零的材质句柄与其源 shader 属性：执行阶段对这些句柄的
-    /// 网格实体隐藏，并挂上属性供模板重放读取。
+    /// Handles of materials whose render state writes nothing, with their shader
+    /// attribute: at execution the mesh entities with these handles are hidden
+    /// and the attribute is attached for stencil replay to read.
     stencil_only: Vec<(Handle<StandardMaterial>, Option<u8>)>,
-    /// ShadowMesh 族的材质句柄：源里恒 0 像素，执行阶段隐藏。
+    /// Handles of ShadowMesh family materials: always 0 pixels in the game,
+    /// hidden at execution.
     shadow_mesh: Vec<Handle<StandardMaterial>>,
     tally: SwapTally,
 }
@@ -1798,8 +1962,8 @@ struct SwapPlan {
 type PendingVisuals<'w, 's> = Query<'w, 's, (Entity, &'static FixtureVisualRoot),
     (With<FixtureVisualSceneReady>, Without<FixtureVisualReady>)>;
 
-/// 计数们：换装完成时一次性 `info!`/`warn!`，是「真的换上了吗」的
-/// 现算证据。
+/// The counters: emitted together as `info!`/`warn!` when a swap completes,
+/// computed at that moment to show that the swap really took place.
 #[derive(Default)]
 struct SwapTally {
     fence_materials: usize,
@@ -1808,29 +1972,35 @@ struct SwapTally {
     rug_entities: usize,
     basic_materials: usize,
     basic_entities: usize,
-    /// 混合材质（`_FixtureObjectBlendMode` = 1）的子计数。
+    /// Sub-count of blended materials (`_FixtureObjectBlendMode` = 1).
     blended_materials: usize,
-    /// 窗外观支路（usage=1 → 落点 26/27）材质的子计数。
+    /// Sub-count of window-outside arm materials (usage=1 → selection 26/27).
     window_clip_materials: usize,
-    /// 墙布局标记面插上的实体数。
+    /// Number of entities marked with the wall-layout marker.
     wall_entities: usize,
-    /// 具名拒绝：族门/必需浮点/二维选择/主贴图缺失/窗门四角不可用。
+    /// Named refusals: family gate / required float / two-dimensional
+    /// selection / missing main texture / unusable window gate corners.
     refused: Vec<String>,
-    /// 闭集内但非 Basic 的族（范围外）：具名保留。
+    /// Families inside the closed set but not Basic (out of scope), kept by
+    /// name.
     unported: Vec<String>,
-    /// 渲染状态写零（ColorMask 0 + ZWrite 0）：隐藏的材质名与实体数。
+    /// Render state writes nothing (`ColorMask` 0 + `ZWrite` 0): hidden material
+    /// names and entity count.
     stencil_hidden_names: Vec<String>,
     stencil_hidden_entities: usize,
-    /// ShadowMesh 族（源 `_Show` 恒 0）：隐藏的材质名与实体数。
+    /// ShadowMesh family (`_Show` always 0): hidden material names and entity
+    /// count.
     shadow_mesh_names: Vec<String>,
     shadow_mesh_entities: usize,
-    /// valid keyword 里本管线没有的分支：逐材质具名（`材质名 (keyword)`），
-    /// 不静默吞。
+    /// Valid keywords with no branch in this pipeline: named per material
+    /// (`material (keyword)`), never swallowed silently.
     unported_keyword_materials: Vec<String>,
-    /// 反射分支接上的材质子计数（立方图槽位为空 ⇒ 采样折叠成常数）。
+    /// Sub-count of materials whose reflection branch is on (empty cube-map
+    /// slot ⇒ the sample folds to a constant).
     reflection_materials: usize,
-    /// 反射分支开着但绑了真立方图的材质名：折叠形对它们是错的，本管线
-    /// 不开分支（keyword 同时留在未实现账里）。
+    /// Names of materials with the reflection branch on that bind a real cube
+    /// map: the folded form is wrong for them and this pipeline keeps the branch
+    /// off (the keyword also stays in the unimplemented account).
     reflection_needs_cubemap_names: Vec<String>,
     /// Materials drawing the crystal branch.
     crystal_materials: usize,
@@ -1840,8 +2010,9 @@ struct SwapTally {
     default_main_tex_materials: usize,
 }
 
-/// Update：全部家具 scene 展开后（`FixtureScenesReady`，fixture 模块的闩）
-/// 建 plan、等贴图到齐、一次性换装。此前每帧空转。
+/// Update system: once every furniture scene is expanded (`FixtureScenesReady`,
+/// the fixture module's latch), build the plan, wait for all textures and swap
+/// once. Before that it does nothing each frame.
 fn switch_materials(
     mut commands: Commands,
     ready: Option<Res<FixtureScenesReady>>,
@@ -1903,7 +2074,8 @@ fn switch_materials(
         return;
     };
 
-    // 等贴图到齐：换装早于贴图到位会让实体闪回默认材质。装载失败具名 panic。
+    // Wait until every texture is present: swapping before that would flash the
+    // entities back to the default material. A failed load panics by name.
     // The shared default image is added directly to the assets, so the asset
     // server has no load state for it; it counts as loaded once it exists.
     let mut all_loaded = true;
@@ -1935,11 +2107,11 @@ fn switch_materials(
         return;
     }
 
-    // Interlock: the shader re-encodes the sampled normal map into the stored
-    // domain unconditionally, which is the identity round trip only for an
-    // sRGB-format texture (how bevy_gltf loads an extras-only texture). A
-    // linear one would be encoded once too often; keep its crystal branch off
-    // by name instead of drawing a bent normal.
+    // Interlock: the shader always re-encodes the sampled normal map into the
+    // stored domain, which is the identity round trip only for an sRGB-format
+    // texture (how bevy_gltf loads an extras-only texture). A linear one would
+    // be encoded once too often; its crystal branch is kept off by name instead
+    // of drawing a bent normal.
     for item in &mut state.planned {
         let format = item.material.crystal.as_ref()
             .and_then(|crystal| crystal.normal_map.as_ref())
@@ -1955,17 +2127,22 @@ fn switch_materials(
         }
     }
 
-    // mip 链补齐（换装前的同一步）：demo 侧对这批 2 的幂贴图由 GPU 生成
-    // 完整链并三线性采样；bevy 的 PNG 装载路径恒 mip_level_count = 1
-    // （bevy_image/bevy_render 均无生成路径），缩采样走无 mip 的 aliasing。
-    // 必须在「查到 Loaded 的同一帧」做：渲染提取会把主世界的 data 取走，
-    // 晚一帧就拿不到纹素了。改主世界 Image 发 Modified 事件，渲染侧按
-    // 新的 descriptor 与 data 重建 GPU 纹理。遮罩同批处理：emission pass
-    // 的两个采样同样带全局 mip 偏置。
+    // Filling the mip chain (a step of the same swap): for these power-of-two
+    // textures the GPU generates a full chain and samples it trilinearly;
+    // bevy's PNG load path always leaves mip_level_count = 1, so minified
+    // sampling aliases without mips. This must run in the same frame `Loaded`
+    // was observed: render extraction takes the `data` of the main world, and
+    // one frame later the texels are gone.
+    // Modifying the main-world `Image` emits Modified and the render side
+    // rebuilds the GPU texture from the new descriptor and data. Masks are
+    // handled in the same batch: the emission pass samples them with the global
+    // mip bias too.
     let mut mipped: Vec<(&str, u32)> = Vec::new();
-    // 同一张贴图被多个材质共享：第一个材质补好链后，后来者遇到的是
-    // 已补好的链（AlreadyChained）——不是跳过，单独计共享数（遮罩与主
-    // 贴图同句柄、或一张遮罩被多个材质共享，都落进这个计数）。
+    // One texture shared by several materials: once the first material has
+    // filled the chain, the later ones find the chain already there
+    // (AlreadyChained) — not a skip, but counted separately as shared (a mask
+    // sharing its handle with the main texture, or one mask shared by several
+    // materials, falls into this count).
     let mut shared_chains = 0usize;
     let mut mip_skipped: Vec<(&str, MipSkip)> = Vec::new();
     for item in &state.planned {
@@ -2010,10 +2187,13 @@ fn switch_materials(
         skipped = mip_skipped,
     );
 
-    // 自发光账目收账：遮罩均值在纹素被渲染提取取走前（换装同帧）读。
-    // 收录面 = 遮罩在手（门 int 全零也收——着色器里的门按现象类型比
-    // 较，类型翻档即非零）或门 int 非零；两者皆无的材质贡献恒 0，不进
-    // 账。天气切档日志读这份账目推逐材质贡献行。
+    // Emission account: the mask mean is read before render extraction takes
+    // the texels (in the same frame as the swap). Collected when the mask is at
+    // hand (also when the gate ints are all zero — the shader compares the gate
+    // by phenomena type, which turns non-zero on a type switch) or when a gate
+    // int is non-zero; a material with neither contributes a constant 0 and is
+    // not accounted. The weather tier-switch log reads this account to derive
+    // each material's contribution row.
     let mut account = EmissionAccount::default();
     let mut mask_mean_skipped: Vec<(String, MipSkip)> = Vec::new();
     mask_means.0.retain(|id, _| images.contains(*id));
@@ -2024,8 +2204,9 @@ fn switch_materials(
         if !armed {
             continue;
         }
-        // 门 int 非零而遮罩缺失：fail-closed 零贡献（不静默取空白遮罩），
-        // 具名告警——这类组合的实体不插自发光组件。
+        // A non-zero gate int with a missing mask: fail-closed zero contribution
+        // (no silent blank mask), with a named warning — entities of such a
+        // combination get no emission component.
         if let Some(reason) = &item.crystal_blocked {
             // The crystal program's second target runs the normal-driven step
             // and the centre damp on the emission colour; without the crystal
@@ -2072,8 +2253,9 @@ fn switch_materials(
         );
     }
 
-    // 换装执行：按 glb 原材质句柄把网格实体归到计划下标，逐条换。
-    // scene 展开后的实体集合在 ready 之后不再变，走一遍层级即可。
+    // Swap execution: map each mesh entity to a plan index by its glb material
+    // handle and swap one by one. After ready the expanded entity set no longer
+    // changes, so one pass over the hierarchy is enough.
     let mut by_handle: HashMap<Handle<StandardMaterial>, usize> = HashMap::new();
     for (index, item) in state.planned.iter().enumerate() {
         by_handle.insert(item.source.clone(), index);
@@ -2091,8 +2273,9 @@ fn switch_materials(
                 stack.extend(kids.iter().map(|child| child));
             }
             let Ok((material, _, _)) = parts.get(entity) else {
-                // 不带 glb 材质名/extras 的实体（非 glb 材质路径）：
-                // 保留原材质，不在此计数（无法具名）。
+                // An entity without a glb material name/extras (not on the glb
+                // material path): keep its original material and do not count it
+                // here (it cannot be named).
                 continue;
             };
             if let Some(index) = by_handle.get(&material.0).copied() {
@@ -2107,9 +2290,12 @@ fn switch_materials(
                     .entity(entity)
                     .remove::<MeshMaterial3d<StandardMaterial>>()
                     .insert(MeshMaterial3d(handle));
-                // 自发光参与资格：遮罩在手即插（门 int 全零也插——片元里
-                // 的门按现象类型比较，自然为零；类型翻档即活）。遮罩缺失
-                // 的材质不插（门 int 非零的组合已在收账段具名告警）。
+                // Emission eligibility: inserted when the mask is at hand (also
+                // when the gate ints are all zero — the fragment compares the
+                // gate by phenomena type, which is zero then and turns live on a
+                // type switch). Materials without a mask are skipped (gate ints
+                // that are non-zero with no mask already got a named warning in
+                // the accounting step).
                 // The colour picker replaces the mask texel, so a picker
                 // material without a mask binds its main texture in the
                 // unread mask slot. A blocked crystal draws no second target.
@@ -2123,7 +2309,8 @@ fn switch_materials(
                         params: item.material.params,
                         key: item.material.key,
                         blend: item.material.blend,
-                        // 缺键按 0：源 shader 的属性默认值就是 0。
+                        // A missing key counts as 0: the shader's property
+                        // default is 0.
                         bright: item.emission.bright.unwrap_or(0.0) as f32,
                         dark: item.emission.dark.unwrap_or(0.0) as f32,
                         force_emission: item.force_emission,
@@ -2237,9 +2424,11 @@ fn switch_materials(
             state.tally.shadow_mesh_names
         );
     }
-    // 逐参数采样日志（验收判据：光色/阈值/ST 实际值可从日志推导）。
-    // 阈值三件按 _OverrideShadingParameter 现选局部或全局，两侧都印——
-    // 选择本身也是被推导的对象。
+    // Per-parameter sampling log (acceptance check: the light colour,
+    // threshold and ST values in use can be derived from the log).
+    // The three threshold values are picked as local or global by
+    // _OverrideShadingParameter; both sides are printed, because the choice
+    // itself is also something to derive.
     for item in &state.planned {
         let p = &item.material.params;
         let use_local = p.override_shading_parameter > 0.5;
@@ -2256,8 +2445,10 @@ fn switch_materials(
                 1.0,
             )
         };
-        // 自发光账目行：按换装当帧的现象类型推门值与贡献（门 × 遮罩
-        // 均值；门 0 贡献 [0,0,0]，门开而遮罩缺/不可读记 None）。
+        // Emission account row: derive the gate and contribution from the
+        // phenomena type of the swap frame (gate × mask mean; gate 0 contributes
+        // [0,0,0], and a gate that is on with a missing or unreadable mask
+        // records None).
         let emission_type = env.emission_type as i32;
         let gate_now = emission_gate(&item.emission, emission_type);
         let mask_mean = account
@@ -2301,9 +2492,10 @@ fn switch_materials(
             rp = item.material.reflection_power,
             ri = item.material.reflection_intensity,
             cube = moly_law::fixture::fresnel::UNBOUND_CUBE_SAMPLE,
-            // 掠射角（N·V → 0，上钳后 fresnel = 1）时这条分支给每个通道
-            // 加的量：采样常数 × intensity。正对相机时该项趋 0，所以这个
-            // 数是它的上界，也是画面上那圈边缘高光的强度。
+            // What this branch adds to each channel at grazing angles (N·V → 0,
+            // fresnel = 1 after the upper clamp): the sample constant ×
+            // intensity. Facing the camera the term tends to 0, so this is its
+            // upper bound, and the strength of the rim highlight on screen.
             edge = moly_law::fixture::fresnel::UNBOUND_CUBE_SAMPLE
                 * item.material.reflection_intensity,
             unported = item.unported_keywords,
@@ -2319,8 +2511,9 @@ fn switch_materials(
                 _ => None,
             },
         );
-        // 窗外观支路对账：落点（26/27 而非 5/6）与门四角——「窗族走对
-        // 支路」从日志可推导。
+        // Window-outside arm check: the selection (26/27 rather than 5/6) and the
+        // gate corners — the log shows that the window family takes the right
+        // arm.
         if item.material.key.window_clip {
             let corners = item.material.params.clip_corners;
             info!(
@@ -2335,7 +2528,8 @@ fn switch_materials(
             );
         }
     }
-    // 全局量实况：换装完成当帧的 SiteEnv（含天气系统接管后的值）。
+    // Live global values: the `SiteEnv` of the frame the swap completes (with
+    // values the weather system has taken over).
     info!(
         "站点全局量实况（换装时）：光向 {:?} 光色 {:?} 阴面色 {:?} 全局阈值 {} 平滑度 {} \
          mip 偏置 {:?} 宝藏位 {:?}/{:?} 宝藏强度 {:?}",
@@ -2389,8 +2583,9 @@ fn switch_materials(
             state.tally.crystal_blocked
         );
     }
-    // 账本入册：天气系统切档时按材质名逐行报自发光贡献（贡献行从这份
-    // 账本现算——各臂可由日志推导）。
+    // Register the account: on a weather tier switch it reports emission
+    // contribution per material name (the contribution rows are computed from
+    // this account — the arms can be derived from the log).
     if swapped.is_none() {
         commands.queue(move |world: &mut World| {
             let mut account = account;
@@ -2404,11 +2599,13 @@ fn switch_materials(
     }
 }
 
-/// 建 plan：从每个家具根实体向下走层级，按 glb 材质句柄收首见实体，
-/// 逐条解析（材质名 + extras + 主贴图句柄）。墙布局标记在执行阶段
-/// 逐实体插（同一句柄可能同时出现在墙内与非墙摆放下）。窗外观支路
-/// 的门四角按「首见根」从同一 glb 的写零面网格读出（同一句柄的多次
-/// 摆放共享同一 glb，四角相同）。
+/// Builds the plan: walks the hierarchy down from each furniture root, collects
+/// the first entity seen per glb material handle and resolves each one
+/// (material name + extras + main texture handle). The wall-layout marker is
+/// attached per entity at execution (the same handle may appear under wall and
+/// non-wall placements). The window-outside gate corners are read from the
+/// zero-write surface mesh of the same glb by the first root seen (repeated
+/// placements of one handle share the same glb, so the corners are identical).
 fn build_swap_plan(
     roots: &PendingVisuals,
     children: &Query<&Children>,
@@ -2423,10 +2620,12 @@ fn build_swap_plan(
     source_textures: &Query<&SourceMaterialTextures>,
     default_white: &Handle<Image>,
 ) -> Option<SwapPlan> {
-    // 首见句柄 → (材质名, extras 原文, 所在根)。同句柄的实体共享同一次
-    // 解析；根记录给窗外观门四角定位写零面用。
+    // First-seen handle → (material name, extras text, root). Entities with the
+    // same handle share one resolution; the root is recorded to locate the
+    // zero-write surface for the window-outside gate corners.
     let mut seen: HashMap<Handle<StandardMaterial>, (String, String, Entity, Entity)> = HashMap::new();
-    // 句柄 → [(根, 网格实体)]：写零面的网格位置从这里读。
+    // Handle → [(root, mesh entity)]: the mesh position of the zero-write
+    // surface is read from here.
     let mut handle_entities: HashMap<Handle<StandardMaterial>, Vec<(Entity, Entity)>> =
         HashMap::new();
     let mut tally = SwapTally::default();
@@ -2451,8 +2650,9 @@ fn build_swap_plan(
                 .push((root_entity, entity));
         }
     }
-    // 第一遍：逐句柄解析 extras 分类。写零面 / ShadowMesh / 范围外 /
-    // 拒绝在这里落账；Basic 挂起，等写零面四角收齐后再解析。
+    // First pass: classify the extras handle by handle. Zero-write surfaces /
+    // ShadowMesh / out of scope / refusals are recorded here; Basic is held
+    // pending and resolved once the zero-write surface corners are collected.
     struct PendingBasic {
         name: String,
         extras: serde_json::Value,
@@ -2471,9 +2671,11 @@ fn build_swap_plan(
                 continue;
             }
         };
-        // 渲染状态「写零」：先于族门判——渲染状态由材质浮点驱动，与
-        // shader 名无关；被拒族的写零材质同样一个像素都不画，保留原材质
-        // 只会把不可见网格画成白板。
+        // Render state "writes nothing": checked before the family gate — the
+        // render state is driven by material floats and is unrelated to the
+        // shader name; a zero-write material of a refused family also draws no
+        // pixel, and keeping its original material would only draw an invisible
+        // mesh as a white surface.
         if is_stencil_only(&extras) {
             tally.stencil_hidden_names.push(name.clone());
             let attribute = extras
@@ -2483,9 +2685,11 @@ fn build_swap_plan(
             stencil_only.push((handle.clone(), attribute));
             continue;
         }
-        // 族门：具名拒绝（URP/Lit）与未知名字走拒绝；闭集内非 Basic 走
-        // 范围外套。ShadowMesh 单独一档：源里恒 0 像素，保留原材质会
-        // 画成错误的实心面，收进隐藏集。
+        // Family gate: the named refusal (URP/Lit) and unknown names are refused;
+        // names inside the closed set but not Basic take the out-of-scope path.
+        // ShadowMesh has its own group: always 0 pixels in the game, and keeping
+        // the original material would draw a wrong solid surface, so it goes into
+        // the hidden set.
         let shader = match extras.get("shader").and_then(|value| value.as_str()) {
             Some(shader) => shader,
             None => {
@@ -2519,9 +2723,12 @@ fn build_swap_plan(
             source: handle.clone(),
         });
     }
-    // 写零面四角：逐根收集写零材质的全部网格唯一顶点，验形（恰好四点、
-    // 平面、凸）后排环序。四点以外的形状或多张不可合并的写零面都具名
-    // 记 Err——usage=1 材质解析时按 Err 拒绝，不静默放行。
+    // Zero-write surface corners: collect the unique vertices of every mesh with
+    // a zero-write material per root, validate the shape (exactly four points,
+    // planar, convex) and order the ring. Any other point count, or several
+    // zero-write surfaces that cannot be merged, is recorded as a named Err —
+    // a usage=1 material is refused on that Err during resolution, never let
+    // through silently.
     let mut stencil_points: HashMap<Entity, Vec<Vec3>> = HashMap::new();
     for (handle, _) in &stencil_only {
         for &(root, entity) in handle_entities.get(handle).into_iter().flatten() {
@@ -2565,7 +2772,8 @@ fn build_swap_plan(
         let quad = order_clip_quad([points[0], points[1], points[2], points[3]]);
         clip_quads.insert(root, quad);
     }
-    // 第二遍：解析 Basic 材质。窗外观支路的门四角按首见根取。
+    // Second pass: resolve the Basic materials. The window-outside gate corners
+    // are taken from the first root seen.
     for PendingBasic {
         name,
         extras,
@@ -2574,7 +2782,8 @@ fn build_swap_plan(
         source,
     } in pending_basic
     {
-        // 主贴图：glb 材质的 baseColorTexture（提取侧把 _MainTex 写进它）。
+        // Main texture: the glb material's `baseColorTexture` (the extractor
+        // writes `_MainTex` into it).
         // Without one, the extras say why: a `_MainTex` key with a null value
         // is a bound texture that is not in this package (refused by name);
         // no key is an empty slot, which the engine fills with the shader's
@@ -2659,8 +2868,10 @@ fn build_swap_plan(
     })
 }
 
-/// 家具材质插件：材质管线 + 换装。全局量桥（`SiteEnvGpuBuffer`）由
-/// 站点材质插件装着，这里只消费——同 buffer 同槽序，两边一起改。
+/// The furniture material plugin: the material pipeline and the swap. The
+/// global-value bridge (`SiteEnvGpuBuffer`) is installed by the site material
+/// plugin and only consumed here — same buffer, same slot order; change both
+/// together.
 #[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
 pub struct FixtureMaterialSet;
 

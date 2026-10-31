@@ -11,11 +11,11 @@
 //!   `libm` crate's port of FreeBSD's `e_powf.c`, which differs from the device on about
 //!   7% of the bases checked below (4% to 10% per exponent).
 //! * The Android build compiles the C source with `-ffp-contract=fast`, and the arm64
-//!   machine code fuses nine multiply-adds (listed in [`log2_inline`] and
-//!   [`exp2_inline`]). Those are fused here too, with an exact integer multiply-add
-//!   ([`fma`]), because a host `mul_add` may itself be a library call.
-//! * NaN results carry the bits the arm64 instructions produce ([`nan_sum`],
-//!   [`quiet`], and the default NaN of an invalid operation), not whatever the host's
+//!   machine code fuses nine multiply-adds (listed in `log2_inline` and
+//!   `exp2_inline`). Those are fused here too, with an exact integer multiply-add
+//!   (`fma`), because a host `mul_add` may itself be a library call.
+//! * NaN results carry the bits the arm64 instructions produce (`nan_sum`,
+//!   `quiet`, and the default NaN of an invalid operation), not whatever the host's
 //!   arithmetic gives.
 //!
 //! How this is known: the AOSP emulator system images for API 29, 31, 33, 35 and 36 (all

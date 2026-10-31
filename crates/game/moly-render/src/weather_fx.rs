@@ -913,7 +913,7 @@ pub fn plan(
                 tally.animation_refused.push(format!("{effect_name}/{}: {reason}", particle["node"].as_str().unwrap_or("")));
                 continue;
             }
-            match judge(
+            if let Some(planned) = judge(
                 effect_name,
                 particle,
                 &by_path,
@@ -926,13 +926,10 @@ pub fn plan(
                 &server,
                 &mut tally,
             ) {
-                Some(planned) => {
-                    if let Some(planned) = admit_animated(&animation, planned, &mut tally) {
-                        tally.admitted += 1;
-                        plans.push(planned);
-                    }
+                if let Some(planned) = admit_animated(&animation, planned, &mut tally) {
+                    tally.admitted += 1;
+                    plans.push(planned);
                 }
-                None => {}
             }
         }
         for node in drop_orphan_targets(&mut plans, effect_start) {
@@ -1406,7 +1403,7 @@ pub fn sub_emitter_edges(emitter: &EmitterParams, graph: &SubEmitterGraph<'_>,
         let modules = moly_assets::particle_source::ParticleSourceModules::from_system(system)
             .map_err(|error| format!("{target}: {error}"))?;
         if !modules.enabled.iter().any(|module| module == "EmissionModule") {
-            return Err(format!("{target}: child EmissionModule disabled; its event emission is not transcribed"));
+            return Err(format!("{target}: child EmissionModule disabled; its event emission is not supported"));
         }
         let archive = serde_json::json!({
             "effects": { "weather": { "particles": [{ "node": target, "system": system.clone() }] } }
@@ -1434,7 +1431,7 @@ pub fn sub_emitter_edges(emitter: &EmitterParams, graph: &SubEmitterGraph<'_>,
                     .map_err(|refused| format!("{target}: collision edge outside the RecordEmit law ({refused:?})"))?;
                 edges.collisions.push(crate::particle_runtime::CollisionEdge { target: target.to_owned(), law });
             }
-            trigger => return Err(format!("{target}: {trigger:?} edge events are not transcribed")),
+            trigger => return Err(format!("{target}: {trigger:?} edge events are not supported")),
         }
     }
     if !birth_order.is_empty() {
@@ -1607,7 +1604,7 @@ fn drop_orphan_targets(plans: &mut Vec<Planned>, start: usize) -> Vec<String> {
 /// parents that does not come back to a node, an authored chain of a site or
 /// sky effect (the owner words are composed there, see `chain_owner`), the
 /// scaled clock, no warm and
-/// the Local or Hierarchy scaling mode (the owner updates transcribed).
+/// the Local or Hierarchy scaling mode (the owner updates implemented).
 /// Returns the parent.
 fn sub_emitter_target_gate(owners: &[String], particle: &Value, graph: &SubEmitterGraph<'_>, kind: EffectKind,
     instance_anchor: Option<GlobalTransform>, instance_targets: bool) -> Result<String, String> {
@@ -1646,15 +1643,15 @@ fn sub_emitter_target_gate(owners: &[String], particle: &Value, graph: &SubEmitt
     let system = particle.get("system");
     match system.and_then(|s| s.get("useUnscaledTime")).and_then(Value::as_bool) {
         Some(false) => {}
-        Some(true) => return Err("useUnscaledTime clock not ported".into()),
+        Some(true) => return Err("useUnscaledTime clock not supported".into()),
         None => return Err("useUnscaledTime not exported".into()),
     }
     if system.and_then(|s| s.get("prewarm")).and_then(Value::as_bool) != Some(false) {
-        return Err("warm of a sub-emitter target is not transcribed".into());
+        return Err("warm of a sub-emitter target is not supported".into());
     }
     match system.and_then(|s| s.get("scalingMode")).and_then(Value::as_u64) {
         Some(0 | 1) => {}
-        mode => return Err(format!("scaling mode {mode:?}: only the Local and Hierarchy owner updates are transcribed")),
+        mode => return Err(format!("scaling mode {mode:?}: only the Local and Hierarchy owner updates are supported")),
     }
     Ok(parent.clone())
 }
@@ -2181,7 +2178,7 @@ fn judge_in_host(
     };
     // The Start* samplers read so far take an ApplyTexture step for each
     // birth group when ShapeModule holds a texture. That step is not
-    // transcribed, so a texture is refused for every shape type and either
+    // implemented, so a texture is refused for every shape type and either
     // birth path; an export without the texture field leaves it undecided.
     if let Some(shape) = &emitter.shape {
         match &shape.controls.texture {
@@ -2238,7 +2235,7 @@ fn judge_in_host(
         let reads_arc_clock = emitter.shape.as_ref().is_some_and(|s| s.shape_type == "Cone"
             && matches!(s.controls.arc_mode, Some(moly_law::particle::schema::ShapeMode::Loop | moly_law::particle::schema::ShapeMode::PingPong)));
         if emitter.prewarm && reads_arc_clock {
-            tally.shape.push(format!("{node}: the arc clock over the first-Play warm is not transcribed")); return None;
+            tally.shape.push(format!("{node}: the arc clock over the first-Play warm is not supported")); return None;
         }
     }
     // Real sub-emitter birth and death edges: the parent records their
@@ -2329,14 +2326,14 @@ fn judge_in_host(
         // Play writes the start delay word and Update1Incremental counts it
         // down on the native birth path (the frame head's distance births
         // wait for it too). A random delay is evaluated with the system
-        // seed's hash, not transcribed; the Director's Simulate path and the
+        // seed's hash, not implemented; the Director's Simulate path and the
         // legacy step carry no such word. A sub-emitter target is stopped
         // every frame, so its word never counts down and holds its clock (its
         // Tick takes only the part of a slice beyond the word); the target
         // install writes the word its Play writes and its stopped frame keeps
         // it, and the target takes no route of its own.
         let reason = if crate::particle_runtime::play_start_delay(&emitter).is_none() {
-            Some("random start delay: Play's seed-hash evaluation is not transcribed".to_owned())
+            Some("random start delay: Play's seed-hash evaluation is not supported".to_owned())
         } else if !native_owner {
             Some("start delay: the Director's Simulate path runs the legacy step, which has no start delay word".to_owned())
         } else if child_parent.is_some() {
@@ -2419,7 +2416,7 @@ fn judge_in_host(
     }
     // The Stretch body reads its three scales, the normal direction and the
     // freeform flag (it reads no pivot). The freeform path, with its
-    // rotate-with-stretch flag, is not transcribed; and the engine multiplies
+    // rotate-with-stretch flag, is not implemented; and the engine multiplies
     // the drawn velocity by the velocity module's speed modifier where that is
     // not the constant one, which the drawn instances here do not carry.
     let stretch = if render_mode == "Stretch" {
@@ -2430,12 +2427,12 @@ fn judge_in_host(
         };
         match renderer.get("freeformStretching").and_then(Value::as_bool) {
             Some(false) => {}
-            Some(true) => { tally.render_mode.push("Stretch freeform stretching is not transcribed".into()); return None; }
+            Some(true) => { tally.render_mode.push("Stretch freeform stretching is not supported".into()); return None; }
             None => { tally.render_mode.push("Stretch freeform flag not exported".into()); return None; }
         }
         if emitter.velocity_over_lifetime.as_ref()
             .is_some_and(|v| v.speed_modifier != moly_law::particle::MinMaxCurve::Constant(1.0)) {
-            tally.render_mode.push("Stretch with a velocity speed modifier other than the constant one: the drawn velocity carries it and is not transcribed".into());
+            tally.render_mode.push("Stretch with a velocity speed modifier other than the constant one: the drawn velocity carries it and is not supported".into());
             return None;
         }
         Some(crate::source_billboard::Stretch { velocity_scale, length_scale, camera_velocity_scale, normal_direction: normal_direction as f32 })
@@ -2504,7 +2501,7 @@ fn judge_in_host(
     }
     // Without 3D rotation the mesh geometry turns each particle about its
     // axis of rotation, whichever birth path feeds it, in the render spaces
-    // whose kernel is transcribed.
+    // whose kernel is implemented.
     let mut axis_body = None;
     if mesh_reference.is_some() {
         let initial_enabled = system.pointer("/sourceModules/enabled").and_then(Value::as_array)
@@ -2723,11 +2720,11 @@ fn judge_in_host(
 
 /// The renderer block as the trail draw reads it: the trail material and the
 /// trail vertex streams in place of the particle ones. Only the fixed trail
-/// vertex layout (position, colour, UV) is transcribed, so custom trail
+/// vertex layout (position, colour, UV) is implemented, so custom trail
 /// streams refuse.
 fn trail_renderer(renderer: &Value) -> Result<Value, String> {
     if renderer.get("useCustomTrailVertexStreams").and_then(Value::as_bool) != Some(false) {
-        return Err("custom trail vertex streams are not transcribed".into());
+        return Err("custom trail vertex streams are not supported".into());
     }
     let material = renderer.get("trailMaterial").filter(|v| v.is_object())
         .ok_or("the renderer carries no trail material")?;

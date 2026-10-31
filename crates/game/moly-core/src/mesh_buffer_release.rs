@@ -32,7 +32,7 @@ use bevy::{
     prelude::*,
     render::{
         mesh::{
-            allocator::{allocate_and_free_meshes, MeshAllocator, MeshSlabId, MeshSlabs},
+            allocator::{allocate_and_free_meshes, MeshAllocator, MeshSlabId},
             RenderMesh,
         },
         render_asset::{prepare_assets, ExtractedAssets},

@@ -262,7 +262,7 @@ fn node_path(doc: &UiPrefab, id: i64) -> String {
     format!("@{}", doc.nodes[index].game_object_id)
 }
 
-fn component<'a>(doc: &'a UiPrefab, id: i64) -> &'a moly_assets::ui_layout::UiComponent {
+fn component(doc: &UiPrefab, id: i64) -> &moly_assets::ui_layout::UiComponent {
     doc.nodes
         .iter()
         .flat_map(|node| &node.components)
@@ -486,7 +486,7 @@ pub fn open(
         }
         let wording = layouts.wording(MESSAGE_KEY);
         let message =
-            moly_law::text::custom_text_mesh::format_wording(&wording, &[master.name.clone()])
+            moly_law::text::custom_text_mesh::format_wording(&wording, std::slice::from_ref(&master.name))
                 .unwrap_or_else(|e| panic!("UI wording {MESSAGE_KEY}: {e}"));
         view.set_texture(&bindings.item_image, &alias);
         view.set_text(&bindings.message_text, message.clone());

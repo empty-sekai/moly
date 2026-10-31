@@ -1,27 +1,31 @@
-//! 家具 Basic 族质感分支的两条加色律：菲涅尔（`fresnel_add`）与反射
-//! （`reflection_add`）。两条是**并列的独立开关**，同一个材质可以只开
-//! 一条、也可以两条同开；同开时源里那个 `1−N·V` 只算一次、两支各取
-//! 一份（一支吃钳后的、一支吃未钳的，见 `reflection_add` 的说明）。
+//! The two additive-color rules of the fixture Basic material
+//! branch: fresnel (`fresnel_add`) and
+//! reflection (`reflection_add`). The two are **independent, parallel switches**: a
+//! material can enable only one, or both; when both are enabled the `1−N·V` is computed only once and each
+//! branch takes a copy (one takes the clamped copy, one takes the unclamped copy, see `reflection_add`).
 //!
-//! 以下是菲涅尔那条。源程序（质感分支开启的着色变体）的片元尾部是
-//! 「加色」而非「乘色」：fresnel 项 = exp2(log2(clamp(1−N·V, 0, 1))
-//! × power) × color.rgb × color.a，逐通道加在宝藏阴影之后、雾之前的
-//! rgb 上。三个承重点，缺一个就是另一个公式：
+//! The following describes the fresnel branch. The source shader's (the variant with the
+//! material branch enabled) fragment tail is
+//! "additive" rather than "multiplicative": fresnel term = exp2(log2(clamp(1−N·V, 0, 1))
+//! × power) × color.rgb × color.a, added per channel to the
+//! rgb after the treasure shadow and before fog. Three essential points, missing one gives a different formula:
 //!
-//! - **先 clamp(1−N·V, 0, 1) 再取对数**——N·V 略超 1（法线/视线各自
-//!   归一化后再点积，完全可能）时，不钳制会走 log2(负数) = NaN；
-//! - **color 的 alpha 是因子**——项还要乘 color.a（bike1 实值
-//!   0.15686…，量级直接砍到六分之一），不是只乘 rgb；
-//! - **视线方向分两支**：透视相机用「相机位 − 片元位」归一化（无
-//!   epsilon 钳制，与法线支不同）；正交相机直接取视图矩阵的第三行
-//!   （列主序 [2]/[6]/[10]），由 unity_OrthoParams.w 是否非零选择。
+//! - **clamp(1−N·V, 0, 1) first, then take the logarithm** — when N·V slightly exceeds 1 (the normal and view
+//!   are each normalized then dotted, entirely possible), without the clamp it would go log2(negative) = NaN;
+//! - **color's alpha is a factor** — the term is further multiplied by color.a (bike1 real value
+//!   0.15686…, reducing the magnitude to one sixth), not only by rgb;
+//! - **the view direction has two branches**: a perspective camera normalizes "camera position − fragment position" (no
+//!   epsilon clamp, unlike the normal branch); an orthographic camera takes the third row of the view matrix
+//!   directly (column-major \[2\]/\[6\]/\[10\]), selected by whether unity_OrthoParams.w is non-zero.
 //!
-//! 期望位由源程序自身的运算顺序在 float32 上独立求值（numpy 逐算子
-//! 转写），与本 crate 无关；断言开 ±1 ULP 窗吸收 exp2/log2 的 libm
-//! 实现差，公式级错误挪动远超 1 ULP。
+//! Expected bits are evaluated independently in float32 following the
+//! source program's operation order (numpy, one operator at a time),
+//! independently of this crate; asserts open a ±1 ULP window to absorb
+//! exp2/log2 libm implementation differences, while a formula-level
+//! error moves far more than 1 ULP.
 
 /// 视线方向：`ortho_params_w` 非零走正交支（视图矩阵第三行，列主序
-/// 下标 [2]/[6]/[10]），否则透视支（相机位减片元位后按
+/// 下标 \[2\]/\[6\]/\[10\]），否则透视支（相机位减片元位后按
 /// inversesqrt(dot) 归一化——与法线支不同，源在这里没有 epsilon
 /// 钳制，零向量会照原样产生 NaN，不替源修）。
 #[must_use]
@@ -71,66 +75,78 @@ pub fn fresnel_add(
     out
 }
 
-/// 一个**未绑定**的立方图采样器采出来的值，每通道恒定。
+/// The value sampled from an **unbound** cube-map sampler; constant per channel.
 ///
-/// 引擎为每种纹理维度备了一张内建默认贴图，绘制期发现某个采样器没有
-/// 绑定对象时按**维度**索引那张表顶上去（三条绘制期路径——纹理参数
-/// 准备、属性表查不到时的兜底、共享材质数据取用——全部按维度索引，
-/// 没有一条按声明里的默认名解析；那个名字只有编辑器侧工具读）。
-/// 立方图那一格的内建贴图是**六个面各自整面清成同一个颜色**的，于是：
+/// The engine prepares a built-in default texture for every texture
+/// dimension; during drawing, when a sampler has no bound object, the entry of that table is indexed by **dimension**
+/// (all three drawing-time paths — texture parameter preparation, fallback when the property table
+/// has no entry, shared material data access — index by dimension;
+/// none resolves by the default name in the declaration; that name is only read by editor-side tools).
+/// The built-in texture in the cube-map slot clears **each of the six faces entirely to the same color**, so:
 ///
-/// **采样值与采样方向、mip 级、mip 偏置、过滤模式全部无关**——六面同色的
-/// 贴图，任何方向、任何 mip、任何插值权重下取出来的都是那一个颜色。
-/// 这就是整条分支能折叠成常数的根据，它不依赖那张贴图有多大或有几级。
+/// **The sampled value is independent of sample direction, mip level, mip bias and filter mode** — for a
+/// texture with six faces of the same color, any direction, any mip, any interpolation weight returns that one color.
+/// This is why the whole branch can be folded into a constant; it does not depend on the texture's size or level count.
 ///
-/// 值 = 每通道 128/255。两侧独立取证：编辑器二进制里那张表的立方图槽位
-/// 与「全黑立方图」走**同一个构造函数**、只差填充实参（0x80808080 对 0）；
-/// 游戏自带的引擎动态库里同两个站点也是**同一个构造函数**、同两个填充值
-/// （逐指令解过，全黑那个站点当阳性对照）。填充色以逐通道 8 位的身份喂给
-/// 清屏调用 ⇒ R=G=B=A=128。工程跑在 gamma 空间（现算，播放器设置里的
-/// 色彩空间标记取 gamma 那一档）⇒ 引擎给默认贴图选的是无 sRGB 标记的
-/// 8 位归一化格式 ⇒ **采样时不做 sRGB 解码，128/255 不打折**。
+/// Construction: the cube-map slot of that table and the "all black cube map" go
+/// through **the same constructor**, differing only in the fill argument
+/// (0x80808080 vs 0), in both the editor binary and the shipped engine dynamic library,
+/// with the same two fill values (the all-black entry serves as a positive control).
+/// Value = 128/255 per channel. The fill color is fed to the clear call as per-channel 8-bit values
+/// ⇒ R=G=B=A=128. The project runs in gamma space (the color-space
+/// setting selects the gamma option) ⇒ the engine's default texture uses
+/// the 8-bit normalized format without an sRGB flag ⇒ **no sRGB decode
+/// at sample time, 128/255 is not reduced**.
 ///
-/// 字面量写死而不写成 `128.0 / 255.0`：那个除法在两种语言的常量求值里
-/// 精度路径不同（一侧单精度一次舍入，另一侧先高精度再落回来，是两次
-/// 舍入），写成十进制字面量则两侧解析出同一批位。这个十进制是该 f32 的
-/// 最短往返形，别把它「化简」回除法。
+/// The literal is written out rather than as `128.0 / 255.0`: that division
+/// takes a different precision path in constant evaluation of the two languages
+/// (single rounding on one side, high precision then back down — two roundings — on the other);
+/// as a decimal literal both sides parse the same bits. This decimal is the
+/// shortest round-trip form of that f32; do not "simplify" it back to the division.
 pub const UNBOUND_CUBE_SAMPLE: f32 = 0.5019608;
 
-/// 质感反射项逐通道加回 rgb，**按未绑定立方图折叠后的形态**。
+/// Adds the material reflection term to rgb per channel, **in the form folded for the unbound cube map**.
 ///
-/// 源序：`d = N·V` → `1−d` → `log2` → `×power` → `exp2` → `min(·, 1)` →
-/// `×立方图采样` → `×intensity` → `+rgb`。四个承重点：
+/// Operation order: `d = N·V` → `1−d` → `log2` → `×power` → `exp2` → `min(·, 1)` →
+/// `×cube sample` → `×intensity` → `+rgb`. Four essential points:
 ///
-/// - **`log2` 的入参没有下钳**——与相邻的菲涅尔支路不同。两支在源里
-///   **共用同一个 `1−d`**（同时开着的变体里那个减法只算一次）：菲涅尔支
-///   吃的是 `clamp(·,0,1)` 之后的副本，反射支吃的是**未钳的原件**。
-///   两支各钳一次、或者让反射支也吃钳后的值，都是另一个函数——
-///   `N·V` 为负（法线背离视线）时未钳的 `1−d` 会大于 1，那正是下面那个
-///   上钳存在的理由。
-/// - **只有上钳 `min(·, 1)`**，写成显式比较是为了对齐被移植语言的 `min`
-///   语义（只在 `1.0 < fresnel` 时取 1.0）⇒ `N·V` 因浮点误差略微超过 1 时
-///   `log2` 收到负数、结果是 NaN，而这个 NaN **照原样穿过去**。源就是这个
-///   形状，不替它补下钳。
-/// - **乘法结合序是 `(采样 × fresnel) × intensity`**，两次乘法，采样常数
-///   先乘。把两个常数预乘成一个是代数重结合，f32 乘法不满足结合律——
-///   折叠只替换掉「取那个纹素」这一步，不动源写下的运算次序。
-/// - **加色不是乘色**，且 alpha 不参与、不被改写。
+/// - **`log2`'s input has no lower clamp** — unlike the adjacent fresnel branch. Both branches
+///   **share the same `1−d`** (in the variant where both are on, that subtraction is computed once): the fresnel branch
+///   takes the `clamp(·,0,1)` copy, the reflection branch takes the **unclamped original**.
+///   Clamping once for each branch, or letting the reflection branch take the clamped value, gives a different function —
+///   when `N·V` is negative (normal facing away from the view), the unclamped `1−d` exceeds 1, which is exactly why the
+///   upper clamp below exists.
+/// - **only the upper clamp `min(·, 1)`** exists; it is written as an
+///   explicit comparison to keep the `min` semantics of the language
+///   the formula is written for (1.0 is taken only when
+///   `1.0 < fresnel`) ⇒ when `N·V` slightly exceeds 1 due to floating
+///   point error, `log2` receives a negative number, the result is NaN,
+///   and that NaN **passes straight through**. That is the shape of the
+///   source, and no lower clamp is added.
+/// - **the multiplication order is `(sample × fresnel) × intensity`**: two multiplications, the sample constant
+///   multiplies first. Pre-multiplying the two constants into one is an algebraic reassociation, and f32 multiplication
+///   is not associative — the fold only replaces the "fetch that texel" step; it does not change the operation order.
+/// - **additive, not multiplicative**, and alpha does not participate and is not rewritten.
 ///
-/// `N·V` 恰为 1（正对视线）时 `log2(0)` 走 IEEE 的负无穷、`exp2` 回到 0
-/// ⇒ 项归零，与逼近正对时的极限一致。
+/// When `N·V` is exactly 1 (facing the view), `log2(0)` is IEEE negative infinity and `exp2` brings it back to 0
+/// ⇒ the term is zero, consistent with the limit approaching the facing case.
 ///
-/// ⚠ **适用边界：只对立方图槽位为空的材质成立。** 真源里这条分支开着的
-/// 材质分两族：蛋系那族的槽位是**空引用**（复核过，同一张纹理表里主贴图
-/// 每条都非空，所以「空」不是读法坏了）⇒ 走本函数；载具那族**绑了一张
-/// 真的立方图**（三个材质指向同一个对象，128×128、八级 mip 链完整在盘）
-/// ⇒ **本函数对它们是错的**，必须真采样，而且 mip 偏置在那边会真的选 mip。
-/// 载具那族当前一个都没摆放。
+/// ⚠ **Boundary of applicability: holds only for materials whose
+/// cube-map slot is empty.** In the game this branch is on for two
+/// families of materials: the egg family's slot is an **empty
+/// reference** (re-checked: every main texture in the same texture
+/// table is non-empty, so "empty" is not a reading error) ⇒ uses this
+/// function; the vehicle family **binds a real cube map** (three
+/// materials point at the same object, 128×128, with a complete
+/// eight-level mip chain on disk) ⇒ **this function is wrong for
+/// them**, they need a real sample, and there the mip bias will really
+/// select a mip. None of the vehicle family is placed yet.
 ///
-/// ⚠ **不要反过来「补一张灰色立方图」再去采样它。** 那是把一个已经证明
-/// 为常数的取值重新展开成一次纹理读，多一张贴图、多一个采样器、多一条
-/// 会漂的路径，换不到任何一位精度——六面同色贴图的采样结果与方向无关，
-/// 这一点在上面那个常量的说明里是有出处的。
+/// ⚠ **Do not "add a gray cube map" and sample it instead.** That would
+/// expand a value already known to be constant into a texture read, adding a texture, a sampler and a
+/// path that can drift, for no bit of accuracy — the sample of a
+/// six-faces-same-color texture is direction-independent, which is
+/// stated in the note on the constant above.
 #[must_use]
 pub fn reflection_add(
     rgb: [f32; 3],
@@ -163,12 +179,13 @@ mod tests {
     ];
     const RGB: [f32; 3] = [0.22, 0.47, 0.81];
 
-    /// 期望位：源运算顺序在 float32 上独立求值（numpy 逐算子转写）。
-    /// 每行挑了能钉住一个公式要素的 N·V：
-    /// - 1.0000001：不先 clamp 就 log2(负数)=NaN ⇒ 钳制次序；
-    /// - 0.0 与 −0.70710678 同位：负半轴饱和于 clamp ⇒ 钳制存在；
-    /// - 0.0 的绝对值：项 = color.rgb×color.a+rgb ⇒ alpha 因子与幂；
-    /// - 0.5/0.25：幂指数取值（power=2 或用 x² 都会挪出窗）。
+    /// Expected bits: the source operation order evaluated independently
+    /// in float32 (numpy, one operator at a time).
+    /// Each row picks an N·V that pins down one element of the formula:
+    /// - 1.0000001: without the clamp first, log2(negative)=NaN ⇒ the clamp order;
+    /// - 0.0 and −0.70710678 at the same bits: the negative half saturates at the clamp ⇒ the clamp exists;
+    /// - the absolute value at 0.0: term = color.rgb×color.a+rgb ⇒ the alpha factor and the power;
+    /// - 0.5/0.25: the exponent value (power=2 or using x² moves outside the window).
     #[test]
     fn fresnel_add_matches_source_evaluated_bits() {
         let cases: [(f32, [u32; 3]); 7] = [

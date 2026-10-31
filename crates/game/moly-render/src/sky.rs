@@ -1,34 +1,49 @@
-//! 天空壳上屏：站点包清单里那个自带网格的 shell 包，配默认现象的渐变条。
+//! Sky shell on screen: the shell package with its own mesh from the site
+//! package manifest, paired with the default phenomenon's gradient ramps.
 //!
-//! 天空不是天空盒：网格与材质（渐变窗口 `_GradientMinY`/`_GradientMaxY`、
-//! 附加色 `_AdditiveColor`、两个渐变槽 `_RampTex1`/`_RampTex2`）都在天空
-//! 壳包里，渐变条内容却来自现象侧——材质记录里两个槽恒为 null，运行时由
-//! 当前现象填。天空壳按**属性**找不按名字找：`kind:"shell"` 的包里同时有
-//! `EnvironmentSkyView` 脚本、有网格、有几何产物的那个才是；材质记录认
-//! 「窗口两端成正经区间＋两个渐变槽在场」。网格或窗口缺一就不画，渐变条
-//! 不是 32×1 也不画——缺数据要可见，不造默认值顶替。
+//! The sky is not a skybox: both the mesh and the material (gradient window
+//! `_GradientMinY`/`_GradientMaxY`, additive colour `_AdditiveColor`, two
+//! gradient slots `_RampTex1`/`_RampTex2`) live in the sky shell package,
+//! while the ramp contents come from the phenomenon side: the two slots are
+//! always null in the material record and are filled at runtime by the
+//! current phenomenon. The sky shell is found by **attributes**, not by name:
+//! it is the `kind:"shell"` package that has the `EnvironmentSkyView` script,
+//! a mesh and a geometry output; a material record qualifies when the window
+//! ends form a proper interval and both gradient slots are present. If the
+//! mesh or the window is missing nothing is drawn, and the ramps are not
+//! drawn either unless they are 32×1; missing data must be visible, so no
+//! default value stands in for it.
 //!
-//! # 默认现象取 001_sunny，为什么
+//! # Why the default phenomenon is 001_sunny
 //!
-//! 现象切换是天气系统的活，本单只挂一个默认：001_sunny 是 id 1 的白天
-//! 基准档（刷新时段 5–17 时），光照取景用的太阳角就是它的 config 值，
-//! 用户验收过的环境层画面描述也是它——同基线，视觉联调时变量最少。
-//! 默认档只管装载后的第一帧；之后的切换由天气系统驱动：`weather` 的环境写入
-//! 每帧把淡化两端的渐变条与进度交给 [`SkyGradient::set_ramps`]。
+//! Switching phenomena belongs to the weather system; this module mounts a
+//! single default. 001_sunny is the daytime baseline of id 1 (refresh period
+//! hours 5–17), the sun angle used for lighting framing is its config value,
+//! and it also produced the accepted environment-layer look — same baseline,
+//! fewest variables while tuning visuals. The default applies only to the
+//! first frame after loading; later switches are driven by the weather
+//! system, whose environment writer hands the ramps at both ends of the fade
+//! and the progress to [`SkyGradient::set_ramps`] every frame.
 //!
-//! # 上屏形状：自定义 Material，不是 StandardMaterial
+//! # On-screen shape: a custom Material, not StandardMaterial
 //!
-//! 天空的着色律（UV 翻转采样渐变条＋附加色往返）与 PBR 无一处同形，
-//! 套 StandardMaterial 只能靠贴图技巧硬凑。自写一份单 pass 片元，
-//! WGSL 逐式镜像 `moly_law::weather::sky` 的律。shader 以字符串内嵌进
-//! `Assets<Shader>`（仓里没有供默认资产源的 assets/ 目录；直接插入会走
-//! `AssetEvent::Added` 进管线缓存，导入解析照常）。
+//! The sky's shading law (UV-flipped ramp sampling plus the additive colour
+//! round trip) has nothing in common with PBR; StandardMaterial could only
+//! approximate it with texture tricks. So there is a hand-written single-pass
+//! fragment stage whose WGSL mirrors the formulas of `moly_law::weather::sky`
+//! one expression at a time. The shader is embedded as a string into
+//! `Assets<Shader>` (the repository has no assets/ directory for the default
+//! asset source; a direct insert goes through `AssetEvent::Added` into the
+//! pipeline cache and import resolution proceeds as usual).
 //!
-//! 挂载：glb 默认 scene 里其余节点（Timeline/PostProcess/EffectRoot 等）
-//! 都是天气系统的货，本单不展开；只取天空网格自身成一个实体，每帧把它的
-//! 世界位置写成玩家视变换的世界位置（`EnvironmentSkyView.OnUpdate`：天空
-//! 渲染器的 `transform.position = Player.GetViewTransform().position`，三个
-//! 分量整份照搬，不是相机、也不只取水平分量）。
+//! Mounting: the remaining nodes of the glb default scene (Timeline,
+//! PostProcess, EffectRoot and so on) all belong to the weather system and
+//! are not covered here; only the sky mesh itself becomes one entity, and
+//! every frame its world position is set to the world position of the
+//! player's view transform (`EnvironmentSkyView.OnUpdate`: the sky
+//! renderer's `transform.position = Player.GetViewTransform().position`,
+//! all three components copied in full, not the camera and not only the
+//! horizontal components).
 
 use bevy::asset::{AssetPath, LoadState, RecursiveDependencyLoadState};
 use bevy::asset::uuid::Uuid;
@@ -507,17 +522,24 @@ pub fn spawn_when_ready(
     );
 }
 
-/// PostUpdate：天空渲染器的世界位置 = 玩家视变换的世界位置，每帧一次。
+/// PostUpdate: the sky renderer's world position is the world position of
+/// the player's view transform, once per frame.
 ///
-/// 真源 `EnvironmentSkyView.OnUpdate`：头像数据仓在、且持有玩家时，取
-/// `PlayerAvatarPresenter.GetViewTransform()`（玩家头像视图自身的变换）的
-/// `position`，原样写进天空渲染器变换的 `position`——三个分量整份照搬，
-/// 旋转与缩放不碰。玩家不在时这一步整段跳过，天空留在上一次的位置。
-/// 本侧的玩家视变换就是相机域跟随的那名成员（`AvatarRoot`）的世界变换。
+/// Matches `EnvironmentSkyView.OnUpdate`: when the avatar data store exists
+/// and holds a player, take the `position` of
+/// `PlayerAvatarPresenter.GetViewTransform()` (the player avatar view's own
+/// transform) and write it unchanged into the `position` of the sky
+/// renderer's transform — all three components copied in full, rotation and
+/// scale untouched. When no player is present this step is skipped entirely
+/// and the sky stays at its previous position. On this side the player's
+/// view transform is the world transform of the member the camera domain
+/// follows (`AvatarRoot`).
 ///
-/// 本系统排在变换传播之后：天空实体是根实体（没有父），所以世界变换与
-/// 局部变换同值，这里两份一起写，当帧画出的就是当帧玩家位置——真源在
-/// 更新阶段写、同帧渲染读，不隔一帧。
+/// This system runs after transform propagation. The sky entity is a root
+/// entity (it has no parent), so its world transform equals its local
+/// transform; both are written here so the player position of this frame is
+/// what this frame draws. The write happens in the update stage and the
+/// render of the same frame reads it, with no one-frame delay.
 pub fn follow_player_view(
     mut domes: Query<(&mut Transform, &mut GlobalTransform), With<SkyDome>>,
     players: Query<&GlobalTransform, (With<crate::markers::AvatarRoot>, Without<SkyDome>)>,

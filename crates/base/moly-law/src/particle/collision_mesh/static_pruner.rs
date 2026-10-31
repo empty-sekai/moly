@@ -1252,11 +1252,10 @@ impl StaticPruner {
                 self.bucket.remove(index, relocated, &self.pool.boxes);
             }
             self.tree_map.invalidate(index, relocated, tree);
-            if rebuilding {
-                if !arms::on("no-rebuild-fixups") {
+            if rebuilding
+                && !arms::on("no-rebuild-fixups") {
                     self.fixups.push((index, relocated));
                 }
-            }
         }
         if self.pool.count == 0 {
             self.release();

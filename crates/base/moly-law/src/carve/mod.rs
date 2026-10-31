@@ -1724,7 +1724,8 @@ mod tests {
         }
     }
 
-    // —— 成对判据一：足迹挖洞（内不可走 ∧ 外可走 ∧ 反向臂）——
+    // —— Paired test 1: footprint carving (inside not walkable ∧ outside
+    // walkable, plus the same point walkable when nothing is carved) ——
 
     #[test]
     fn footprint_carves_inside_and_spare_outside() {
@@ -1748,7 +1749,7 @@ mod tests {
         assert_eq!(carved.counts().obstacle_nulled, 40000);
     }
 
-    // —— 成对判据二：半径内缩可量测 ——
+    // —— Paired test 2: the radius inset is measurable ——
 
     #[test]
     fn agent_radius_inflates_the_carve() {
@@ -1768,7 +1769,7 @@ mod tests {
         assert!(field.walkable_at([6.27, 5.0]));
     }
 
-    // —— 成对判据三：外边界同样侵蚀 ——
+    // —— Paired test 3: the outer boundary erodes too ——
 
     #[test]
     fn outer_boundary_erodes_too() {
@@ -1778,7 +1779,8 @@ mod tests {
         assert!(field.walkable_at([0.5, 5.0]));
     }
 
-    // —— 成对判据四：小区过滤（小岛死 ∧ 大岛活）——
+    // —— Paired test 4: small-region filtering (small island dies ∧ large
+    // island survives) ——
 
     #[test]
     fn small_islands_die_large_survive() {
@@ -1829,7 +1831,8 @@ mod tests {
         assert_eq!(max, [10.0, 10.0]);
     }
 
-    // —— 成对判据五：折线绕洞（正向不穿 ∧ 反向臂确实穿）——
+    // —— Paired test 5: the polyline goes around the hole (no segment
+    // crosses ∧ with nothing carved the direct path does cross) ——
 
     #[test]
     fn path_detours_the_carved_hole_and_reverse_crosses() {
@@ -1854,16 +1857,21 @@ mod tests {
                 window[1]
             );
         }
-        // 路点落在可走集的**闭包**上。
+        // Waypoints lie on the **closure** of the walkable set.
         //
-        // ⚠ 这里不能用 `walkable_at`：搜索从格面搬到多边形网之后，拐点是
-        // 轮廓顶点，而轮廓顶点是**格角**，恰好落在最后一个可走格与第一个
-        // 死格的公共边上——按 `cell_of` 的半开约定归进死格，`walkable_at`
-        // 因此对一个完全正确的拐点报假。
+        // ⚠ `walkable_at` cannot be used here: since the search moved from the
+        // cell surface to the polygon mesh, corners are contour vertices, and
+        // contour vertices are **grid corners** that lie exactly on the shared
+        // edge of the last walkable cell and the first dead cell — under
+        // `cell_of`'s half-open convention they fall into the dead cell, so
+        // `walkable_at` reports false for a completely correct corner.
         //
-        // 而这正是侵蚀的用意：面已经按 agent 半径内缩过，agent 的中心本来
-        // 就可以走到这条边界上。所以判据问的应是「偏离可走集不超过一格」，
-        // 不是「格心可走」。真正的安全性质由上面那条「每段都不穿洞」承担。
+        // And that is exactly what erosion is for: the face has already been
+        // inset by the agent radius, so the agent's centre can reach this
+        // boundary. So the check asks "no more than one cell
+        // away from the walkable set", not "the cell centre is walkable". The
+        // real safety property is carried by the "no segment crosses the
+        // hole" assertion above.
         for p in &path {
             assert!(
                 carved.nearest_walkable(*p, Some(0.05)).is_some(),

@@ -1,18 +1,23 @@
-//! 主光阴影深度图：单图路线（非级联、无图集）的生产侧。
+//! Main-light shadow depth map: the producer side of the single-map route (no
+//! cascades, no atlas).
 //!
-//! 一张光源向正交深度图（单图单矩阵，非级联、无图集），
-//! Core3d 图内自建节点在主 pass 之前直画全部 caster；消费侧是四族站点
-//! 材质（`shaders/site_material.wesl` 的 DropShadow 律消费口，绑定
-//! group 3 的 10/11/12）。节点与绘制范式：weather.rs 的 render graph
-//! 节点 + bevy_pbr volumetric_fog 的 MeshAllocator 手画（0.18 registry
-//! 逐一核对，非记忆）。
+//! One light-facing orthographic depth map (one matrix for the whole map, no
+//! cascades, no atlas); a node built inside the Core3d graph draws every caster
+//! directly before the main pass. The consumers are the site materials
+//! (the DropShadow lookup in `shaders/site_material.wesl`, bound to group 3
+//! bindings 10/11/12). Node and draw pattern: the render graph node style of
+//! weather.rs plus the manual MeshAllocator draw of bevy_pbr volumetric_fog
+//! (checked one by one against the 0.18 registry).
 //!
-//! # Caster 集
+//! # Caster set
 //!
-//! 主世界全部带 [`Mesh3d`] 且层级启用的实体，除了：天空壳（巨大的相机跟随球，
-//! 从光源看是一整圈挡板）、表情绘制位（逐帧重建的世界系 billboard，顶点
-//! 属性即世界坐标，不承载投影语义）、
-//! 雨粒子（[`NoShadowCast`]，真源粒子不进主光 shadowmap）。
+//! Every entity in the main world that has [`Mesh3d`] and is hierarchy-enabled,
+//! except: the sky shell (a huge camera-following sphere that is a full circle
+//! of occluders seen from the light), emote draw sites (world-space billboards
+//! rebuilt every frame whose vertex attributes are world coordinates and carry
+//! no projection semantics),
+//! rain particles ([`NoShadowCast`]: particles are not in the main light
+//! shadow map).
 //!
 //! Skinned meshes take a second route. A skinned mesh casts only when it is a
 //! character renderer: an NPC mesh with the character material or a mesh of
@@ -41,36 +46,51 @@
 //! shadow slice. A rigid mesh without a normal stream gets the bias along
 //! the light only, and is counted in the account line.
 //!
-//! # 数值口径（真源档已读出，本单替换自选值）
+//! # Numeric values
 //!
-//! 站点跑的是引擎资源里那份站点管线资产（游戏进站点时切换装上的那份，
-//! 不是全局默认管线资产——默认那份主光渲染整个是关的），三值全部读自
-//! 真源序列化档：主光影图 1024²、阴影距离 25 m、级联边距 0.1、主光
-//! m_Shadows 强度 1（软影档）。`_MainLightShadowParams` 四分量按引擎
-//! 装配式逐项可推导：x = 主光强度 1、y = 软影开 1（律式不读此槽，账面
-//! 与源一致）、z/w = 距离 fade 两系数，按引擎线性距离 fade 算式从
-//! 距离与边距现算（见 [`SHADOW_FADE_SCALE`] 的推导注释）。Caster 偏置同样
-//! 读自真源：管线资产的深度/法线偏置 1.0/1.0 × texel × 软影核 2.5（顶点侧，
-//! 沿光与沿法线），与阴影切片的全局光栅偏置 1 / 2.5
-//! （[`SHADOW_SLICE_RASTER_BIAS`]）。仍在自选的：光源正交框本身——源框是
-//! 引擎按相机视锥段拟合的（近平面偏移取环境方向光的阴影近平面 0.2），
-//! 本模块框的是整站 caster 包围盒，前后垫量（见 [`DEPTH_PAD`]）与 texel
-//! 的口径（本图的光框宽 / 1024，不是源级联投影的宽）都随之是自选的。
+//! Sites run on the site pipeline asset among the engine resources (the one
+//! installed when the game switches into a site, not the global default
+//! pipeline asset, which disables main-light rendering entirely). The values
+//! below are read from the engine's serialized settings: main-light shadow map
+//! 1024², shadow distance 25 m, cascade margin 0.1, main light m_Shadows
+//! strength 1 (soft shadows). Each component of `_MainLightShadowParams`
+//! follows from the engine assembly: x = main light intensity 1, y = soft
+//! shadows on 1 (the consumer formula does not read that lane, but the value
+//! is written to match the engine), and z/w = the two distance-fade
+//! coefficients, computed from the distance and the margin with the engine's
+//! linear distance-fade formula (see the derivation comment on
+//! [`SHADOW_FADE_SCALE`]). The caster bias comes from the same settings: the
+//! pipeline asset's depth/normal bias 1.0/1.0 × texel × soft-shadow kernel 2.5
+//! (vertex side, along the light and along the normal), together with the
+//! shadow slice's global raster bias 1 / 2.5 ([`SHADOW_SLICE_RASTER_BIAS`]).
+//! Chosen here rather than read: the light's orthographic frame itself. The
+//! engine fits its frame to a segment of the camera frustum (with the
+//! environment directional light's shadow near plane 0.2 as the near-plane
+//! offset); this module frames the bounding box of every caster in the site,
+//! so the front and back padding (see [`DEPTH_PAD`]) and the texel size (this
+//! map's light-frame width / 1024, not the width of the engine's cascade
+//! projection) are chosen here as well.
 //!
-//! # 阴影账目（本单）
+//! # Shadow account
 //!
-//! 「pass 没跑 / 跑了没画 / 图里没内容 / 图有内容但投影对不上」四态
-//! 在画面上同形（无影且无错影），靠一行账目行分开：节点只拿 `&World`，
-//! 计数走 [`ShadowAccount`] 的内部可变性；深度图定期读回（native 侧，
-//! wasm 无阻塞 poll 只落计数），覆盖率、caster 原点对齐与单 texel 比较
-//! 命中并排落日志，供验收逐值复算。
+//! Four failure states look the same on screen (no shadow and no wrong
+//! shadow): the pass did not run, it ran but drew nothing, the map holds no
+//! content, or the map has content but the projection does not line up. One
+//! account line separates them: the node only receives `&World`, so counting
+//! goes through the interior mutability of [`ShadowAccount`]. The depth map is
+//! read back periodically (on the native side; the wasm build has no blocking
+//! poll and only keeps the counts), and coverage, caster origin alignment and
+//! single-texel comparison hits are logged side by side so every value can be
+//! recomputed during acceptance.
 //!
-//! # 帧内节奏
+//! # In-frame sequence
 //!
-//! Extract 抽 caster（含主世界网格的预计算包围盒）→ PrepareResources
-//! 解出光源正交框、写三块 uniform、按顶点布局特化管线 → 节点在
-//! EndPrepasses 与 StartMainPass 之间跑深度 pass（管线没编好或 caster
-//! 为空的帧整段跳过）。
+//! Extract pulls the casters (with precomputed bounds for main-world meshes)
+//! → PrepareResources resolves the light's orthographic frame, writes three
+//! uniform blocks and specializes pipelines by vertex layout → the node runs
+//! the depth pass between EndPrepasses and StartMainPass (a frame whose
+//! pipelines are not compiled yet or whose caster set is empty is skipped
+//! entirely).
 //!
 //! # Static map
 //!
@@ -132,15 +152,20 @@ const STATIC_AFTER_FRAMES: u32 = 30;
 /// 「数值口径」）。
 pub const SHADOWMAP_SIZE: u32 = 1024;
 
-/// 光源正交框的深度安全垫（世界单位）：近/远各外扩一档，避免贴边 caster
-/// 被裁掉。本仓自选值。
+/// Depth safety padding of the light's orthographic frame (world units): the
+/// near and far planes each extend by this amount so casters at the edge are
+/// not clipped. Chosen by this crate.
 ///
-/// 源在这个位置的量是另一种造法：环境预制体里唯一的方向光（站点环境包，
-/// 软影、强度 1）序列化的阴影近平面 0.2（字 `0x3e4ccccd`），经管线的主光
-/// 阴影 pass 原样交给引擎的方向光阴影拟合，作那次拟合的近平面偏移。引擎
-/// 拟合的是相机视锥在阴影距离 25 m 内那一段（单级联、边距 0.1、不用保守
-/// 包围球、迭代 64），不是本模块的整站 caster 包围盒；那次拟合在引擎本体
-/// 里，未移植。所以 0.2 不能直接代进这里——两边的框不是同一个量。
+/// The engine's value at this position serves a different layout: the only
+/// directional light in the environment prefab (the site environment package,
+/// soft shadows, intensity 1) serializes a shadow near plane of 0.2 (bit
+/// pattern `0x3e4ccccd`), which the pipeline's main-light shadow pass passes to
+/// the engine's directional shadow fitting as that fit's near-plane offset.
+/// The engine fits a segment of the camera frustum within the 25 m shadow
+/// distance (one cascade, margin 0.1, no conservative bounding sphere, 64
+/// iterations), not this module's site-wide caster bounding box, and that fit
+/// is not modelled here. So 0.2 cannot be substituted here directly: the two
+/// frames are not the same quantity.
 const DEPTH_PAD: f32 = 1.0;
 
 /// 阴影强度（`SiteShadow.params.x`）：站点环境主光的序列化 m_Shadows
@@ -1141,9 +1166,12 @@ fn prepare_shadow_draws(
         render_queue.write_buffer(&palette.buffer, 0, &draws.palette_bytes);
     }
 
-    // 光源框与采样矩阵：现象/内容不齐的帧写强度 0——律的强度门把 atten
-    // 恒等地折成 1，阴影整段无贡献（不是「跳过采样」的近似）。四分量按
-    // 模块注释「数值口径」逐项取真源档：强度/软影/fade 现算见常量注释。
+    // Light frame and sampling matrices: a frame whose light or content is
+    // incomplete writes intensity 0; the consumer's intensity gate folds atten
+    // to 1 identically, so the shadow contributes nothing (this is not the
+    // approximation of skipping the lookup). The four components take the
+    // serialized values described in the module comment "Numeric values";
+    // strength, soft shadow and fade are computed as noted on their constants.
     let mut resolved: Option<LightMatrices> = None;
     let (frame, consumer) = match env
         .as_deref()

@@ -1131,7 +1131,7 @@ fn prepare(
                                 declaration.name.clone(),
                                 match resource {
                                     Sampled::Depth(depth_view) => SourceSampledResource::View {
-                                        view: *depth_view,
+                                        view: depth_view,
                                         sampler: &depth_sampler,
                                         dimension: TextureViewDimension::D2,
                                         filterable: false,
@@ -1144,7 +1144,7 @@ fn prepare(
                                     },
                                     Sampled::Asset(texture) => {
                                         SourceSampledResource::Asset(SourceSampledTexture {
-                                            image: *texture,
+                                            image: texture,
                                             encoding: SourceTextureEncoding::Raw,
                                         })
                                     }

@@ -810,7 +810,7 @@ impl ShapeBirthLaw {
             word
         };
         let draw = || draw_word().map(super::shape::u01_from_bits);
-        let lanes = |f: &dyn Fn(usize) -> ([f32; 3], [f32; 3])| -> [([f32; 3], [f32; 3]); 4] { std::array::from_fn(|i| f(i)) };
+        let lanes = |f: &dyn Fn(usize) -> ([f32; 3], [f32; 3])| -> [([f32; 3], [f32; 3]); 4] { std::array::from_fn(f) };
         let raw: [([f32; 3], [f32; 3]); 4] = match self.kernel {
             Kernel::Hemisphere { shell, arc_spread } => {
                 let (a, z, r) = (draw(), draw(), draw());

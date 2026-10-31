@@ -1654,14 +1654,14 @@ fn eberly<R: Real>(verts: &[V3], polygons: &[HullPolygon], vertex_data: &[u8], o
         let s = add(com, origin);
         let c = com;
         let sq = |u: f32, v: f32| a::add(a::mul(u, u), a::mul(v, v));
-        t[0][0] = t[0][0] - mass * a::sub(sq(c[1], c[2]), sq(s[1], s[2])) as f64;
-        t[1][1] = t[1][1] - mass * a::sub(sq(c[2], c[0]), sq(s[2], s[0])) as f64;
-        t[2][2] = t[2][2] - mass * a::sub(sq(c[0], c[1]), sq(s[0], s[1])) as f64;
-        t[0][1] = t[0][1] + mass * a::sub(a::mul(c[0], c[1]), a::mul(s[0], s[1])) as f64;
+        t[0][0] -= mass * a::sub(sq(c[1], c[2]), sq(s[1], s[2])) as f64;
+        t[1][1] -= mass * a::sub(sq(c[2], c[0]), sq(s[2], s[0])) as f64;
+        t[2][2] -= mass * a::sub(sq(c[0], c[1]), sq(s[0], s[1])) as f64;
+        t[0][1] += mass * a::sub(a::mul(c[0], c[1]), a::mul(s[0], s[1])) as f64;
         t[1][0] = t[0][1];
-        t[1][2] = t[1][2] + mass * a::sub(a::mul(c[1], c[2]), a::mul(s[1], s[2])) as f64;
+        t[1][2] += mass * a::sub(a::mul(c[1], c[2]), a::mul(s[1], s[2])) as f64;
         t[2][1] = t[1][2];
-        t[0][2] = t[0][2] + mass * a::sub(a::mul(c[2], c[0]), a::mul(s[2], s[0])) as f64;
+        t[0][2] += mass * a::sub(a::mul(c[2], c[0]), a::mul(s[2], s[0])) as f64;
         t[2][0] = t[0][2];
         com = s;
     }

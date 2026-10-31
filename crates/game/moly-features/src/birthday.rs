@@ -1,10 +1,13 @@
-//! 生日派对主表（`birthdayParties`，经区域主表镜像读入）与站点地图庆典门的档期律。
+//! The birthday party master table (`birthdayParties`, read from the region's
+//! master mirror) and the session rules of the site map's celebration gate.
 //!
-//! 真源入口：站点地图点开已解锁的庆典庭院，先问主管理器的
-//! GetMasterBirthdayPartiesInSession——生日派对主表按「档期内」过滤；
-//! 一行都没有则弹一钮对话框（不去），非空才走换站。档期判据是
-//! TimeUtility.IsWithinTime 的两臂律（行上 startAt/closedAt，
-//! epoch 毫秒；closedAt 0 = 无截止），见 [`is_within_time`]。
+//! Entry: tapping an unlocked celebration courtyard on the site map first asks
+//! the master manager for `GetMasterBirthdayPartiesInSession` — the birthday
+//! party table filtered to parties in session; with no row it shows a
+//! one-button dialog (no travel), and only a non-empty result switches site.
+//! The session test is `TimeUtility.IsWithinTime` on the row's
+//! `startAt`/`closedAt` (epoch milliseconds; `closedAt` 0 = no end), see
+//! [`is_within_time`].
 //!
 //! "Now": the source's current time is the server date it last got plus the
 //! real time since. Here it is the one server clock of the server model

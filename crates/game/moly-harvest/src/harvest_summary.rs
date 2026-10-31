@@ -246,7 +246,7 @@ impl Sequence {
             let end = nested.end;
             let (start, change) = *nested
                 .started
-                .get_or_insert_with(|| (current, end - current));
+                .get_or_insert((current, end - current));
             values.set(
                 nested.channel,
                 start + change * nested.ease.evaluate(local, nested.duration),

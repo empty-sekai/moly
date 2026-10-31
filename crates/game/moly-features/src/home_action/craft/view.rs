@@ -1417,15 +1417,15 @@ pub fn place(
         let tabs: Vec<_> = bindings
             .tabs
             .iter()
-            .map(|tab| pixel(&*view, &tab.button))
+            .map(|tab| pixel(&view, &tab.button))
             .collect();
         let cells: Vec<_> = bindings
             .cells
             .iter()
             .take(3)
-            .map(|cell| pixel(&*view, &cell.button))
+            .map(|cell| pixel(&view, &cell.button))
             .collect();
-        let apply = pixel(&*view, &bindings.apply_button);
+        let apply = pixel(&view, &bindings.apply_button);
         info!(
             "[craft] tap map (window px, window {}x{}): back {back:?}, tabs Craft/Tool/LimitedCraft {tabs:?}, first cells {cells:?}, apply {apply:?}; {:?} list, {} rows",
             size.x, size.y, bindings.kind, rows

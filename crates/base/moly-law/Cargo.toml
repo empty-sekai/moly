@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-# 本 crate 禁止依赖 bevy：判据是反编译，律必须活在引擎版本漂移之外。
+# This crate must not depend on bevy: the checks are the game's behavior, and the rules must hold independently of engine version drift.
 # 引擎相关的翻译（component、schedule、材质）一律归 moly-game。
 
 [lints]

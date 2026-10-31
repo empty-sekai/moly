@@ -26,7 +26,7 @@ use crate::{
     fixture_activity_data::FixtureActivityTables,
     fixture_activity_state::{FixtureActivityIdentity, FixtureActivityReservations, FixtureTarget},
     fixture_attach::AttachPoints,
-    fixture_locator::{can_navmesh_move, path_length, REACH_THRESHOLD},
+    fixture_locator::{can_navmesh_move, path_length},
     fixture_scene_inputs::FixtureSceneSupply,
     player_fixture_action::{PlayerFixtureNavigation, PlayerFixturePreparationError},
     site::{GroundEpoch, NavMeshSourceRegion},

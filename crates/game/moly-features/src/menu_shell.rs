@@ -985,7 +985,7 @@ pub fn spawn_when_ready(
     layouts: Res<UiLayouts>,
     server: Res<AssetServer>,
     spawned: Option<Res<ShellSpawned>>,
-    mut notes: Option<ResMut<MissionPanelNotes>>,
+    notes: Option<ResMut<MissionPanelNotes>>,
 ) {
     if spawned.is_some() || !layouts.ready("Common2", &server)
         || ShellHost::ALL.iter().any(|host| !layouts.ready(host.key(), &server)) {

@@ -319,6 +319,7 @@ pub(crate) struct RecordCategory {
 
 /// The convert master tables the model reads.
 #[derive(Clone, Debug, PartialEq)]
+#[derive(Default)]
 pub(crate) struct ConvertMasters {
     pub(crate) items: Option<Vec<ConvertItemMaster>>,
     /// `mysekaiConvertFixtureSlot`: (slotNoUpperLimit,
@@ -335,21 +336,6 @@ pub(crate) struct ConvertMasters {
     pub(crate) pass_rate: Option<f32>,
 }
 
-impl Default for ConvertMasters {
-    fn default() -> Self {
-        Self {
-            items: None,
-            slots: None,
-            level_releases: None,
-            levels: None,
-            resource_boxes: None,
-            blueprint_obtains: None,
-            record_obtains: None,
-            record_categories: None,
-            pass_rate: None,
-        }
-    }
-}
 
 impl ConvertMasters {
     pub(crate) fn item(&self, id: i32) -> Option<&ConvertItemMaster> {

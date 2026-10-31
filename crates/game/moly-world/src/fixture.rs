@@ -1,23 +1,31 @@
-//! 家具装载与摆放：模型包按清单取件，摆放位置走位置律。
+//! Fixture loading and placement: model bundles are fetched by the index, and
+//! placement positions follow the placement rules.
 //!
-//! 装载链：`fixture-models/index.json`（提取侧的包清单，`JsonAsset`
-//! 通道）→ 摆放 mock 逐条点名包名 → 逐包装载 glb 的**默认 scene**
-//! （提取侧把带 `hasFixtureView` 的 prefab 变体排在默认 scene，实测
-//! 999 包全对上）→ 落位由律现算：足迹先按**朝向**重算
-//! （`placed_footprint`），再走位置式（`field_position`：足迹对角中点 ·
-//! 格值 0.25 · 墙外推 0.125），模型另绕 Y 转朝向角
-//! （`direction_yaw_degrees`）→ scene 展开后换装
-//! （`fixture_material.rs`）。
+//! Load chain: `fixture-models/index.json` (the extraction-side bundle index, the
+//! `JsonAsset` channel) → the placement mock names each bundle → each bundle loads
+//! the glb's **default scene** (the extraction side orders the prefab variant with
+//! `hasFixtureView` as the default scene, and all 999 bundles match in practice) →
+//! placement is computed on the spot by the rules: the footprint is first
+//! recomputed from the **facing** (`placed_footprint`), then the position formula
+//! runs (`field_position`: footprint diagonal midpoint · cell value 0.25 · wall
+//! push-out 0.125), and the model is rotated about Y by the facing angle
+//! (`direction_yaw_degrees`) → the scene is expanded and its material swapped
+//! (`fixture_material.rs`).
 //!
-//! ⚠ 朝向改的是**两样**东西：模型的旋转，与足迹两端（进而世界位）。
-//! 只接前者、位置沿用存档列那对角，在奇数边足迹上逐值相同、在偶数边上
-//! 错半格 —— 落地件与占用面因此共用 [`PlacementMock::placed`] 一个入口。
+//! ⚠ The facing changes **two** things: the model's rotation, and the two ends of
+//! the footprint (and thus the world position). Wiring only the former and keeping
+//! the saved row's diagonal gives identical values for odd-sided footprints but is
+//! half a cell off on even-sided ones — so placed pieces and the occupancy surface
+//! share the single entry point [`PlacementMock::placed`].
 //!
-//! 摆放清单是**服务端域**（真源里摆放来自玩家存档、经站点视图运行时
-//! 实例化，离线数据里不存在），按范围通则做成**可下发的具名 mock**
-//! （下表）：条目形状与存档列一一对应（包名 · 足迹 min/max 格 ·
-//! Center.Y · LayoutType 位 · Direction），值是我方选择、逐条具名——
-//! 与巡逻环替身同一裁决形态。位置不写死，全部经律现算。
+//! The placement list is **server-side data** (in the game placements come from
+//! player saves and are instantiated through the site view at runtime, so they do
+//! not exist in offline data); by the scope rules it is made a **distributable,
+//! named mock** (the table below): its entry shape corresponds one to one with the
+//! save columns (bundle name · footprint min/max cells · Center.Y · LayoutType bits
+//! · Direction), and the values are our choices, named entry by entry — the same
+//! decision shape as the patrol-ring stand-ins. No position is hard-coded; all of
+//! them are computed by the rules.
 
 #[path = "fence.rs"]
 mod fence;
@@ -1032,15 +1040,18 @@ impl PlacementMock {
     }
 }
 
-/// 冒烟旋钮 `MOLY_FIXTURE_DIRECTION`：把摆放表的朝向整片改写成
-/// 0=Front / 1=Left / 2=Back / 3=Right。
+/// Smoke knob `MOLY_FIXTURE_DIRECTION`: rewrites the facing of the whole
+/// placement table to 0=Front / 1=Left / 2=Back / 3=Right.
 ///
-/// 存在的**唯一**理由是让判据与冒烟能造出非 Front 的摆放：摆放表那一列
-/// 全是 Front，而 Front 的旋转矩阵是单位元、足迹律是恒等 ⇒ 朝向接与不接
-/// 在原表上逐值相同，画面上也看不出差别。表里的摆放行一条不改。
+/// Its **only** purpose is to let tests and smoke runs produce non-Front
+/// placements: that column of the placement table is all Front, and since the Front
+/// rotation matrix is the identity and the footprint rule is the identity too, the
+/// values are the same whether or not the facing is wired, and the picture shows no
+/// difference either. No placement row in the table is changed.
 ///
-/// 非法值响亮拒绝，不静默退回 Front —— 一个打错的旋钮值静默变成 Front
-/// 会让冒烟报出漂亮的绿数字。
+/// Illegal values are rejected loudly instead of silently falling back to Front —
+/// a mistyped knob value silently becoming Front would make the smoke run report
+/// nice green numbers.
 fn direction_override() -> Option<Direction> {
     let raw = std::env::var("MOLY_FIXTURE_DIRECTION").ok()?;
     let raw = raw.trim().to_owned();
@@ -2327,17 +2338,22 @@ fn normalize_placed_view(pose: &mut Transform) {
     pose.rotation = Quat::IDENTITY;
 }
 
-/// Update：落地件朝向的**读回**，scene 全部展开后报一次。
+/// Update: the **readback** of placed-piece facing, reported once after all scenes
+/// have expanded.
 ///
-/// 为什么要这一条：摆放日志报的是**喂进去的值**，它只证明控制流走到了
-/// 那一行；这条读的是实体上真正持有的 `Transform` —— 渲染消费的就是那个
-/// 组件。本域上一次的缺口恰恰是「值算出来了、没有任何人消费」，所以
-/// 朝向必须有一条读回，不能只有一条账本。
+/// Why this exists: the placement log reports the **values fed in**, which only
+/// proves that control flow reached that line; this reads the `Transform` the entity
+/// actually holds — the component rendering consumes. The previous gap in this domain
+/// was exactly "the value was computed and nobody consumed it", so facing needs a
+/// readback and not only a ledger line.
 ///
-/// 读法不解 euler：把 `+Z` 用实体的旋转转一遍，`atan2(x, z)` 就是绕 Y
-/// 的角（`from_rotation_y` 的逆）。同时验 **`+Y` 必须还是 `+Y`** ——
-/// 那一臂抓「转错轴」，只看 yaw 的话绕 X 或 Z 的旋转也能给出一个数。
-/// 期望与实测不符时 `error!`：这条路径上没有本机判据，至少要会喊。
+/// The read does not decompose euler angles: it rotates `+Z` by the entity's rotation
+/// and `atan2(x, z)` is the angle about Y (the inverse of `from_rotation_y`). It also
+/// checks that **`+Y` is still `+Y`** — that arm catches a rotation about the wrong
+/// axis, since looking at yaw alone a rotation about X or Z would still give a
+/// number.
+/// A mismatch between expected and measured value is reported with `error!`: there
+/// is no in-place test on this path, so it must at least shout.
 fn report_orientation(
     mut done: Local<bool>,
     revision: Res<FixtureLayoutRevision>,

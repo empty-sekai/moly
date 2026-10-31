@@ -287,7 +287,7 @@ fn check_entry_path(entry: &str) -> Result<(), ManifestError> {
     if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
         return Err(refuse("must not start with a drive letter"));
     }
-    if entry.split(|c: char| c == '/' || c == '\\').any(|part| part == "..") {
+    if entry.split(['/', '\\']).any(|part| part == "..") {
         return Err(refuse("must not contain a `..` component"));
     }
     Ok(())

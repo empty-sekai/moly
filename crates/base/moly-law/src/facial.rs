@@ -147,7 +147,7 @@ impl ChannelRms {
     pub fn submit_channel_zero(&mut self, samples: &[f32]) -> Result<Option<f32>, &'static str> {
         let count = u32::try_from(samples.len()).map_err(|_| "PCM callback is too large")?;
         self.frames = self.frames.checked_add(count).ok_or("RMS sample count overflow")?;
-        self.sum_squares = source_sum_squares(samples) + self.sum_squares;
+        self.sum_squares += source_sum_squares(samples);
         if self.frames < self.window_frames { return Ok(None); }
         // Keep the source operation order: reciprocal count, multiply, sqrt.
         self.latest = ((1.0 / self.frames as f32) * self.sum_squares).sqrt();

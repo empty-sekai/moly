@@ -95,17 +95,20 @@ impl ActivityAssets {
         removed += self.packages.sweep_unused();
         removed
     }
-    /// `Assets<JsonAsset>` 最后一次被改动的 tick。
+    /// The tick at which `Assets<JsonAsset>` was last changed.
     ///
-    /// 缓存条目记下它在**哪个代**校验过；只要这个代没变，就说明期间没有
-    /// 任何 json 资产被加载、替换或移除，那条缓存必然仍然成立。这是 O(1)
-    /// 的，而下面的慢路径要把整份 json 文本克隆一遍再逐字节比对——命中
-    /// 缓存的代价因此和重新解析同量级，实测占稳态帧时约 46%
-    /// （`definition` 18.3% + `memcmp` 17% + `json_text` 11.2%）。
+    /// A cache entry records the **generation** it was validated in; as long as that
+    /// generation is unchanged, no json asset has been loaded, replaced or removed in
+    /// the meantime, so the entry must still hold. This check is O(1), whereas the
+    /// slow path below clones the whole json text and compares it byte by byte — the
+    /// hit cost is therefore on the same order as re-parsing, and measured at about
+    /// 46% of steady-state frame time (`definition` 18.3% + `memcmp` 17% + `json_text`
+    /// 11.2%).
     ///
-    /// 拿不到资源时返回 `None`，而 `None != None` 的判据写在调用点：一律
-    /// 走慢路径。**慢路径原样保留原来的逐字节比对**，所以这条快路径最坏
-    /// 情况只是没命中，不可能给出与原来不同的结果。
+    /// Returns `None` when the resource is unavailable, and the `None != None` check
+    /// lives at the call sites: they then always take the slow path. **The slow path
+    /// keeps the original byte-by-byte comparison unchanged**, so the worst case of
+    /// this fast path is a miss; it cannot produce a different result.
     fn json_generation(world: &World) -> Option<Tick> {
         world
             .get_resource_ref::<Assets<JsonAsset>>()

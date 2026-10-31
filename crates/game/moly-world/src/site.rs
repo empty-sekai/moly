@@ -1,27 +1,37 @@
-//! 站点装载：sites.json 主表驱动的站点选择、glTF 展开与地表定位、房间
-//! 模块拼装；多站切换入口（按键与冒烟巡游）也在这里。
+//! Site loading: site selection driven by the sites.json master table, glTF
+//! expansion and ground placement, and room module assembly; the multi-site
+//! switching entry points (keys and the smoke tour) live here as well.
 //!
-//! 一世界九站的位点与语义都在主表（scene 目录、sitePosition、类别、等
-//! 级），支持集=主表全量九行，这里只消费它：站点类型 → 场景目录，一次
-//! 装载一站。房间类站点（first_floor 一族，真源按 siteType 切到
-//! MyRoomSiteController；二三楼与一楼共用一个场景包，只差
-//! sitePosition.y）的场景包只有壳——体积与插槽，没有墙和地板；房间本
-//! 体按等级从室内件拼装：模块包的两个 prefab scene（mdl_static_floor 与
-//! mdl_static_wall，五个等级同构）加该等级的寻路面（室内导航包按等级
-//! 落盘的面）。lv_01/02 的寻路面在盘上没有几何，这是 authored 状态不是
-//! 缺口——此时模块地板兼寻路面，同一张网格正是 lv_03+ 导航面所引用者。
+//! The positions and semantics of the nine sites of the world are all in the master
+//! table (scene directory, sitePosition, category, level), and the supported set is
+//! the full nine master rows, which this module only consumes: site type → scene
+//! directory, one site loaded at a time. A room-type site (the first_floor family,
+//! dispatched by siteType to MyRoomSiteController; the second and third floors share
+//! one scene bundle with the first, differing only in sitePosition.y) has a scene
+//! bundle that is only a shell — volumes and slots, no walls or floor; the room body
+//! is assembled per level from the interior pieces: the module bundle's two prefab
+//! scenes (mdl_static_floor and mdl_static_wall, isomorphic across the five levels)
+//! plus that level's pathfinding surface (the surface written to disk per level by
+//! the indoor navigation bundle). The lv_01/02 pathfinding surface has no geometry on
+//! disk, which is an authored state rather than a gap — the module floor doubles as
+//! the pathfinding surface, and that same mesh is the one lv_03+ navigation surfaces
+//! reference.
 //!
-//! 玩家可行走面（navmesh 约束面）的来源随站点包清单（index.json
-//! `scenes[]`）走：grasslands 吃烘档高度网格 heightmesh-0.glb，其余有
-//! `walkableGround` 的站吃显式导航输入面。运行时烘焙的站同样有导航
-//! 输入，不能因没有离线瓦片而改用带陡壁与底面的渲染地表。室内按等级
-//! 选择导航面，只有该等级未提供独立几何时才用模块地板。
+//! The player's walkable surface (the navmesh constraint surface) comes from the
+//! site bundle manifest (index.json `scenes[]`): grasslands uses the baked height
+//! mesh heightmesh-0.glb, and every other site with `walkableGround` uses its explicit
+//! navigation input surface. A runtime-baked site also has navigation input, and must
+//! not be switched to the rendered ground (which has steep walls and a bottom face)
+//! just because it has no offline tiles. Indoors the navigation surface is chosen per
+//! level, and the module floor is used only when that level provides no separate
+//! geometry.
 //!
-//! 站点几何是 site-local 的，世界偏移（sitePosition）归消费侧施加。当前站
-//! 是世界原点：广场格位锚定的摆放 mock 与取景数学都系在这一口径上。
+//! Site geometry is site-local, and the world offset (sitePosition) is applied by the
+//! consuming side. The current site is the world origin: the plaza cell-anchored
+//! placement mock and the framing math are tied to this convention.
 //!
-//! Residency ([`ResidentSites`], the source's `SiteManager.SiteList`): the
-//! source keeps several sites loaded, each at its master `SitePosition`
+//! Residency ([`ResidentSites`], `SiteManager.SiteList`): the engine keeps several
+//! sites loaded, each at its master `SitePosition`
 //! (home to its nearest outdoor site is 283 m, to the farthest 849 m).
 //! `Initialize` adds home and first_floor; every
 //! `OnEnterSite` calls `HideOtherSite`, which runs `HideSite`
@@ -36,11 +46,14 @@
 //! at its offset until the move's end action ([`queue_cannon_swap`],
 //! [`end_departure`]).
 //!
-//! 切换：Tab 循环、数字键直选（支持集内的站），或 `MOLY_SITE_TOUR_SECS`
-//! 冒烟巡游仪表（无人值守逐站装载，末站驻留毕干净退出）。切换时当前站
-//! 按上面的驻留律退场（移除，或隐藏留在名单里）、站点域资源全清、写新
-//! 选择让装载计划重走。名册与玩家实体保留（角色装配链不参与换站），新
-//! 地面定案后由 npc/player 域的重播种面落位。
+//! Switching: Tab cycling, direct number keys (sites in the supported set), or the
+//! `MOLY_SITE_TOUR_SECS` smoke-tour instrument (unattended site-by-site loading,
+//! exiting cleanly once the last site has stayed). On a switch the current site
+//! leaves according to the residency rules above (removed, or hidden and left in the
+//! list), all site-domain resources are cleared, and a new selection is written so
+//! the load plan runs again. The roster and the player entity are kept (the character
+//! assembly chain takes no part in switching), and once the new ground is settled the
+//! npc/player domains' reseeding pass places them.
 
 use crate::inactive_nodes::{self, SiteSettled};
 use crate::site_material;
@@ -59,10 +72,12 @@ use std::collections::HashMap;
 /// 缺省站点：入口未传参时装载它（主表的 grasslands 行）。
 pub const SITE: &str = "grasslands";
 
-/// 支持集（主表行按 siteType 名对号，与真源的 switch 同形；scene 目录名
-/// 是另一列，由行解析给出）。九站=主表全量，顺序即主表行序：Tab 循环、
-/// 数字键直选与巡游都按它走。场景包站与房间站两条装载链都在；新站上屏
-/// 是在此加名字，不是新链。
+/// Supported set (master rows are matched by siteType name, the same shape as the
+/// engine's switch; the scene directory name
+/// is another column supplied by row parsing). The nine sites are the full master
+/// set, in master row order: Tab cycling, direct number keys and the tour all
+/// follow it. Both load chains are present, scene-bundle sites and room sites;
+/// adding a new site to the screen means adding its name here, not a new chain.
 const SUPPORTED: [&str; 9] = [
     "home_site",
     "first_floor",
@@ -1616,8 +1631,10 @@ impl SitePreload {
     }
 }
 
-/// Update：glTF 族及依赖到齐后展开 scene 并记下寻路面网格。到齐判据用
-/// AssetServer 的依赖图；每个柄独立过门，失败具名 panic。
+/// Update: expands the scene once the glTF family and its dependencies have all
+/// arrived, and records the pathfinding surface meshes. Readiness is checked with
+/// the AssetServer dependency graph; each handle passes its own gate, and a failure
+/// panics with the handle named.
 pub fn spawn_when_ready(
     mut commands: Commands,
     server: Res<AssetServer>,
@@ -1722,13 +1739,13 @@ struct ScenePlan {
     face: Vec<Handle<Mesh>>,
 }
 fn scene_plan(server: &AssetServer, gltfs: &Assets<Gltf>, gltf_meshes: &Assets<GltfMesh>, assets: &SiteAssets) -> Option<ScenePlan> {
-    if !ready(&server, &assets.gltf, "站点主 glTF") {
+    if !ready(server, &assets.gltf, "站点主 glTF") {
         return None;
     }
     // navmesh 面极小，到齐只会早于主包；先过门再发任何展开命令，避免
     // 半途 return 把主 scene 铺两遍。
     if let Some(handle) = &assets.navmesh {
-        if !ready(&server, handle, "可行走面 glTF") {
+        if !ready(server, handle, "可行走面 glTF") {
             return None;
         }
     }
@@ -1757,17 +1774,19 @@ fn scene_plan(server: &AssetServer, gltfs: &Assets<Gltf>, gltf_meshes: &Assets<G
         scenes.push((obstacle.clone(), false));
     }
     let (ground, face) = match (&assets.module, &assets.walkable) {
-        // 场景包站点：地表是主 glTF 里承载地表的网格（相机取景的锚，名
-        // 单逐站对账）。有独立导航输入的站另装可行走面
-        // ——隐藏实体，只采样不进画面（真源里它也只在导航上被读）；
-        // 清单未提供独立导航输入时才让地表兼面。
+        // Scene-bundle site: the ground is the mesh carrying the ground in the main
+        // glTF (the anchor of camera framing, reconciled per site against the
+        // manifest). A site with its own navigation input also mounts a walkable
+        // surface — a hidden entity, sampled only and never rendered (it is read only
+        // by navigation); the ground doubles as the surface only when the manifest
+        // provides no separate navigation input.
         (None, None) => {
             let mut ground = Vec::new();
             for name in &assets.grounds {
                 let Some(handle) = gltf.named_meshes.get(name.as_str()) else {
                     panic!("站点主 glTF 没有名为 {name} 的地表网格");
                 };
-                ground.extend(ground_meshes(&gltf_meshes, handle));
+                ground.extend(ground_meshes(gltf_meshes, handle));
             }
             let face = match &assets.navmesh {
                 Some(handle) => {
@@ -1777,7 +1796,7 @@ fn scene_plan(server: &AssetServer, gltfs: &Assets<Gltf>, gltf_meshes: &Assets<G
                     let Some((_, mesh)) = navmesh.named_meshes.iter().next() else {
                         panic!("可行走面 glTF 没有网格");
                     };
-                    let face = ground_meshes(&gltf_meshes, mesh);
+                    let face = ground_meshes(gltf_meshes, mesh);
                     let Some(scene) = navmesh.default_scene.clone() else {
                         panic!("可行走面 glTF 没有默认 scene");
                     };
@@ -1790,7 +1809,7 @@ fn scene_plan(server: &AssetServer, gltfs: &Assets<Gltf>, gltf_meshes: &Assets<G
         }
         // 房间站：壳之外再拼模块两面（按场景名定位），寻路面按账目来源取。
         (Some(module), walkable) => {
-            if !ready(&server, module, "房间模块 glTF") {
+            if !ready(server, module, "房间模块 glTF") {
                 return None;
             }
             let Some(module) = gltfs.get(module) else {
@@ -1803,10 +1822,11 @@ fn scene_plan(server: &AssetServer, gltfs: &Assets<Gltf>, gltf_meshes: &Assets<G
                 scenes.push((scene.clone(), false));
             }
             match walkable {
-                // 寻路面有落盘几何：铺成不可见实体（寻路面采样只读顶点，
-                // 不进画面——真源里它也只在导航烘焙时被读）。
+                // The pathfinding surface has geometry on disk: it is laid out as an
+                // invisible entity (pathfinding samples only read vertices and it is
+                // never drawn — it is read only during navigation baking).
                 Some(handle) => {
-                    if !ready(&server, handle, "室内寻路面 glTF") {
+                    if !ready(server, handle, "室内寻路面 glTF") {
                         return None;
                     }
                     let Some(walkable) = gltfs.get(handle) else {
@@ -1815,7 +1835,7 @@ fn scene_plan(server: &AssetServer, gltfs: &Assets<Gltf>, gltf_meshes: &Assets<G
                     let Some((_, mesh)) = walkable.named_meshes.iter().next() else {
                         panic!("室内寻路面 glTF 没有网格");
                     };
-                    let meshes = ground_meshes(&gltf_meshes, mesh);
+                    let meshes = ground_meshes(gltf_meshes, mesh);
                     let Some(scene) = walkable.default_scene.clone() else {
                         panic!("室内寻路面 glTF 没有默认 scene");
                     };
@@ -1833,7 +1853,7 @@ fn scene_plan(server: &AssetServer, gltfs: &Assets<Gltf>, gltf_meshes: &Assets<G
                             panic!("房间模块 glTF 没有 {MODULE_FLOOR_PREFIX} 前缀的地板网格")
                         });
                     let mesh = module.named_meshes.get(&name).expect("键取自同一张表");
-                    (ground_meshes(&gltf_meshes, mesh), None)
+                    (ground_meshes(gltf_meshes, mesh), None)
                 }
             }
         }
@@ -1919,7 +1939,8 @@ fn ground_names(scene: &str) -> &'static [&'static str] {
         .unwrap_or(&[GROUND])
 }
 
-/// 一个柄的依赖图到齐判据；失败具名 panic（资产边界的唯一拒绝点）。
+/// Readiness of one handle's dependency graph; a failure panics with the handle
+/// named (the single rejection point at the asset boundary).
 fn ready(server: &AssetServer, handle: &Handle<Gltf>, label: &str) -> bool {
     if let LoadState::Failed(err) = server.load_state(handle) {
         panic!("{label}装载失败：{err:?}");

@@ -1,18 +1,24 @@
-//! 站点材质：九个站点族的 Base 程序共用一个 Bevy Material。
+//! Site materials: the Base program of the nine site families shares one
+//! Bevy Material.
 //!
-//! 材质值来自 sidecar 的 [`MaterialSlot`]（key 是 Unity 属性名的原拼写），
-//! 族与 keyword 变体由 [`SiteMaterialKey`] 编码进管线特化；WGSL 在
-//! `shaders/site_material.wesl`，九族共用一份、按宏分派。
+//! Material values come from the sidecar's [`MaterialSlot`] (keys keep the
+//! spelling of the Unity property names), and [`SiteMaterialKey`] encodes the
+//! family and keyword variant into the pipeline specialization. The shader
+//! lives in `shaders/site_material.wesl`: one source for all nine families,
+//! dispatched by macros.
 //!
-//! 族门（按真源重定）：门 = 「序列化 keyword 全部落在本族的
-//! 已实现轴清单内」+「族要求的必在键都在」+「值域开关在已实现的取值上」。
-//! 关键词集合不再从「我方旧闭集」长出来，而是逐族对着源变体表写；
-//! 每条轴（overlay、fresnel、clip、dither、高度淡出、收影、树动画）
-//! 在哪个族、以什么形式（编译期 keyword / 运行时标量）生效，都有源
-//! 变体逐行钉住。
+//! Family gate: a material passes only when its serialized keywords all fall
+//! within the family's implemented axis list, every key the family requires is
+//! present, and every value-domain switch holds one of the implemented values.
+//! Each family's keyword set is written out from that family's variant table;
+//! for every axis (overlay, fresnel, clip, dither, height fade, shadow receive,
+//! tree animation) the family where it applies and the form it takes
+//! (compile-time keyword or runtime scalar) are fixed per variant.
 //!
-//! 族门不过、必需槽缺失或值域开关越界保留原材质；缺失 UV1 使用
-//! 引擎顶点输入的零值，再按导出坐标约定翻转 V，不改用 UV0。
+//! A material that fails the family gate, lacks a required slot or has a
+//! value-domain switch out of range keeps its original material. A missing
+//! UV1 uses the zero value of the engine vertex input, with V flipped by the
+//! exported coordinate convention; UV0 is never substituted.
 
 use std::collections::HashMap;
 
@@ -32,31 +38,42 @@ use bevy::shader::ShaderRef;
 use bevy::image::ImageLoaderSettings;
 use moly_assets::sidecar::{MolyJson, MolyJsonLoader, SiteSidecar};
 
-/// 按声明的著色空间装载贴图：sRGB（色彩）走装载器默认，线性数据
-/// （法线/遮罩一族）关掉解码——色彩空间的唯一声明在 sidecar 的
-/// `textureColourSpace`（提取侧从源纹理的 m_ColorSpace 记录；PNG 本身
-/// 不带元数据）。声明缺席（旧产物）按 sRGB：既有口径。
+/// Loads a texture according to its declared colour space: sRGB (colour)
+/// textures use the loader default, while linear data (normals and masks)
+/// turns decoding off. The colour space is declared only in the sidecar's
+/// `textureColourSpace`, recorded from the texture's m_ColorSpace (a PNG
+/// carries no such metadata). A missing declaration (older outputs) means
+/// sRGB.
 ///
-/// `dir` 是 `moly://` 之后的目录段：站点场景包 `site/scenes/<site>`、
-/// 采集物包 `site/props/<leaf>`（目录布局沿用提取产物）。
+/// `dir` is the directory segment after `moly://`: `site/scenes/<site>` for
+/// site scene packages and `site/props/<leaf>` for harvest prop packages
+/// (the directory layout follows the extracted packages).
 ///
-/// # 线性声明是一道 fail-closed 联锁
+/// # A linear declaration is a fail-closed interlock
 ///
-/// `shaders/site_material.wesl` 采样后**无条件**把值编回存储（gamma）域
-/// ——真源是 gamma 色彩空间构建，整条片元链在存储域上算。那一步只有在
-/// 硬件确实解码过（= 纹理按 sRGB 装载）时才是恒等的往返。
+/// After sampling, `shaders/site_material.wesl` **unconditionally** encodes
+/// the value back into the storage (gamma) domain: the shader is built for the
+/// gamma colour space, so the whole fragment chain computes in the storage
+/// domain. That step is an identity round trip only when the hardware has
+/// actually decoded the texture, that is, when it was loaded as sRGB.
 ///
-/// 走这个函数的贴图**全部**被当作颜色消费（八族解析与采集物复用
-/// `resolve_fieldobject` / `resolve_tree` 的臂只装 `_MainTex`、两层
-/// `_OverlayColorMap`、`_LeafMaskTex`，后者也是拿存储值比阈值）⇒ 一张
-/// 线性声明的贴图进到这里，着色器会**多编一次**、那个材质整体偏亮，而那
-/// 是个静默的错。现算（2026-09-09，按包目录点名数 scenes 8 包 + props 62 包
-/// 的已绑定槽实例）：本族消费的四个槽 `_MainTex` 387 · `_OverlayColorMap` 33
-/// · `_OverlayColorMap2nd` 11 · `_LeafMaskTex` 1 = **432/432 全声明 sRGB**，
-/// 整份产物里唯一的线性声明是一张 `_NormalTexture`，而本族没有法线槽、
-/// 它没有消费者 ⇒ 当前数据下这条支路走不到。
-/// ⇒ 所以着色器那边不做运行时旋钮（不为一个枚举不出来的输入加每帧分支），
-/// 换成在这里具名喊：**提取产物哪天真给出一张线性的颜色贴图，先听见再说。**
+/// **Every** texture that goes through this function is consumed as a colour
+/// (the arms of the eight family resolvers and the harvest prop reuse of
+/// `resolve_fieldobject` / `resolve_tree` bind only `_MainTex`, the two
+/// `_OverlayColorMap` layers and `_LeafMaskTex`, the last of which also
+/// compares stored values against a threshold). So a texture with a linear
+/// declaration would be encoded **one more time** in the shader, brightening
+/// that whole material silently. Counted on 2026-09-09 over the bound slot
+/// instances of 8 scene packages plus 62 prop packages: the four slots this
+/// family consumes are `_MainTex` 387 · `_OverlayColorMap` 33 ·
+/// `_OverlayColorMap2nd` 11 · `_LeafMaskTex` 1 = **432/432 all declared
+/// sRGB**; the only linear declaration in the whole output is one
+/// `_NormalTexture`, which has no consumer because this family has no normal
+/// slot, so with the current data this branch is unreachable.
+/// The shader therefore has no runtime knob for it (no per-frame branch for an
+/// input that cannot be enumerated); instead this function warns by name:
+/// **if the extraction output ever hands over a linear colour texture, it is
+/// reported here.**
 pub fn load_dir_texture(
     server: &AssetServer,
     sidecar: &SiteSidecar,
@@ -104,8 +121,8 @@ use crate::render_inputs::SiteSceneGltf;
 use crate::site_extension::SiteExtensionGpuBuffer;
 use crate::source_stencil::StencilClipMask;
 
-/// Ground-Birthday 族名（真源 shader 名）。law 侧只收了四个老族；
-/// 这四个新族的族名在本层声明。
+/// Ground-Birthday family name (the shader name). The four older families are
+/// declared in the law crate; these four newer family names are declared here.
 pub const GROUND_BIRTHDAY_SHADER_NAME: &str = "Mysekai/Site/Ground-Birthday";
 /// Object 族名。
 pub const OBJECT_SHADER_NAME: &str = "Mysekai/Object";
@@ -178,9 +195,11 @@ pub struct SiteParams {
     pub leaf_rotation_speed: f32,
     /// `_LeafRotationRange`。Tree 动画（叶旋转）。
     pub leaf_rotation_range: f32,
-    /// 收影轴（真源 `_RECEIVE_SHADOWS_OFF`）：带此 keyword 的变体在源里
-    /// 整族无影针（FO/Tree/Birthday record24/DropItem/Object 的针计数全
-    /// 零），解析时按 keyword 定 0/1；不带则 1（Ground/Water 全链）。
+    /// Shadow-receive axis (`_RECEIVE_SHADOWS_OFF`): a variant carrying this
+    /// keyword has no shadow taps anywhere in the family (the tap count is zero
+    /// for FieldObject, Tree, Birthday, DropItem and Object), so resolution
+    /// sets it to 0/1 from the keyword; without the keyword it is 1 (for
+    /// Ground and Water over the whole chain).
     pub receive_shadow: f32,
     /// `(_UVScrollX, _UVScrollY)` 的 Object 副本（Object 用同名键、无
     /// fract 的滚动）。
@@ -836,13 +855,17 @@ impl Material for SiteMaterial {
 
 // ---- 族门与解析 ----
 
-/// 各族的 keyword 全集 = 本族已实现的轴清单。门 = 序列化 keyword 全部
-/// 落在清单内；清单外的 keyword 属于未移植变体，具名拒绝。全集对着源
-/// 变体表逐族写（源变体逐行钉住每条轴的式子）。
+/// A family's keyword universe is its list of implemented axes. The gate
+/// accepts the material when every serialized keyword is in the list; a
+/// keyword outside it belongs to an unsupported variant and is refused by
+/// name. Each family's list is written out from that family's variant table,
+/// which fixes the form of every axis.
 ///
-/// FieldObject：`_RECEIVE_SHADOWS_OFF` 必在（全活体行带它，族内片元无
-/// 影针）；`_USE_ALPHA_CLIP` 选 uniform 阈 clip；`_USE_OVERLAY_TEXTURE`
-/// 选第一层 overlay（门用原始顶点 alpha，不乘 opacity 标量）。
+/// FieldObject: `_RECEIVE_SHADOWS_OFF` is required (every live variant carries
+/// it and the family fragment has no shadow taps); `_USE_ALPHA_CLIP` selects
+/// the uniform-threshold clip; `_USE_OVERLAY_TEXTURE` selects the first
+/// overlay layer (its gate uses the raw vertex alpha, not multiplied by the
+/// opacity scalar).
 const FIELDOBJECT_KEYWORDS: [&str; 3] = [
     "_RECEIVE_SHADOWS_OFF",
     "_USE_ALPHA_CLIP",
@@ -909,8 +932,8 @@ const OBJECT_REQUIRED: [&str; 2] = ["_DISABLE_DITHER", "_RECEIVE_SHADOWS_OFF"];
 /// DropItem：常量阈 clip；收影恒关。值域门另查 _UVSelection。
 const DROPITEM_KEYWORDS: [&str; 2] = ["_RECEIVE_SHADOWS_OFF", "_USE_ALPHA_CLIP"];
 
-/// UI-Uber：无 keyword 轴；值域门另查 _BlendMode（2 = premultiplied 形未
-/// 移植）。
+/// UI-Uber: no keyword axis; the value-domain gate also checks _BlendMode
+/// (2, the premultiplied form, is not supported).
 const UI_UBER_KEYWORDS: [&str; 0] = [];
 
 /// TreasureBox: the material keyword space of this shader is `_USE_RARE`
@@ -966,7 +989,8 @@ fn overlay_coord_domain(
     Ok(())
 }
 
-/// 读一个浮点键的值域门：值不在已实现取值上 ⇒ 未移植分支，具名拒绝。
+/// Value-domain gate for a float key: a value outside the implemented set is
+/// an unsupported branch and is refused by name.
 fn float_domain(
     material: &MaterialSlot,
     family: &str,
@@ -1225,7 +1249,7 @@ fn resolve_ground(
         params.overlay_st = st;
         params.uv_scroll_overlay1st = scroll;
         params.use_overlay_texture_vertex_alpha = uotva;
-        return Ok(ground_finish(
+        return ground_finish(
             sidecar,
             slot,
             load_texture,
@@ -1247,7 +1271,7 @@ fn resolve_ground(
             texture,
             None,
             &get,
-        )?);
+        );
     }
     if overlay_2nd {
         let (coord, st, scroll, uotva, texture) =
@@ -1256,7 +1280,7 @@ fn resolve_ground(
         params.overlay_st_2nd = st;
         params.uv_scroll_overlay2nd = scroll;
         params.use_overlay_texture_vertex_alpha_2nd = uotva;
-        return Ok(ground_finish(
+        return ground_finish(
             sidecar,
             slot,
             load_texture,
@@ -1278,9 +1302,9 @@ fn resolve_ground(
             None,
             texture,
             &get,
-        )?);
+        );
     }
-    Ok(ground_finish(
+    ground_finish(
         sidecar,
         slot,
         load_texture,
@@ -1302,7 +1326,7 @@ fn resolve_ground(
         None,
         None,
         &get,
-    )?)
+    )
 }
 
 /// Ground/Water/Birthday 的公共尾段：fresnel、高度淡出（Ground 形）、
@@ -1857,9 +1881,10 @@ pub fn resolve_treasurebox(
     })
 }
 
-/// UI-Uber 解析。值域门：_BlendMode 只在 {0, 1}（2 = premultiplied 形未
-/// 移植）；无 keyword 轴；片元是 tex × 顶点色的直乘（无 mip 偏置、无
-/// 光照链）。
+/// UI-Uber resolution. Value-domain gate: _BlendMode must be in {0, 1} (2,
+/// the premultiplied form, is not supported); no keyword axis; the fragment is
+/// a straight multiply of tex × vertex colour (no mip bias, no lighting
+/// chain).
 fn resolve_ui_uber(
     sidecar: &SiteSidecar,
     slot: &MaterialSlot,
@@ -2181,8 +2206,8 @@ fn switch_materials(
                     let tally = &mut state.tally;
                     let (materials_count, entities_count) = match site_material.key.family {
                         SiteFamily::FieldObject => {
-                            let r = (&mut tally.fieldobject_materials, &mut tally.fieldobject_entities);
-                            r
+                            
+                            (&mut tally.fieldobject_materials, &mut tally.fieldobject_entities)
                         }
                         SiteFamily::Ground => (&mut tally.ground_materials, &mut tally.ground_entities),
                         SiteFamily::Tree => (&mut tally.tree_materials, &mut tally.tree_entities),
@@ -2323,42 +2348,42 @@ fn build_swap_plan(
                 };
                 match slot.shader.as_str() {
                     fieldobject::SHADER_NAME => plan_material(
-                        resolve_fieldobject(sidecar, slot, &load),
+                        resolve_fieldobject(sidecar, slot, load),
                         &mut planned,
                         &mut tally,
                     ),
                     moly_law::shading::ground::SHADER_NAME => plan_material(
-                        resolve_ground(sidecar, slot, &load),
+                        resolve_ground(sidecar, slot, load),
                         &mut planned,
                         &mut tally,
                     ),
                     moly_law::shading::tree::SHADER_NAME => plan_material(
-                        resolve_tree(sidecar, slot, &load),
+                        resolve_tree(sidecar, slot, load),
                         &mut planned,
                         &mut tally,
                     ),
                     moly_law::shading::water::SHADER_NAME => plan_material(
-                        resolve_water(sidecar, slot, &load),
+                        resolve_water(sidecar, slot, load),
                         &mut planned,
                         &mut tally,
                     ),
                     GROUND_BIRTHDAY_SHADER_NAME => plan_material(
-                        resolve_ground_birthday(sidecar, slot, &load),
+                        resolve_ground_birthday(sidecar, slot, load),
                         &mut planned,
                         &mut tally,
                     ),
                     OBJECT_SHADER_NAME => plan_material(
-                        resolve_object(sidecar, slot, &load),
+                        resolve_object(sidecar, slot, load),
                         &mut planned,
                         &mut tally,
                     ),
                     DROPITEM_SHADER_NAME => plan_material(
-                        resolve_dropitem(sidecar, slot, &load),
+                        resolve_dropitem(sidecar, slot, load),
                         &mut planned,
                         &mut tally,
                     ),
                     UI_UBER_SHADER_NAME => plan_material(
-                        resolve_ui_uber(sidecar, slot, &load),
+                        resolve_ui_uber(sidecar, slot, load),
                         &mut planned,
                         &mut tally,
                     ),

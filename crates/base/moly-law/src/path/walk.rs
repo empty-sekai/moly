@@ -15,13 +15,18 @@ use super::{
 pub struct WalkState {
     /// 当前位置。调用方播种一次，此后只有 [`advance`] 推进它。
     pub position: [f32; 3],
-    /// 行走中的朝向。不走的帧（到站、无路径、被拒）保持原样——真源的
-    /// 朝向代码在代理停下时提前返回，同样是「不走就不转头」。
+    /// Heading while walking. Frames that do not walk (arrived, no path,
+    /// refused) keep it unchanged — the heading code returns early when the
+    /// agent is stopped, so "no walking means no turning" holds there too.
     pub forward: [f32; 3],
-    /// 下一个尚未走到的拐点下标。这是跨帧进度记忆：已走过的拐点永不重走，
-    /// 否则半路的行走者会每帧掉头去够第一个拐点。进度必须活在状态里而不
-    /// 是输入里——真源一次移动只发一次目的地，路径不逐帧重喂。注意朝向
-    /// 读的固定下标**不**随它前进，那是刻意保留的怪癖（见族注释）。
+    /// Index of the next corner not yet reached. This is cross-frame
+    /// progress memory: a corner already passed is never walked again,
+    /// otherwise a walker mid-route would turn back toward the first corner
+    /// every frame. The progress must live in the state and not in the input
+    /// — a single move sends its destination once and the path is
+    /// not re-fed every frame. Note that the fixed index read by the heading
+    /// does **not** advance with it; that quirk is kept on purpose (see the
+    /// module comment).
     pub next_corner: u32,
 }
 
@@ -46,7 +51,8 @@ pub enum WalkVerdict {
     Arrived(f32),
     /// 无活动路径：距离未知。
     Idle,
-    /// 拒绝：输入带了真源产不出的值，状态字节不动，距离未知。
+    /// Refused: the input carries a value the move loop can never produce;
+    /// state bytes stay unchanged and the distance is unknown.
     Refused,
 }
 
@@ -79,9 +85,12 @@ impl WalkVerdict {
 pub fn advance(state: &mut WalkState, path: &NpcPathWalkSlot, speed: f32, dt: f32) -> WalkVerdict {
     let corners = path.corners();
 
-    // `!(x >= 0.0)` 一个谓词同时抓负值与 NaN：NaN 与一切比较为假，混不过
-    // `>=`。dt 的门槛与速度同款：真源的帧步长由整型微秒折算，负与非数
-    // 无从发生；放行 NaN 会把它直接写进位置，毁掉此后所有帧的确定性。
+    // A single predicate `!(x >= 0.0)` catches both negative values and NaN:
+    // NaN compares false against everything and cannot slip past `>=`. The dt
+    // gate matches the speed gate: the frame step in the move
+    // loop comes from integer microseconds, so negative and non-numeric
+    // values cannot occur; letting a NaN through would write it straight into
+    // the position and destroy the determinism of every later frame.
     if !(speed >= 0.0)
         || !(dt >= 0.0)
         || !all_finite(state.position)
@@ -96,10 +105,13 @@ pub fn advance(state: &mut WalkState, path: &NpcPathWalkSlot, speed: f32, dt: f3
         return WalkVerdict::Idle;
     }
 
-    // 到达是帧首判定，对齐真源循环「先判断、后让帧」的结构：帧中才进带
-    // 的行走者本帧仍报行走，下一帧才报到站。进带后保持不动——循环已经
-    // 跳出，带内最终停在哪在 extern 墙后，保持是诚实答案，残差按构造
-    // 留在到达距离之内。
+    // Arrival is checked at the start of the frame, matching the move loop's
+    // "check first, then advance" structure: a walker that enters the band
+    // mid-frame still reports walking for that frame and arrival only on the
+    // next one. Once inside the band it holds still — the loop has exited,
+    // so this implementation does not move the walker further within the
+    // band, and the residual stays within the arrival distance by
+    // construction.
     let distance_to_end = distance_to_last(state.position, corners);
     if distance_to_end < ARRIVAL_DISTANCE {
         return WalkVerdict::Arrived(distance_to_end);
@@ -107,9 +119,11 @@ pub fn advance(state: &mut WalkState, path: &NpcPathWalkSlot, speed: f32, dt: f3
 
     let budget = speed * dt;
 
-    // 只走尚未消耗的拐点。拐点进度挡住回头路：半路的行走者不会每帧掉头
-    // 去重走已过的拐点。（下面的朝向刻意仍指向行的第 0 拐点——那个固定
-    // 下标的读法是真源自己的，由测试钉住，别顺手「修好」它。）
+    // Only walk the corners not yet consumed. The corner progress blocks the
+    // way back: a walker mid-route does not turn around every frame to walk
+    // the corners already passed again. (The heading below deliberately still
+    // points at corner 0 of the row — that fixed index reading is pinned by a
+    // test; do not "fix" it in passing.)
     let start = (state.next_corner as usize).min(corners.len());
     let tail = &corners[start..];
     let mut consumed = 0usize;
@@ -137,8 +151,9 @@ fn remaining_distance(position: [f32; 3], corners: &[[f32; 3]]) -> f32 {
     total
 }
 
-/// `position` 到最后一个拐点的直线距离——真源到达判比的就是这个量。
-/// 调用方保证 `corners` 非空。
+/// Straight-line distance from `position` to the last corner — this is
+/// exactly what the arrival check compares. The caller guarantees that
+/// `corners` is non-empty.
 fn distance_to_last(position: [f32; 3], corners: &[[f32; 3]]) -> f32 {
     let last = corners[corners.len() - 1];
     let dx = last[0] - position[0];
@@ -147,11 +162,14 @@ fn distance_to_last(position: [f32; 3], corners: &[[f32; 3]]) -> f32 {
     (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
-/// 沿折线 `position -> corners[0] -> ...` 推进 `position`，至多 `budget`
-/// 个世界单位；整段被预算覆盖的拐点记进 `consumed`。从不过冲：预算盖过
-/// 剩余路径时，位置恰好落在末拐点上（一次赋值，与拐点字节一致）。整段
-/// 被覆盖的中间拐点同样按赋值到站——一步恰好踩到（或跨过）拐点的帧，
-/// 触到的是精确值，调用方的拐点进度随之越过它。
+/// Advances `position` along the polyline `position -> corners[0] -> ...` by
+/// at most `budget` world units; every corner whose whole segment the budget
+/// covers is recorded in `consumed`. It never overshoots: when the budget
+/// covers the remaining path, the position lands exactly on the last corner
+/// (one assignment, byte-identical to the corner). A fully covered intermediate
+/// corner is likewise reached by assignment — on the frame whose step lands on
+/// (or crosses over) a corner, the exact value is touched and the caller's
+/// corner progress moves past it.
 fn walk_along(position: &mut [f32; 3], corners: &[[f32; 3]], budget: f32, consumed: &mut usize) {
     let mut remaining = budget;
     for (k, &corner) in corners.iter().enumerate() {
@@ -167,9 +185,11 @@ fn walk_along(position: &mut [f32; 3], corners: &[[f32; 3]], budget: f32, consum
             *position = corner;
             *consumed = k + 1;
         } else {
-            // 走到这里时 `remaining < seg` 且 `seg > 0`（零长段走上分支），
-            // 所以 `t` 落在 `[0, 1)`，不会除零。被逼近的拐点不消耗：这一步
-            // 停在它跟前，下一帧朝它继续。
+            // Reaching here means `remaining < seg` and `seg > 0` (a
+            // zero-length segment takes the branch above), so `t` lies in
+            // `[0, 1)` and there is no division by zero. The corner being
+            // approached is not consumed: this step stops short of it and the
+            // next frame continues toward it.
             let t = remaining / seg;
             position[0] += dx * t;
             position[1] += dy * t;
@@ -179,13 +199,18 @@ fn walk_along(position: &mut [f32; 3], corners: &[[f32; 3]], budget: f32, consum
     }
 }
 
-/// 本帧的朝向：指向给定拐点并归一化；拐点在（或在使用方阈内的）自身位置
-/// 上时取回退。拐点下标是固定的，与真源一致：站上首拐点的行走者面对
-/// 回退方向而非下一个拐点，越过首拐点的行走者倒退着面向它。
+/// The heading of the current frame: points at the given corner and is
+/// normalized; when the corner is on (or, within the caller's threshold, near)
+/// the walker's own position, the fallback is taken. The corner index is
+/// fixed, as in the move loop: the walker standing on the first corner faces
+/// the fallback direction rather than the next corner, and a walker past the
+/// first corner faces back at it.
 ///
-/// 公开给换腿帧的出发决策用：转身的目标方向必须与行走律喂腿首帧
-/// 算出的朝向**同源**——同一个函数、同一对输入，转身结束移交行走时
-/// 朝向才不跳。
+/// Public for the departure decision of a leg-change frame: the target
+/// direction of the turn must be **the same source** as the heading computed
+/// by feeding the walking rule the leg's first frame — the same function with
+/// the same pair of inputs — so that the heading does not jump when the turn
+/// hands over to walking.
 pub fn facing_direction(position: [f32; 3], corner: [f32; 3]) -> [f32; 3] {
     let dx = corner[0] - position[0];
     let dy = corner[1] - position[1];
@@ -208,9 +233,11 @@ fn all_finite(v: [f32; 3]) -> bool {
 mod tests {
     use super::*;
 
-    /// 本文件的测试速度刻意都不取 1.0：速度恰为 1.0 时「走了 speed*dt」
-    /// 与「走了 dt」不可分辨，测试绿了也不知道量的是哪一个。0.4 是真源
-    /// 为首个角色解出的表值步行速度；其余任取，但保持同一性质。
+    /// The test speeds in this file deliberately avoid 1.0: with speed exactly
+    /// 1.0, "walked speed*dt" is indistinguishable from "walked dt", and a
+    /// passing test would not show
+    /// which one is measured. 0.4 is the table walk speed for the first
+    /// character; the others are arbitrary but keep the same property.
     const WALK_SPEED: f32 = 0.4;
     const RUN_SPEED: f32 = 0.7;
 
@@ -229,9 +256,11 @@ mod tests {
 
     #[test]
     fn a_walk_moves_the_walker_forward_by_speed_times_dt() {
-        // 锚：代理的 speed 语义是最大移动速度，真源起步写入所选速度。
-        // 0.4 单位/秒走半秒必须沿路径走 0.2——且必须走动，这是正臂：
-        // 若推进积分了空集，本文件所有断言都会空转着绿。
+        // Check: the agent's speed means the maximum movement speed, and the
+        // start writes the selected speed. 0.4 units/second for half a second
+        // must advance 0.2 along the path — and it must move at all, since if
+        // the advance integrated an empty set every assertion in this file
+        // would pass vacuously.
         let (mut st, path) = walker([0.0; 3], [0.0, 0.0, 1.0], vec![[10.0, 0.0, 0.0]]);
         let v = advance(&mut st, &path, WALK_SPEED, 0.5);
         let x = st.position[0];
@@ -278,8 +307,9 @@ mod tests {
 
     #[test]
     fn zero_speed_holds_the_position_at_every_dt() {
-        // 锚：真源的停机流程把代理速度清零，所以零是真源真的产得出的速度，
-        // 任何 dt 都必须哪儿也不去。取多个帧长，「任何 dt」才不只是 dt 一例。
+        // Check: the stop routine clears the agent's speed, so zero is a speed
+        // the move loop really produces, and no dt may move the walker. Using
+        // several frame lengths makes "any dt" more than one example.
         let start = [1.0, 2.0, 3.0];
         let (mut st, path) = walker(start, [0.0, 0.0, 1.0], vec![[10.0, 0.0, 0.0]]);
         for dt in [0.0f32, 0.001, 0.5, 4.0] {
@@ -327,12 +357,15 @@ mod tests {
 
     #[test]
     fn arrival_fires_inside_the_band_and_not_just_outside_it() {
-        // 锚：阈值本身 0.1——移动循环的字面量。从目标 0.0625 处（0.1 之内）
-        // 起步的行走者必须在第一帧报到达，同时位置字节不动。从 0.5 处以
-        // 精确的二的幂步长（每帧 0.125）逼近的行走者，站在 0.125 处的那帧
-        // 必须仍在走——0.125 在 0.1 之外——所以若阈值误取真源的另一处
-        // 字面量 0.3（自动刹车开关），此测试即红。每个距离都是二的幂，
-        // 没有一步丢位。
+        // Check: the threshold itself is 0.1 — the literal of the move loop.
+        // A walker starting 0.0625 from the target (inside 0.1) must report
+        // arrival on the first frame while the position bytes stay unchanged.
+        // A walker approaching 0.5 away with exact power-of-two steps (0.125
+        // per frame) must still be walking on the frame where it stands at
+        // 0.125 — 0.125 is outside 0.1 — so if the threshold were wrongly
+        // taken as the other literal, 0.3 (the automatic-braking switch), this
+        // test fails. Every distance is a power of two, so no step loses
+        // precision.
         let (mut inside, path) = walker([0.0; 3], [0.0; 3], vec![[0.0625, 0.0, 0.0]]);
         let v = advance(&mut inside, &path, 2.0, 0.25);
         assert!(v.arrived_this_frame());
@@ -355,10 +388,11 @@ mod tests {
 
     #[test]
     fn an_arrived_walker_never_moves_again_and_holds_its_facing() {
-        // 锚：移动循环已经跳出（到达在真源里就是这个意思），而真源的朝向
-        // 代码在代理停下时提前返回——所以进带后位置与朝向都不得再变。
-        // 十七帧把行走者送上终点（十六帧走、一帧察觉）；其后每一帧必须
-        // 什么都不改。
+        // Check: the move loop has exited (that is what arrival means here),
+        // and the heading code returns early when the agent is stopped — so
+        // after entering the band neither position nor heading may change.
+        // Seventeen frames bring the walker to the end (sixteen walking, one
+        // noticing); every frame after that must change nothing.
         let (mut st, path) = walker([0.0; 3], [0.0; 3], vec![[8.0, 0.0, 0.0]]);
         for _ in 0..17 {
             advance(&mut st, &path, 2.0, 0.25);
@@ -376,10 +410,13 @@ mod tests {
 
     #[test]
     fn a_corner_whose_segment_the_step_covers_is_passed_byte_exact() {
-        // 锚：remainingDistance 沿当前路径计量，真源的 steeringTarget 就是
-        // 下一个拐点——走是一段一段走的，一步够到的拐点必须被**触到**，
-        // 不是被近似。速度 2.0 走半秒是 1.0 的预算；首拐点恰在 1.0 外，
-        // 该帧落在赋值分支：与拐点字节一致，掠过偏差报出来恰是 0.0。
+        // Check: remainingDistance measures along the current path, and the
+        // agent's steeringTarget is the next corner — walking proceeds segment
+        // by segment, and a corner reached by one step must be **touched**,
+        // not approximated. Speed 2.0 for half a second is a budget of 1.0; the
+        // first corner is just outside 1.0, so that frame takes the assignment
+        // branch: byte-identical to the corner, and the overshoot deviation
+        // reported is exactly 0.0.
         let (mut st, path) = walker(
             [0.0; 3],
             [0.0; 3],
@@ -390,8 +427,9 @@ mod tests {
         assert_eq!(deviation, 0.0, "passed the first corner {deviation} units away");
         assert_eq!(st.position, [1.0, 0.0, 0.0]);
         assert!(!v.arrived_this_frame());
-        // 下一腿继续走，然后在到达带内到站（带 0.1 是真源循环自己停下的
-        // 地方——残差报出来并钉在带下）。
+        // The next leg keeps walking, then arrives inside the band (the band
+        // of 0.1 is where the move loop itself stops — the residual is
+        // reported and pinned below the band).
         for _ in 0..4 {
             advance(&mut st, &path, 2.0, 0.5);
         }
@@ -471,9 +509,10 @@ mod tests {
 
     #[test]
     fn while_walking_the_walker_faces_the_first_corner_of_its_row() {
-        // 锚：真源朝向代码读固定的一位拐点、从当前位置归一化指向它。原点
-        // 处朝 (3, 4, 0)（长度 5）走的行走者必须面向 [0.6, 0.8, 0]。改指
-        // 末拐点、或不归一化，落点都不同。
+        // Check: the heading code reads one fixed corner and normalizes the
+        // current position toward it. A walker at the origin heading toward
+        // (3, 4, 0) (length 5) must face [0.6, 0.8, 0]. Pointing at the last
+        // corner instead, or not normalizing, gives a different result.
         let (mut st, path) = walker([0.0; 3], [0.0; 3], vec![[3.0, 4.0, 0.0]]);
         advance(&mut st, &path, WALK_SPEED, 0.25);
         let f = st.forward;
@@ -486,11 +525,14 @@ mod tests {
 
     #[test]
     fn a_walker_standing_on_its_first_corner_takes_the_unit_forward_fallback() {
-        // 锚：真源在目标拐点距自身不足 1e-05 时换用单位前向，而不是除以
-        // 近零模长——且它读的是固定下标，所以恰好站上首拐点的行走者取
-        // 回退，哪怕前方还有第二个拐点。这里的落点是可证的：拐点在 0.5 外，
-        // 步长恰为 0.5（速度 2.0、四分之一秒），赋值分支生效，帧末行走者
-        // 逐字节站在拐点上。
+        // Check: when the target corner is less than 1e-05 from the walker,
+        // the unit forward is used instead of dividing by a near-zero
+        // magnitude — and the index read is fixed, so a walker standing
+        // exactly on the first corner takes the fallback even when a second
+        // corner lies ahead. The landing point here is provable: the corner is
+        // 0.5 away and the step is exactly 0.5 (speed 2.0, quarter second), so
+        // the assignment branch applies and the walker ends the frame standing
+        // byte-for-byte on the corner.
         let (mut st, path) = walker(
             [0.0; 3],
             [9.0, 9.0, 9.0],
@@ -504,10 +546,12 @@ mod tests {
 
     #[test]
     fn a_walker_past_its_first_corner_faces_back_at_it_the_fixed_index_demands() {
-        // 固定下标规则的另一半，钉住它免得有人替真源「修好」：从第二帧起，
-        // 行走者已经越过了朝向代码读的那位拐点（下标从不前进），可读规则
-        // 于是让它沿路径**倒着**面向。真源朝向的其余部分（原生旋转、避障
-        // 门控）在墙后；本律复算的是可读的 look-at，怪癖包括在内。
+        // The other half of the fixed-index rule, pinned so nobody "fixes" it:
+        // from the second frame on, the walker has passed the corner the
+        // heading code reads (the index never advances), so the rule makes it
+        // face **backwards** along the path. The rest of the heading behavior
+        // (rotation, avoidance gating) is not modelled here; this rule
+        // recomputes the look-at only, quirks included.
         let (mut st, path) = walker(
             [0.0; 3],
             [0.0; 3],
@@ -541,9 +585,12 @@ mod tests {
 
     #[test]
     fn a_negative_speed_refuses_the_slot_without_touching_its_state() {
-        // 锚：真源的速度写入只产得出零（停机清零）或非负的表值；负速度
-        // 无从发生，故没有可读语义可供积分。拒绝是响的（裁决位、未知距离、
-        // 不给到达），状态字节不动——唯绝不允许的结局是静默猜测。
+        // Check: the move loop's speed writes only ever produce zero (cleared
+        // on stop) or non-negative table values; a negative speed cannot
+        // occur, so there is no defined semantics to integrate. Refusal is
+        // loud (verdict flag, unknown distance, no arrival) and the state
+        // bytes stay unchanged — silent guessing is the one outcome never
+        // allowed.
         let start = [1.0, 2.0, 3.0];
         let (mut st, path) = walker(start, [0.0, 0.0, 1.0], vec![[10.0, 0.0, 0.0]]);
         let v = advance(&mut st, &path, -0.4, 0.5);
@@ -568,9 +615,12 @@ mod tests {
 
     #[test]
     fn a_non_finite_or_negative_dt_refuses_the_slot() {
-        // dt 从真源的整型微秒改成本律的显式入参后，非负性失去了类型保票，
-        // 门槛移进拒绝谓词：负 dt 是倒放时间、NaN dt 会把非有限值写进位置
-        // ——两者都按响亮拒绝处理，状态字节不动。dt = 0 合法（另测）。
+        // dt is an explicit parameter here rather than the move loop's integer
+        // microseconds, so non-negativity is no longer guaranteed by the type;
+        // the gate moves into the refusal predicate: a negative dt runs time
+        // backwards and a NaN dt writes a non-finite value into the position —
+        // both are refused loudly with the state bytes unchanged. dt = 0 is
+        // legal (tested separately).
         let start = [1.0, 2.0, 3.0];
         let (mut st, path) = walker(start, [0.0, 0.0, 1.0], vec![[10.0, 0.0, 0.0]]);
         let v = advance(&mut st, &path, WALK_SPEED, -0.5);

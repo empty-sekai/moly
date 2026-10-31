@@ -98,8 +98,8 @@ pub struct ActionButtonChange;
 #[derive(Component)]
 pub struct ActionButtonBackground;
 
-/// 图标纹源：按文件名存一份句柄。文件名由按钮类型给出（真源的那张
-/// 二十五格表），所以这里不是按「用途」而是按真源文件名索引。
+/// Icon art: one handle per file name. The button type gives the file name
+/// (from the 25-slot table), so the index is the file name, not the purpose.
 #[derive(Resource, Default)]
 pub struct ActionButtonArt {
     icons: HashMap<&'static str, Handle<Image>>,
@@ -658,11 +658,12 @@ fn kind_of(button: ButtonType) -> FixtureKind {
 
 pub use crate::ui_inputs::ActionTapConsumed;
 
-/// Startup：请求全部图标与两张表。
+/// Startup: requests every icon and the two tables.
 ///
-/// 图标按真源那张表里出现过的全部文件名一次装齐（每张两三 KB），
-/// 而不是只装当前接得出的两种——按钮类型是闭集，装齐以后新接一种
-/// 不需要再改装载面。
+/// The icons are all loaded at once, one for every file name that appears in
+/// the 25-slot table (about two or three KB each), not only the two that can
+/// be reached now — the button types are a closed set, so wiring a new one
+/// later needs no change to the loading surface.
 pub fn load(mut commands: Commands, server: Res<AssetServer>, stage: Option<Res<crate::browser_stage::BrowserStage>>) {
     let mut art = ActionButtonArt::default();
     for button in ALL_BUTTON_TYPES {
@@ -682,7 +683,7 @@ pub fn load(mut commands: Commands, server: Res<AssetServer>, stage: Option<Res<
     commands.init_resource::<ActionButtonState>();
     commands.init_resource::<FixtureFacts>();
     commands.init_resource::<ActionTapConsumed>();
-    info!("[action_button] 图标装载请求 {count} 件（真源二十五格表里的去重文件名）");
+    info!("[action_button] icon load requested: {count} files (distinct file names in the 25-slot table)");
 }
 
 fn stage_button(button: ButtonType) -> bool {

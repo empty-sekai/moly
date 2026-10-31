@@ -880,7 +880,7 @@ fn finish_action(world: &mut World, outcome: Result<Reply, Refusal>) {
                 return;
             }
         }
-        begin_sequence(world, &mut *actions, start);
+        begin_sequence(world, &mut actions, start);
     });
 }
 

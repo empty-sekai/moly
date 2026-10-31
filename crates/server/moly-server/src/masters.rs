@@ -112,8 +112,10 @@ impl std::fmt::Debug for Masters {
 /// A master table the model loads in the background once the join's tables
 /// are in, and why it is not there yet.
 #[derive(Debug)]
+#[derive(Default)]
 pub(crate) enum Deferred<T> {
     /// Not requested yet: the join's tables are still loading.
+    #[default]
     Waiting,
     /// Requested (the upstream table name); not arrived yet.
     Loading(&'static str),
@@ -122,11 +124,6 @@ pub(crate) enum Deferred<T> {
     Ready(T),
 }
 
-impl<T> Default for Deferred<T> {
-    fn default() -> Self {
-        Self::Waiting
-    }
-}
 
 impl<T> Deferred<T> {
     /// The table, or the refusal: `refused` says what cannot be done, and

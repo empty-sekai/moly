@@ -7,7 +7,8 @@ use bevy::gltf::Gltf;
 use bevy::prelude::*;
 use moly_assets::json::JsonAsset;
 
-/// 房间类站点：真源按 siteType 名切到 MyRoomSiteController 的三行。
+/// Room-type sites: the three rows the game routes to
+/// MyRoomSiteController by siteType name.
 pub const ROOM_TYPES: [&str; 3] = ["first_floor", "second_floor", "third_floor"];
 
 /// Whether a site type is one of the indoor floors.
@@ -124,16 +125,20 @@ pub struct SiteScenesReady;
 #[derive(Clone, Copy, Resource)]
 pub struct GroundEpoch(pub u64);
 
-/// 玩家标记：NPC 独占的域（待机动作演出、tweet 气泡、表情编排）用它把
-/// 玩家排除在外——玩家不是名册成员，那些域的触发器（驻留计时、编排表）
-/// 对玩家没有真源对应物。
+/// Player marker: the NPC-only domains (idle-animation performance, tweet
+/// balloons, emote scheduling) use it to exclude the player — the player is
+/// not a roster member, and those domains' triggers (dwell timers, the
+/// scheduling tables) have no counterpart for the player.
 #[derive(Component, Reflect)]
 #[reflect(Component)]
 pub struct PlayerControlled;
 
-/// 相机跟随的那名成员。相机域读它的世界变换逐帧取景——真源站点相机追
-/// 的是 avatar 视变换。挂载由玩家域决定（玩家实体持它；名册成员不再
-/// 插——玩家域接管时把「清单首行」的旧默认撤了）。
+/// The member the camera follows. The camera domain reads its world
+/// transform each frame to frame the view — the game's site camera tracks the
+/// avatar's view transform. The player domain decides the attachment (the
+/// player entity carries it and roster members no longer get it: when the
+/// player domain took over it removed the old default, the first roster
+/// row).
 #[derive(Component)]
 pub struct AvatarRoot;
 
@@ -145,15 +150,16 @@ pub fn in_zone(position: Vec2, width: f32, height: f32) -> bool {
     position.x < width * ZONE_W && position.y >= height * ZONE_H
 }
 
-/// 摇杆层状态：CustomJoyStick 字段面的移植子集 + presenter 侧的
-/// 活跃沿。单实例。
+/// Joystick layer state: the supported subset of `CustomJoyStick`'s fields
+/// plus the presenter-side active flag. Single instance.
 #[derive(Resource, Default)]
 pub struct JoystickState {
-    /// 本帧让位门求值结果（编辑/对话在播 → false）。手势层读它复现
-    /// 区内吞没。
+    /// This frame's yield-gate result (editing or dialogue playing → false).
+    /// The gesture layer reads it to swallow inside-zone presses the same way.
     pub enabled: bool,
-    /// 捕获中的手指 id（真源 _handlingPointerId 的 Nullable<int>）。
-    /// 手势层读它跳过捕获指的事件。
+    /// The id of the captured finger (the `Nullable<int>`
+    /// `_handlingPointerId`). The gesture layer reads it to skip events of
+    /// the captured finger.
     pub captured: Option<u64>,
     /// 底盘心（屏坐标、顶原点——捕获时等于触点）。也是拖动阈值的
     /// 按下点（PointerEventData.pressPosition）。
@@ -161,11 +167,14 @@ pub struct JoystickState {
     /// The captured finger's drag has started (PointerEventData.dragging):
     /// its moves reach OnDrag.
     pub dragging: bool,
-    /// 最近一次 UPDATE 的方向（真源屏坐标语义：y 向上；已按上限夹）。
+    /// The direction of the latest UPDATE (game screen coordinates: y up;
+    /// already clamped to the limit).
     pub direction: Vec2,
-    /// presenter 的 _isJoyStickInput：收到过 UPDATE 且未收 END。
+    /// The presenter's _isJoyStickInput: an UPDATE was received and no END
+    /// has arrived since.
     pub active: bool,
-    /// UPDATE 时刻烘好的世界移动向量（真源 _joyStickMoveDirection）。
+    /// The world move vector baked at UPDATE time (the
+    /// `_joyStickMoveDirection` field).
     pub move_vector: Vec3,
 }
 
@@ -238,7 +247,8 @@ pub struct CharacterPack {
 #[derive(Component)]
 pub struct CharacterModel;
 
-/// 名册成员的身份：真源 `npcRegistry.characterUnitIds` 身份列的一行。
+/// A roster member's identity: one row of the `npcRegistry.characterUnitIds`
+/// identity column.
 #[derive(Component, Reflect)]
 #[reflect(Component)]
 pub struct CharacterUnitId(pub u32);

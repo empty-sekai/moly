@@ -987,7 +987,7 @@ fn data_dir_locked() -> bool {
 
 /// Whether the running launcher program lies inside `folder`.
 fn launcher_inside(folder: &Path) -> bool {
-    let exe = std::env::current_exe().and_then(|exe| std::fs::canonicalize(exe));
+    let exe = std::env::current_exe().and_then(std::fs::canonicalize);
     let folder = std::fs::canonicalize(folder);
     matches!((exe, folder), (Ok(exe), Ok(folder)) if exe.starts_with(&folder))
 }

@@ -45,8 +45,8 @@
 //! # Not in this host (named)
 //!
 //! - Other sites: the views their packages serialize dither only when the
-//!   ray from the avatar hits their bounds (`RayOBBJob`), not transcribed;
-//!   no view is attached there.
+//!   ray from the avatar hits their bounds (`RayOBBJob`); this behaviour is
+//!   not supported and no view is attached there.
 //! - The hide modes (photo shot, phenomena edit, first-person camera) and
 //!   the cut-scene game state, in which the source turns a dithering view's
 //!   renderers off, and the low-height filter a cut-scene sets: in the
@@ -115,10 +115,9 @@ impl ConfigLoad {
             .clone();
         let settled = if server.load_state(&handle).is_failed() {
             Err(format!("{CONFIG_PATH} did not load"))
-        } else if let Some(document) = documents.get(&handle) {
-            parse_config(&document.0)
         } else {
-            return None;
+            let document = documents.get(&handle)?;
+            parse_config(&document.0)
         };
         match &settled {
             Ok(config) => info!(

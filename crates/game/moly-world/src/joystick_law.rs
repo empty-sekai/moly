@@ -29,10 +29,11 @@ pub fn handle_input(raw: Vec2) -> Vec2 {
     }
 }
 
-/// presenter 的 UPDATE 烘基式（OnTouchJoyStick）：移动向量 =
-/// 相机前（去 y 归一；水平模长近零时**该项**回零，右项保留）×
-/// 方向.y + 相机右 × 方向.x，和向量不归一。相机不在场 → None
-/// （真源整式短路，不置活跃）。
+/// The presenter's UPDATE bake (`OnTouchJoyStick`): move vector =
+/// camera forward (y removed and normalised; when the horizontal length is near
+/// zero **this term** becomes zero and the right term is kept) × direction.y +
+/// camera right × direction.x, the sum is not normalised. Camera absent → `None`
+/// (the whole formula short-circuits and the joystick is not made active).
 pub fn bake_move_vector(
     direction: Vec2,
     cameras: &Query<&GlobalTransform, With<Camera3d>>,

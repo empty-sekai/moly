@@ -52,7 +52,7 @@ impl Press {
         ((now - self.started) / self.duration).clamp(0.0, 1.0) as f32
     }
     pub fn release(self, pointer: i32, now: f64) -> Option<bool> {
-        (self.pointer == pointer).then(|| now - self.started >= self.duration)
+        (self.pointer == pointer).then_some(now - self.started >= self.duration)
     }
 }
 

@@ -1,26 +1,37 @@
-//! 引擎原生后处理：颜色分级查找表与引擎泛光，挂在 Mysekai 后处理的上游。
+//! Engine post-processing: the colour grading LUT and engine bloom, mounted upstream
+//! of Mysekai post-processing.
 //!
-//! 真源的现象相机开着 `renderPostProcessing`，渲染器因此每帧入队两个引擎
-//! pass：颜色分级 LUT pass（把音量栈里的调色组件烘成 32³ 的 LDR 查找表，
-//! 摊平成 1024×32 的 `R8G8B8A8_UNorm` 条带）与引擎后处理 pass（在
-//! `BeforeRenderingPostProcessing` 上：场景色 + 引擎泛光，乘曝光倍数、钳到
-//! 0..1、查那张表）。Mysekai 自己的 uber 挂在其后的
-//! `AfterRenderingPostProcessing` 上，读的是引擎后处理写出的相机色。所以
-//! 这个节点排在色调映射之后、天气链之前，**每个现象都跑**。
+//! The phenomenon camera has `renderPostProcessing` enabled, so the renderer queues
+//! two engine passes every frame: the colour grading LUT pass (bakes the volume
+//! stack's colour-adjustment components into a 32³ LDR lookup table, flattened into a
+//! 1024×32 `R8G8B8A8_UNorm` strip) and the engine post-processing pass (on the
+//! `BeforeRenderingPostProcessing` event: scene colour + engine bloom, multiplied by
+//! the exposure factor, clamped to 0..1, then looked up in that table). Mysekai's own
+//! uber pass follows on `AfterRenderingPostProcessing` and reads the camera colour
+//! written by engine post-processing. This node therefore runs after tonemapping and
+//! before the weather chain, and **runs for every phenomenon**.
 //!
-//! 表的烘焙在主世界 CPU 上做（律在 `moly_law::weather::lut`，与随包的构建
-//! 程序逐值对过：值差在 1e-5 以内，8 位量化后有 40 个字节差 1，都落在舍入
-//! 边界上，来自数学库末位的差）：真源每帧烘，而它的输入只在后处理档案整档
-//! 切换时变，本侧在输入变的那一帧烘一次，输出同一张表。
+//! The table is baked on the main-world CPU (the rule is in `moly_law::weather::lut`
+//! and agrees value by value with the program shipped with the build: differences
+//! below 1e-5, and after 8-bit quantisation 40 bytes differ by 1, all on rounding
+//! boundaries caused by last-bit differences between math libraries): the product
+//! bakes it every frame, but its input changes only when a whole post-processing
+//! profile is switched, so this side bakes once on the frame its input changes and
+//! produces the same table.
 //!
-//! 引擎泛光（`Bloom` 组件活跃且强度 > 0 时）：半分辨率阈值预滤波 → 逐级
-//! 「横向 9 点高斯并降一半 + 纵向 5 点」→ 逐级按散射权重上采样 → uber
-//! 把顶层平方回来、乘强度与 tint′ 加到场景色上。金字塔的存储格式由管线
-//! 资产定：引擎后处理 pass 用渲染器请求的格式（它可作线性渲染目标时），
-//! 渲染器请求的是 `MakeRenderTextureGraphicsFormat(supportsHDR, …)`，而本管线
-//! 资产的 `supportsHDR` 是关的 ⇒ 请求的是平台默认 LDR 格式，gamma 色彩空间下
-//! 即 `R8G8B8A8_UNorm`，任何设备都可作渲染目标 ⇒ 不走 B10G11R11 与 RGBM 两支。
-//! 所以各级存的是工作值平方根的 8 位 UNorm，本侧同格式存。
+//! Engine bloom (when the `Bloom` component is active and its intensity > 0):
+//! half-resolution threshold prefilter → per level "horizontal 9-tap Gaussian with
+//! half downsample + vertical 5-tap" → per level upsample weighted by scatter → the
+//! uber pass squares the top level, multiplies by intensity and tint′ and adds it to
+//! the scene colour. The pyramid's storage format is set by the pipeline asset: the
+//! engine post-processing pass uses the format the renderer requests (when that
+//! format can serve as a linear render target), and the renderer requests
+//! `MakeRenderTextureGraphicsFormat(supportsHDR, …)` while this pipeline asset has
+//! `supportsHDR` off ⇒ the platform default LDR format is requested, which in gamma
+//! colour space is `R8G8B8A8_UNorm`, a valid render target on any device ⇒ neither
+//! the B10G11R11 nor the RGBM branch is taken.
+//! So each level stores the 8-bit UNorm of the square root of its working values,
+//! and this side stores the same format.
 
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -173,13 +184,15 @@ struct StockPostPipelines {
     upsample_layout: BindGroupLayoutDescriptor,
     /// uber（0 场景、1 泛光顶层、2 采样器、3 参数、4 查找表）。
     uber_layout: BindGroupLayoutDescriptor,
-    /// 双线性、钳边：真源这几张纹理都用线性钳边采样器。
+    /// Bilinear, clamp-to-edge: all of these textures use a linear clamp-to-edge sampler.
     sampler: Sampler,
     black: CachedTexture,
 }
 
-/// 一个视图的引擎泛光金字塔：`downs[i]` 与 `ups[i]` 同尺寸（真源每级两张：
-/// 降采样结果与上采样结果，后者在降采样阶段兼作横向模糊的临时目标）。
+/// Engine bloom pyramid of one view: `downs[i]` and `ups[i]` have the same size (the
+/// program has two textures per level: the downsample result and the upsample result,
+/// the latter also serving as the temporary target of the horizontal blur during
+/// downsampling).
 #[derive(Component)]
 pub(crate) struct StockBloomPyramid {
     downs: Vec<CachedTexture>,
@@ -312,7 +325,8 @@ fn init_stock_post(
         "stock_post_lut",
         lut::LUT_WIDTH as u32,
         lut::LUT_SIZE as u32,
-        // 真源 LDR 表是 `R8G8B8A8_UNorm`：存的就是调好的值，不做 sRGB 编解码。
+        // The LDR table is `R8G8B8A8_UNorm`: it already stores graded values, so no
+        // sRGB encode/decode is applied.
         TextureFormat::Rgba8Unorm,
     );
     let lut_view = lut_texture.create_view(&default());
@@ -456,7 +470,7 @@ fn prepare_stock_bloom_pyramid(
                 viewport.x, viewport.y, plan.width, plan.height, plan.mip_count
             );
             if plan.mip_count < 2 {
-                warn!("引擎泛光：只有 1 级时真源 uber 读的是没被写过的上采样顶层，内容定不了；本侧按黑图（零贡献）");
+                warn!("engine bloom: with only 1 level the uber pass reads an upsample top level that was never written, so its content is undefined; this side uses a black image (zero contribution)");
             }
         }
         let (mut w, mut h) = (plan.width.max(1), plan.height.max(1));

@@ -1,32 +1,43 @@
-//! 采集物材质：props 文档的材质表按族谱换装。
+//! Harvest-object materials: the props documents' material table is
+//! swapped in per family.
 //!
-//! 数据面：每个摆放点名包的文档（`site/props/<leaf>/<leaf>.json`，与
-//! glb 同目录）带 `materials[]`（shader 名 · keyword 集 · 浮点表 · 槽表）
-//! 与 `textureColourSpace`——与站点 sidecar 同一提取产物形状，走同一个
-//! [`parse_site_sidecar`]。glb 侧的材质句柄按它在 glb `materials` 里的下标
-//! 与文档材质条目 join（提取产物两侧同序），并核对 `GltfMaterialName` 与
-//! 条目名一致；一个包里可以有同名的两个材质（`treasure_box1` 的两个
-//! `mat_base`，贴图不同），按名 join 会把第二个解析成第一个。下标对不上
-//! 时退回按名 join，且只在名字在文档里唯一时成立。句柄在 scene 实例间
-//! 共享：同包两条摆放只解析一次、同时换上。
+//! Data side: the document of each placed package
+//! (`site/props/<leaf>/<leaf>.json`, in the same directory as its glb) carries
+//! `materials[]` (shader name · keyword set · float table · slot table) and
+//! `textureColourSpace` — the same document shape as the site sidecar, parsed
+//! through the same [`parse_site_sidecar`]. A glb material handle is joined
+//! to the document's material entry by its index in the glb `materials`
+//! array (the two sides are in the same order), and `GltfMaterialName` is
+//! checked against the entry name; a package may hold two materials with the
+//! same name (`treasure_box1`'s two `mat_base`, with different textures), and
+//! a join by name would resolve the second as the first. When the index does
+//! not match, the join falls back to the name, which holds only when the name
+//! is unique in the document. Handles are shared across scene instances: two
+//! placements of the same package are resolved once and swapped together.
 //!
-//! 族分派（采集物九个子类的视图族谱）：已移植三族。`Mysekai/Site/FieldObject`
-//! 与 `Mysekai/Site/Tree` 复用站点材质管线
-//! （`SiteMaterial` 与其 MaterialPlugin 都由站点材质插件装着），解析走
-//! 同一族门（keyword 全集 + 律的标量校验），贴图从 `site/props/<leaf>`
-//! 目录装载（著色空间按文档声明）。`Mysekai/TreasureBox` (the base shape
+//! Family dispatch (the view family tree of the nine harvest subclasses):
+//! three families are supported. `Mysekai/Site/FieldObject` and
+//! `Mysekai/Site/Tree` reuse the site material pipeline (`SiteMaterial` and
+//! its MaterialPlugin are both installed by the site material plugin), parse
+//! through the same family gate (the full keyword set + the scalar checks),
+//! and load textures from the `site/props/<leaf>` directory (colour space as
+//! the document declares). `Mysekai/TreasureBox` (the base shape
 //! of the two treasure packages) resolves to the site pipeline's TreasureBox
 //! family (`resolve_treasurebox`: phenomena light and shade, drop shadow,
 //! rare overlay, treasure shadows, fog). Harvest objects are placed at each
-//! harvest site's arrival from the user harvest map (the server mock's). 其余
-//! （`Mysekai/Effect/UberUnlit` 演出族、粒子 listen point 一族）是
-//! 范围外：按 shader 名计数保留。Particle system materials are not glb
+//! harvest site's arrival from the user harvest map (the server mock's). The
+//! rest (`Mysekai/Effect/UberUnlit`, the effect family, and the particle
+//! listen-point family) are out of scope: they are counted by shader name and
+//! kept. Particle system materials are not glb
 //! materials; the views play theirs through the fixture particle host
 //! (`harvest::particles`).
 //!
-//! 换装时机：全部摆放的 scene 展开完毕（`HarvestScenesReady`）后一次
-//! 性建 plan、等贴图到齐、逐实体换。挂账：采集物贴图不补 mip 链
-//! （与站点族同一裁决——demo 侧的补链在家具域，是另一条独立链路）。
+//! Swap timing: once every placement's scene has expanded
+//! (`HarvestScenesReady`), the plan is built in one pass, textures are awaited,
+//! and entities are swapped one by one. Outstanding: harvest-object textures
+//! do not get a mip chain (the same decision as the site family — the
+//! sandbox's mip-chain fill lives in the fixture domain, an independent
+//! chain).
 
 use std::collections::HashMap;
 

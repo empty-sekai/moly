@@ -428,16 +428,13 @@ pub fn advance_cue_playbacks(
                 commands.spawn(track).id()
             });
             for index in 0..playback.voices.len() {
-                match playback.voices[index] {
-                    RoundVoice::Sounding { entity: sound, .. } => {
-                        if spatial_sinks.get(sound).is_ok_and(|sink|sink.empty()) || one_shot_finished_or_failed(sound, &server, &players, &sinks) {
-                            if let Ok(mut sound_commands) = commands.get_entity(sound) {
-                                sound_commands.despawn();
-                            }
-                            playback.voices[index] = RoundVoice::Done;
+                if let RoundVoice::Sounding { entity: sound, .. } = playback.voices[index] {
+                    if spatial_sinks.get(sound).is_ok_and(|sink|sink.empty()) || one_shot_finished_or_failed(sound, &server, &players, &sinks) {
+                        if let Ok(mut sound_commands) = commands.get_entity(sound) {
+                            sound_commands.despawn();
                         }
+                        playback.voices[index] = RoundVoice::Done;
                     }
-                    _ => {}
                 }
             }
             if !playback

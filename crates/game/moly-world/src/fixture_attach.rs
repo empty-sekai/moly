@@ -1,21 +1,29 @@
-//! 家具挂点档案：装载、解析，与「实例摆放变换 × 挂点 local」的世界位组合。
+//! Fixture attach-point archive: loading, parsing, and the world transform
+//! composed as "instance placement transform × attach point local".
 //!
-//! 挂点侧条目（`loc_start`/`loc_end` 对）带着各自 prefab 下的 local
-//! 位置/朝向。真源在实例化后读它们的 Transform——读数即
-//! 「实例摆放变换 × 挂点 local」。本模块照这条链组合：每个摆放实例
-//! （位置 + 绕 Y 朝向）× 该包每条挂点条目 → 世界位与世界朝向。
-//! 实例 API 使用完整 TRS；挂点本身的缩放不改变挂点原点。
+//! Attach-point entries (`loc_start`/`loc_end` pairs) carry their local position and
+//! facing under their prefab. The engine reads their `Transform` after
+//! instantiation — the value read is "instance placement transform × attach point
+//! local". This module composes the same chain: each placement instance (position +
+//! facing about Y) × each attach-point entry of that bundle → world position and
+//! world facing.
+//! The instance API uses the full TRS; an attach point's own scale does not move the
+//! attach-point origin.
 //!
-//! `AttachWorlds` 是旧消费者的一次性摆放快照，不能供移动/编辑后的实例使用。
-//! 活动会话读取实际实体的 `GlobalTransform`，按源数组身份解析 Start/End。
+//! `AttachWorlds` is a one-shot placement snapshot for legacy consumers and cannot be
+//! used for instances that moved or were edited.
+//! A live session reads the actual entity's `GlobalTransform` and resolves Start/End
+//! by the engine array's identity.
 //!
-//! 两张读出面（`AttachWorlds`）：决策侧的动作点支按（包, id）取件；
-//! 执行层的身份判定过滤器按位置扫描全表——扫描面是**全部已摆放
-//! 实例**的挂点（不止对话锚定件），与真源「决策写的点是不是动作点
-//! 表某条的坐标」同一问法。
+//! The two read surfaces (`AttachWorlds`): the decision side's action-point branch
+//! looks entries up by (bundle, id); the execution layer's identity filter scans the
+//! whole table by position — the scanned surface is the attach points of **all
+//! placed instances** (not only talk anchors), the same question as "is the point
+//! the decision wrote the coordinate of some row of the action-point table".
 //!
-//! 解析对档案的形状 fail-closed：缺键、缺分量、分量不是数都具名
-//! panic——静默丢一条挂点会把「走环带」伪装成数据事实。
+//! Parsing is fail-closed about the archive's shape: a missing key, a missing
+//! component or a non-numeric component panics with the entry named — silently
+//! dropping one attach point would disguise a "walk-through band" as a data fact.
 
 use bevy::asset::{Assets, LoadState};
 use bevy::prelude::*;

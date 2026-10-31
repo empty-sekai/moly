@@ -115,7 +115,7 @@ pub struct ObjectIdentity {
     /// The complete supplied-package receipt, not just its human-readable name.
     pub package: Value,
     pub serialized_file: String,
-    /// A string prevents JavaScript from rounding an IL2CPP/Unity 64-bit PPtr.
+    /// A string prevents JavaScript from rounding a Unity 64-bit PPtr.
     pub path_id: String,
 }
 impl ObjectIdentity {

@@ -107,8 +107,8 @@ impl WipeTween {
     }
 }
 
-/// The hole's radius in canvas units for a `_Scale` (the program itself is
-/// the product's; this and [`coverage`] transcribe it for the value checks).
+/// The hole's radius in canvas units for a `_Scale` (the same formula as the
+/// wipe program; this and [`coverage`] implement it for the value checks).
 #[cfg(test)]
 pub fn hole_radius(scale: f32) -> f32 {
     (WIPE_RECT * 0.5) / (scale * scale * scale)
@@ -435,7 +435,7 @@ mod tests {
         assert!(hole_radius(inn.value_at(0.703)) > 1101.45);
     }
 
-    /// The wipe program transcribed line by line (vertex: `uv - offset`,
+    /// The wipe program, formula by formula (vertex: `uv - offset`,
     /// `* 2 - 1`, `* _Scale^3`; fragment: `sqrt(dot) >= 1`) against
     /// [`coverage`], at pixels either side of the hole's edge.
     #[test]

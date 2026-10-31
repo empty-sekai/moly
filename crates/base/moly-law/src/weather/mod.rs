@@ -1024,7 +1024,7 @@ fn adopt_flag(
 impl PostProcessProfile {
     /// 从原始字节解析一份现象的 `postprocess.json`。
     ///
-    /// 用 [`json`]，本 crate 手写的唯一 JSON 读取器，不引入第二个。
+    /// 用 `json`，本 crate 手写的唯一 JSON 读取器，不引入第二个。
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         let root = json::parse(bytes).map_err(|e| format!("postprocess.json: {e}"))?;
         let asset = field(&root, "asset", "postprocess.json")?

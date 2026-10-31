@@ -1,4 +1,4 @@
-// 角色 toon 程序的逐句翻译：mask switch → 双支因子 → shade 混 → 光混 →
+// 角色 toon 程序的运算顺序：mask switch → 双支因子 → shade 混 → 光混 →
 // 抖动 → 眉 → 雾 → brightness。式子照 moly-law 的角色律；槽序与
 // `character_material.rs` 的 Rust 结构体是契约，两边同改。
 //

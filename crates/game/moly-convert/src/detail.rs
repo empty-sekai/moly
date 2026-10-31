@@ -407,9 +407,7 @@ impl DetailPanel {
 
     /// The panel's control at a node path, if any.
     pub fn hit(&self, nodes: &DetailNodes, path: &str) -> Option<Action> {
-        if self.item.is_none() {
-            return None;
-        }
+        self.item?;
         let inside = |root: &str| path == root || path.starts_with(&format!("{root}/"));
         if inside(&nodes.decrement) {
             return Some(Action::Decrement);

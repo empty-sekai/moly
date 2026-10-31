@@ -8,9 +8,11 @@ use moly_protocol::rows::MusicPlaySetting;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-/// 一条 voice 行的说话者指称：voice 步的 `who`（角色变体 id）或
-/// fixture_voice 步的 `fixture`（家具 id）。partvoice 的包随说话者变体
-/// （真源按参与者逐个载包），不随 cue——cue 名里的段不编码变体归属。
+/// The speaker reference of one voice line: the voice step's `who` (character
+/// variant id) or the fixture_voice step's `fixture` (fixture id). A partvoice
+/// package follows the speaker variant (the original game loads packages per
+/// participant), not the cue — the segment in a cue name does not encode the
+/// variant's ownership.
 #[derive(Clone, Copy, Debug)]
 pub enum VoiceWho {
     /// voice 步：characterUnitId（名册变体 id）。

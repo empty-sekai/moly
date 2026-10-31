@@ -1,19 +1,25 @@
-//! 碰撞基元：球 / 胶囊 / 无限平面的世界空间形与推出。
+//! Collision primitives: world-space shapes and push-out for spheres /
+//! capsules / infinite planes.
 //!
-//! 语义表来自 rig `cloth.capsuleSemantics` / `planeSemantics`（与
-//! 反编译 ColliderCollisionConstraint 的 Sphere/Capsule/Plane
-//! Detection 对照一致）：
-//! * 胶囊 `length` 是**半长**，端点 = `center ± axis·length`；
-//!   `startRadius` 属 **-axis 端**（t=0），`endRadius` 属 +axis 端
-//!   （t=1），面半径 = `lerp(start, end, t)`；
-//! * 平面法线 = 骨本地 `normalDirection`（变换 up 轴）经世界旋转，
-//!   过 `boneWorld·center`，粒子推到法线一侧；
-//! * 缩放按骨世界矩阵三轴绝对值平均（demo colliderToWorld 形）。
+//! The semantics table comes from rig `cloth.capsuleSemantics` /
+//! `planeSemantics` (consistent with the Sphere/Capsule/Plane
+//! Detection of `ColliderCollisionConstraint`):
+//! * capsule `length` is a **half-length**; endpoints =
+//!   `center ± axis·length`;
+//!   `startRadius` belongs to the **-axis end** (t=0), `endRadius` to
+//!   the +axis end (t=1), surface radius = `lerp(start, end, t)`;
+//! * plane normal = the bone's local `normalDirection` (the transform
+//!   up axis) in world space; the plane passes through `boneWorld·center`
+//!   and particles are pushed to the normal side;
+//! * scale = average of the absolute values of the three axes of the
+//!   bone world matrix.
 //!
-//! 反编译差异（不转录，见 mod.rs 表）：CollisionJob 对全部
-//! 粒子×碰撞体做「最深命中」挑选并在 0.03m 深度窗内做摩擦簿记；
-//! 本律按 demo 形顺序遍历逐个推出（用户验收形），摩擦数据
-//! （0.05/0.03）量级不改变这个选择。
+//! Known difference (see the table in mod.rs): `CollisionJob` picks the
+//! "deepest hit" over all particle × collider pairs and keeps friction
+//! bookkeeping within a 0.03m depth window; this module instead walks
+//! in order and pushes each particle out one collider at a time, so
+//! the friction data of magnitude (0.05/0.03) does not change that
+//! choice.
 
 use super::math;
 

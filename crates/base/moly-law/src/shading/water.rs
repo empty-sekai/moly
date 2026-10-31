@@ -71,6 +71,7 @@ pub struct WaterFragmentInputs {
 
 /// 改变 Base 片元体的可选 keyword 特性。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub struct WaterFragmentFeatures {
     /// `_SKIP_PHENOMENA_LIGHT`：该变体直接输出纹理/顶点色，
     /// 不消费光照、宝藏与雾的全局量。
@@ -79,14 +80,6 @@ pub struct WaterFragmentFeatures {
     pub enable_fresnel: bool,
 }
 
-impl Default for WaterFragmentFeatures {
-    fn default() -> Self {
-        Self {
-            skip_phenomena_lighting: false,
-            enable_fresnel: false,
-        }
-    }
-}
 
 /// 源的 `tex.wxyz * vs_COLOR0.wxyz`：逐分量乘。
 /// `(tex.a*vc.a, tex.r*vc.r, tex.g*vc.g, tex.b*vc.b)`——rgb 各带顶点色的
@@ -175,7 +168,7 @@ fn apply_treasure_shadow(mut color: [f32; 3], t: f32, intensity: f32) -> [f32; 3
     let scale = intensity * TREASURE_SHADOW_SCALE;
     for channel in &mut color {
         let delta = *channel * t + -*channel;
-        *channel = scale * delta + *channel;
+        *channel += scale * delta;
     }
     color
 }
@@ -212,7 +205,7 @@ fn fog_source(color: [f32; 3], world_y: f32, fog_factor: f32, globals: WaterGlob
     let mut out = color;
     for c in 0..3 {
         let delta = distance_blended[c] - out[c];
-        out[c] = height * delta + out[c];
+        out[c] += height * delta;
         out[c] = out[c].clamp(0.0, 1.0);
     }
     out
@@ -266,11 +259,11 @@ fn lit_color_source(
     let mut color = base;
     for c in 0..3 {
         let light_delta = color[c] * globals.phenomena_directional_light_color[c] + -color[c];
-        color[c] = globals.phenomena_directional_light_color[3] * light_delta + color[c];
+        color[c] += globals.phenomena_directional_light_color[3] * light_delta;
     }
     for c in 0..3 {
         let shade_delta = color[c] * globals.phenomena_shade_color[c] + -color[c];
-        color[c] = ramp * shade_delta + color[c];
+        color[c] += ramp * shade_delta;
     }
     if let Some(t) = fresnel_treasure0 {
         color = apply_treasure_shadow(color, t, globals.treasure_shadow_intensity[0]);

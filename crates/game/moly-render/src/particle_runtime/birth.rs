@@ -155,11 +155,11 @@ fn qualify(emitter: &EmitterParams, frame_head: bool) -> Result<(), BirthRefused
         .map_err(BirthRefused::Emission)?;
     }
     // A World-space birth is placed back along the emitter velocity; only the
-    // Transform mode's velocity (translation change per frame) is transcribed.
+    // Transform mode's velocity (translation change per frame) is implemented.
     // Local space masks the velocity, so its mode is never read.
     if emitter.simulation_space == SimulationSpace::World && emitter.emitter_velocity_mode != Some(0) {
         return Err(BirthRefused::Unsupported(
-            "World-space emitter velocity other than the Transform mode is not transcribed",
+            "World-space emitter velocity other than the Transform mode is not supported",
         ));
     }
     // The CollisionModule law is qualified inside; its scene is bound (or
@@ -188,10 +188,10 @@ fn qualify_distance_composition(emitter: &EmitterParams) -> Result<(), BirthRefu
     use moly_law::particle::MinMaxCurve;
     let refuse = |reason| Err(BirthRefused::Unsupported(reason));
     if emitter.emitter_velocity_mode != Some(0) {
-        return refuse("emission over distance: emitter velocity other than the Transform mode is not transcribed");
+        return refuse("emission over distance: emitter velocity other than the Transform mode is not supported");
     }
     if emitter.prewarm {
-        return refuse("emission over distance with a first-Play warm: the warm update's distance call is not transcribed");
+        return refuse("emission over distance with a first-Play warm: the warm update's distance call is not supported");
     }
     if has_real_sub_emitter_edges(emitter) || emitter.collision.is_some() || emitter.trails.is_some()
         || emitter.noise.is_some() || emitter.force.is_some() || emitter.inherit_velocity.is_some()
@@ -796,7 +796,7 @@ fn shape_refusal(refused: moly_law::particle::shape_birth::Refused) -> BirthRefu
             "Shape export has no texture reference field (an export check, not a ShapeModule member); re-extract",
         ),
         moly_law::particle::shape_birth::Refused::ShapeTexture => BirthRefused::Unsupported(
-            "Shape texture reference: ApplyTexture is not transcribed",
+            "Shape texture reference: ApplyTexture is not supported",
         ),
         _ => BirthRefused::Unsupported("unqualified native Shape configuration"),
     }
@@ -1333,7 +1333,7 @@ fn validate_unshaped_owner(
 /// source route admits only Local space, no Noise, collision, sub-emitter,
 /// clamp or rotation-by-speed module and no per-particle trail; of the rest,
 /// Shape and the RotationOverLifetime constant and two-constant integrals are
-/// transcribed. The per-frame update after the warm is the ordinary one.
+/// implemented. The per-frame update after the warm is the ordinary one.
 pub(super) fn qualify_procedural_warm(emitter: &EmitterParams) -> Result<(), BirthRefused> {
     use moly_law::particle::MinMaxCurve;
     let refuse = |reason| Err(BirthRefused::Unsupported(reason));
@@ -1341,13 +1341,13 @@ pub(super) fn qualify_procedural_warm(emitter: &EmitterParams) -> Result<(), Bir
         return refuse("procedural warm outside Local space");
     }
     if emitter.velocity_over_lifetime.is_some() {
-        return refuse("procedural warm: VelocityModule::UpdateProcedural is not transcribed");
+        return refuse("procedural warm: VelocityModule::UpdateProcedural is not supported");
     }
     if emitter.force.is_some() {
-        return refuse("procedural warm: ForceModule::UpdateProcedural is not transcribed");
+        return refuse("procedural warm: ForceModule::UpdateProcedural is not supported");
     }
     if emitter.trails.is_some() {
-        return refuse("procedural warm: a ribbon trail over the regenerated particles is not transcribed");
+        return refuse("procedural warm: a ribbon trail over the regenerated particles is not supported");
     }
     if super::size_over_lifetime_law(emitter).and_then(Result::ok).is_some_and(|size| size.calls().is_some()) {
         return refuse("procedural warm: the SizeModule call over the regenerated particles is not followed");
@@ -1367,7 +1367,7 @@ pub(super) fn qualify_procedural_warm(emitter: &EmitterParams) -> Result<(), Bir
         let axes_ok = scalar(Some(&rotation.curve))
             && (!rotation.separate_axes || (scalar(rotation.x.as_ref()) && scalar(rotation.y.as_ref())));
         if !axes_ok {
-            return refuse("procedural warm: a RotationOverLifetime curve integral is not transcribed");
+            return refuse("procedural warm: a RotationOverLifetime curve integral is not supported");
         }
     }
     Ok(())
@@ -1399,7 +1399,7 @@ pub(super) fn run_warm_procedural(
         let dt = slice.map_err(|_| BirthRefused::InvalidTiming)?.duration;
         // The start delay word as the ordinary slice reads it.
         let delay = state.frame.start_delay;
-        let tick = (delay < dt).then(|| dt - delay);
+        let tick = (delay < dt).then_some(dt - delay);
         let (birth_dt, next_delay) = if entry_clock == 0.0 && delay > 0.0 {
             let left = delay - dt;
             (Some(-left).filter(|b| left <= 0.0 && *b > 0.0), if left > 0.0 { left } else { 0.0 })
@@ -1449,7 +1449,7 @@ fn update_procedural(system: &mut Runtime, state: &mut NativeBirthState, ctx: &C
         return Ok(());
     }
     if !system.pool.is_empty() {
-        return Err(BirthRefused::Unsupported("procedural regeneration over live particles is not transcribed"));
+        return Err(BirthRefused::Unsupported("procedural regeneration over live particles is not supported"));
     }
     let law = validate(system, &state.initial)?;
     let modifier = match system.emitter.start.gravity_modifier {
@@ -1513,7 +1513,7 @@ fn update_procedural(system: &mut Runtime, state: &mut NativeBirthState, ctx: &C
                 let slot = &mut storage.slots[group + lane];
                 let sample = &shaped.samples[lane];
                 for a in 0..3 {
-                    slot.position[a] = sample.position[a] + slot.position[a];
+                    slot.position[a] += sample.position[a];
                     slot.velocity[a] = sample.direction[a];
                 }
                 if let Some(axes) = shaped.axis_of_rotation {

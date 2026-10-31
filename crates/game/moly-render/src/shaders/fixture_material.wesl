@@ -1,9 +1,9 @@
-// 家具 Basic 族（Mysekai/Fixture/Basic）的 Base 程序。式子照源程序
-// platform9 Base 主程序的运算顺序逐句翻译；族内变体用宏分派。
+// 家具 Basic 族（Mysekai/Fixture/Basic）的 Base 程序。式子照游戏程序
+// platform9 Base 主程序的运算顺序；族内变体用宏分派。
 //
-// ⚠ **色彩域是这份移植的承重前提，动任何一条算术之前先读下方「色彩域」
+// ⚠ **色彩域是这份实现的承重前提，动任何一条算术之前先读下方「色彩域」
 //    那一节**（在 `UNBOUND_CUBE_SAMPLE` 之后、顶点输出之前）。整条片元
-//    链在**存储（gamma）域**上算，不在线性域——真源是 gamma 色彩空间构建。
+//    链在**存储（gamma）域**上算，不在线性域——游戏是 gamma 色彩空间构建。
 //
 // 变体键（specialize 注入）：
 //   FIXTURE_ALPHA_CLIP  _USE_ALPHA_CLIP：被采 alpha − 0.5 < 0 丢弃。
@@ -32,13 +32,13 @@
 //                       min(pow(1−N·V, power), 1) × 立方图采样 × intensity。
 //                       立方图采样在本管线是**常数**（材质没给它绑对象，
 //                       引擎按维度顶上内建默认立方图，那张是六面同色 ⇒
-//                       采样与方向/mip/偏置无关）⇒ 源里的反射向量不用算。
+//                       采样与方向/mip/偏置无关）⇒ 游戏里的反射向量不用算。
 //                       ⚠ 这个折叠**只对槽位为空的材质成立**：载具那三个
 //                       材质绑了真立方图，需要真采样，未实现、具名挂账。
 //   FIXTURE_VIEW_DIR    上面两条**任一**开着时注入：顶点里构造视线方向并
-//                       输出（两条分支读同一个顶点输出，源里两个变体的
+//                       输出（两条分支读同一个顶点输出，游戏里两个变体的
 //                       这段构造逐行相同，所以只有一份）。由 Rust 侧按
-//                       「菲涅尔或反射」派生，不是独立的源 keyword。
+//                       「菲涅尔或反射」派生，不是独立的游戏 keyword。
 //   FIXTURE_NORMAL_MAP  JP Basic programs carry an int-gated normal-map block
 //                       (`_UseNormalMap` > 0.5) in every variant. The int is a
 //                       per-material constant, so the block is specialised on
@@ -66,15 +66,15 @@
 // 不并进 FixtureParams（那份 12 槽序与自发光 pass 的对象池布局共用）。
 // 顶点属性键由引擎按网格布局注入：VERTEX_NORMALS / VERTEX_UVS_A。
 //
-// 与源的两点已知差异（同站点族的既有裁决）：
-// - 源程序写两个颜色目标（SV_Target1 = 自发射遮罩 × 现象自发光开关
+// 与游戏的两点已知差异（同站点族的既有裁决）：
+// - 游戏程序写两个颜色目标（SV_Target1 = 自发射遮罩 × 现象自发光开关
 //   链：类型 1 时门 = bright==1、类型 2 时门 = dark==1、其余 0，随后
 //   override 模式 1 强置 1 / 2 强置 0；两目标 alpha 都 = 主贴图 alpha）。
 //   本管线的主 pass 只有一个颜色目标（与站点族同一裁决）；第二目标由
 //   自建的自发光 pass 承接（`fixture_emission.wesl`，直画进泛光的输入
-//   缓冲），门链与 discard 链在那里逐句同源。主程序的这三条路径不
+//   缓冲），门链与 discard 链在那里按同一顺序写。主程序的这三条路径不
 //   消费那三个材质 int 与 `_EmissionMaskTex`。
-// - 源的抖动屏幕坐标走 clip 位（TEXCOORD3.xy/ww × 屏参），本管线用
+// - 游戏的抖动屏幕坐标走 clip 位（TEXCOORD3.xy/ww × 屏参），本管线用
 //   片元内置坐标；两者在像素中心逐值相等（同左下原点、同半像素
 //   偏移），站点族已按同一对账采同一路。
 
@@ -85,7 +85,7 @@ import bevy_pbr::render::view_transformations::position_world_to_clip;
 
 // ---- 材质 uniform（group 3 binding 0）：每条 Unity 属性一个 vec4 槽 ----
 // 槽序与 `fixture_material.rs` 里 `FixtureParams` 的字段序是契约，两边同改。
-// 源 Base 程序不消费的属性（_BaseOpacity、顶点色）没有槽；fresnel 两参
+// 游戏 Base 程序不消费的属性（_BaseOpacity、顶点色）没有槽；fresnel 两参
 // 走独立的 binding 4（那份 12 槽序与自发光 pass 的对象池布局共用，不能
 // 扩）；雾走全局 env 槽（group 3 binding 1），与站点族共用同一份。
 
@@ -194,7 +194,7 @@ struct FixtureShadingBranch {
 
 // 未绑定的立方图采样器采出来的常数（每通道 128/255）。引擎按纹理**维度**
 // 索引它的内建默认贴图表顶上去，而立方图那一格是六面各自整面清成同一个
-// 颜色的 ⇒ **采样值与方向、mip 级、mip 偏置、过滤模式全部无关**，于是源里
+// 颜色的 ⇒ **采样值与方向、mip 级、mip 偏置、过滤模式全部无关**，于是游戏里
 // 那次 `texture(立方图, R, bias)` 折叠成这一个常数，反射向量 R 连算都不用算。
 // 工程跑在 gamma 空间 ⇒ 引擎给它选的是无 sRGB 标记的格式 ⇒ 采样不做 sRGB
 // 解码，128/255 不打折。出处与适用边界（**只对立方图槽位为空的材质成立**；
@@ -206,7 +206,7 @@ const UNBOUND_CUBE_SAMPLE: f32 = 0.5019608;
 
 // ---- 色彩域（改这个文件里任何一条算术之前先读）----
 //
-// 真源是 **gamma 色彩空间**构建：贴图采样不解码、片元里整条链在存储
+// 游戏是 **gamma 色彩空间**构建：贴图采样不解码、片元里整条链在存储
 // （编码）域上算、结果按编码值直写帧缓冲。本管线两头都不同：
 //
 //   1 家具主贴图是 glTF 的 `base_color_texture`（`fixture_material.rs` 里
@@ -215,9 +215,9 @@ const UNBOUND_CUBE_SAMPLE: f32 = 0.5019608;
 //     `textureSampleBias` 给出的是线性值；
 //   2 本管线的色彩目标是 sRGB 格式 ⇒ 写出时硬件按 sRGB OETF 再编码一次。
 //
-// ⇒ 采样后先 [`srgb_format_encode`] 编回存储域，中间整条链与源逐式同域，
+// ⇒ 采样后先 [`srgb_format_encode`] 编回存储域，中间整条链与游戏逐式同域，
 //   写出前 [`srgb_format_decode`] 解一次、硬件那一次编码恰好还原。**两步
-//   都不是源的式子，是域适配**——源没有硬件的那两步，所以它也没有对应的逆。
+//   都不是游戏的式子，是域适配**——游戏没有硬件的那两步，所以它也没有对应的逆。
 //
 // ⚠ **紧挨着的 `UNBOUND_CUBE_SAMPLE` 就是这条前提的独立证人，而在本节落地
 //   之前它和代码是互相打脸的**：那段注释自己写着「工程跑在 gamma 空间 ⇒
@@ -226,7 +226,7 @@ const UNBOUND_CUBE_SAMPLE: f32 = 0.5019608;
 //   是**解码后的线性值**。两句话都在这个文件里，没人把它们连起来。
 //   ⇒ 留这段是因为本仓的规矩：一条设计的理由必须留在代码里。谁要是把下面
 //   两次域变换当成多余的开销删掉，这个常数会立刻重新变成一个域错，而
-//   **没有任何判据会红**（当前摆位下带反射分支的 3 个材质全是未摆放的载具）。
+//   **没有任何检查会发现**（当前摆位下带反射分支的 3 个材质全是未摆放的载具）。
 //
 // ⚠ **uniform 颜色与顶点色不参与这两步**：颜色 uniform 两侧同为原始浮点
 //   直推（不做域转换）⇒ 本来就在存储域；wgpu 的顶点格式**没有 sRGB 变体**，
@@ -238,8 +238,8 @@ const UNBOUND_CUBE_SAMPLE: f32 = 0.5019608;
 //     指数写 `1/2.4`。`srgb_format_decode` 逐式同
 //     `moly_law::weather::sky::srgb_target_value`（律侧是唯一权威形）。
 //   · **引擎**那一族 = `moly_law::weather::sky::gamma_to_linear` /
-//     `linear_to_gamma`，多一支 2.2 幂、指数是源里的截断字面量，只用在
-//     **源自己**做 gamma 往返的地方。两族混用会在低端偏若干码。
+//     `linear_to_gamma`，多一支 2.2 幂、指数是游戏里的截断字面量，只用在
+//     **游戏自己**做 gamma 往返的地方。两族混用会在低端偏若干码。
 //
 // ⚠ **alpha 不参与**：硬件的 sRGB 变换只作用于 rgb 三通道，`base.a` 就是
 //   存储值 ⇒ clip 阈值与输出 alpha 都不改。
@@ -467,9 +467,9 @@ fn fixture_bayer_value(pixel: vec2<f32>) -> f32 {
         2.0, 14.0, 1.0, 13.0,
         10.0, 6.0, 9.0, 5.0,
     );
-    // 表按 [x][y] 读（x 为行）：demo 的取法是 table[ix*4+iy]。
+    // 表按 [x][y] 读（x 为行）：游戏式的取法是 table[ix*4+iy]。
     // 此前这里写成 iy*4+ix（转置读法）——live 材质 _DisableDither 全 1，
-    // 块编译期移除，零观测差；按判据修齐到与 demo 同向。
+    // 块编译期移除，零观测差；现在按游戏式改正为同一方向。
     let value = table[ix * 4 + iy];
     return value * 0.0618750006 + 0.00999999978;
 }
@@ -530,20 +530,20 @@ fn fixture_bayer_value(pixel: vec2<f32>) -> f32 {
     return vec4<f32>(rgb, alpha);
 }
 
-// The JP Basic normal-map block, statement by statement. `n` is the
+// The JP Basic normal-map block, following the game's statements. `n` is the
 // normalised interpolated normal, the result is the perturbed normal.
 //
 // Frame: the cotangent frame from screen derivatives of the world position
 // and of uv1. Two sign conventions meet here and cancel: WGSL's dpdy runs
-// down the framebuffer (the source's dFdy runs up, so dpdy = -dFdy for both
-// the position and the uv), and this pipeline's world is the source's world
+// down the framebuffer (the game's dFdy runs up, so dpdy = -dFdy for both
+// the position and the uv), and this pipeline's world is the game's world
 // reflected in x (a cross product of reflected vectors is minus the reflected
 // cross product). Worked through, T and B come out as the reflection of the
-// source's T and B, which is exactly how every other vector here relates to
-// the source, so the source statements are transcribed unchanged.
+// game's T and B, which is exactly how every other vector here relates to
+// the game, so the game's statements are implemented unchanged.
 //
 // The fetch is the only place the row origin changes (exported images start
-// at the top); the parallax shift is added in the source's uv space first.
+// at the top); the parallax shift is added in the game's uv space first.
 @if(FIXTURE_NORMAL_MAP) fn crystal_normal(n: vec3<f32>, world_position: vec3<f32>, uv1: vec2<f32>) -> vec3<f32> {
     let duv_x = dpdx(uv1);
     let duv_y = dpdy(uv1);
@@ -663,13 +663,13 @@ fn fragment(in: FixtureVertexOutput) -> @location(0) vec4<f32> {
 
     // 质感分支的两条加色支路（`_ENABLE_MODULE_FRESNEL` /
     // `_ENABLE_MODULE_REFLECTION`，各自独立开关，可单开也可同开）。
-    // N 与 V 都在片元里再归一化一次（源的形状）。
+    // N 与 V 都在片元里再归一化一次（游戏的形状）。
     //
-    // ⚠ **`1 − N·V` 只算一次，两支各取一份**：源里两条分支同开的那个变体
+    // ⚠ **`1 − N·V` 只算一次，两支各取一份**：游戏里两条分支同开的那个变体
     // 里这个减法只出现一次，菲涅尔支吃 `clamp(·,0,1)` 之后的副本、反射支
     // 吃**未钳的原件**。写成各算一次、或让两支共用同一个钳后值，都是另一
     // 个函数（反射支的上钳存在的理由正是未钳值会大于 1）。
-    // 逐句律在 moly-law 的 fixture::fresnel。
+    // 对应的律在 moly-law 的 fixture::fresnel。
     @if(FIXTURE_VIEW_DIR) let view_dir = normalize(in.view_dir);
     @if(FIXTURE_VIEW_DIR) let n_dot_v = dot(normal, view_dir);
     @if(FIXTURE_VIEW_DIR) let one_minus_raw = 1.0 - n_dot_v;

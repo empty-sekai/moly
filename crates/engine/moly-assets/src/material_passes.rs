@@ -46,7 +46,7 @@ impl SourceRenderState {
                     .or_else(|| value.get("default"))
             }?
             .as_f64()?;
-            (number.is_finite() && number >= 0.0 && number <= 255.0 && number.fract() == 0.0)
+            (number.is_finite() && (0.0..=255.0).contains(&number) && number.fract() == 0.0)
                 .then_some(number as u8)
         };
         let blend = value.get("blend")?;

@@ -53,7 +53,7 @@
 //! position and rotation getters return for a root, whether or not it was
 //! ever instantiated; a slot naming a node of the prefab, or a child
 //! Transform of another package, is refused by name (their world pose composes
-//! the parent chain, which is not transcribed here), as is a slot the export
+//! the parent chain, which is not implemented here), as is a slot the export
 //! could not resolve. A Planes system is installed with no physics scene.
 //!
 //! Collision sub-emitter edges record RecordEmit trigger 1 events inside the
@@ -168,7 +168,7 @@ pub(super) fn qualify(emitter: &EmitterParams) -> Result<Option<CollisionLaw>, S
         return Ok(None);
     };
     if emitter.noise.as_ref().is_some_and(|noise| noise_writes_size(&noise.size_amount)) {
-        return Err("collision current-size stream: a Noise size amount with a non-zero scalar is not transcribed".into());
+        return Err("collision current-size stream: a Noise size amount with a non-zero scalar is not supported".into());
     }
     current_size_law(emitter)?;
     if emitter.velocity_over_lifetime.as_ref().is_some_and(|velocity|
@@ -218,10 +218,10 @@ pub fn plane_slots(params: &CollisionParams) -> Result<Vec<Option<PlaneTransform
             [root] => Ok(Some(PlaneTransform { position: root.position, rotation: root.rotation, id: slot as i32 + 1 })),
             [] => Err("collision plane naming a Transform of another package with no chain".to_owned()),
             _ => Err("collision plane naming a child Transform of another package: its world pose composes the \
-                parent chain, which is not transcribed".to_owned()),
+                parent chain, which is not supported".to_owned()),
         },
         PlaneSource::Node(_) => Err("collision plane naming a node of the prefab: its world pose composes the \
-            parent chain, which is not transcribed".to_owned()),
+            parent chain, which is not supported".to_owned()),
         PlaneSource::Unresolved => Err("collision plane slot the export could not resolve".to_owned()),
     }).collect()
 }
@@ -254,7 +254,7 @@ fn current_size_law(emitter: &EmitterParams) -> Result<Option<CurrentSizeLaw>, S
 }
 
 /// The export's wrap modes of the size curves the current-size stream reads
-/// (the law reads the keys only): only the clamp wraps are transcribed. One
+/// (the law reads the keys only): only the clamp wraps are implemented. One
 /// curve carries its two wraps; two curves carry each side's two.
 pub fn current_size_source_gate(system: &serde_json::Value) -> Result<(), String> {
     let Some(size) = system.get("sizeOverLifetime").filter(|v| v.is_object()) else {

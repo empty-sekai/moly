@@ -63,14 +63,13 @@ use moly_features::userdata::{Answered, ServerPending};
 use assets::FixtureAreas;
 use bevy::prelude::*;
 use moly_law::fixture::position::layout_type;
-use moly_law::fixture::{Direction, GridPosition, Vector3Int};
+use moly_law::fixture::{Direction, GridPosition};
 use moly_layout::{resolve as placement, validate as tile_rules};
 use moly_link::ServerLink;
 use moly_protocol::{Call, Refusal, Reply};
 
 pub use input::{read_keyboard, read_pointer};
 pub use put_effect::site_origin;
-pub(crate) use put_effect::{play_put_sound, show as show_put_effect};
 
 pub use moly_features::field_modes::{EditSessionActive, LayoutSaved};
 

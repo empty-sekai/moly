@@ -456,7 +456,7 @@ impl ServerModel {
     /// A section the next response carries whatever else it carries (the
     /// convert items are the masters' own rows, not the document's).
     fn require_section(&mut self, section: &'static str) {
-        if !self.required.iter().any(|known| *known == section) {
+        if !self.required.contains(&section) {
             self.required.push(section);
         }
     }

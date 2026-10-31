@@ -1,32 +1,43 @@
-//! 查询层：点的可走性、最近可走点、沿面折线（A\* + 视线整直）。
+//! Query layer: walkability of a point, the nearest walkable point, and the
+//! on-surface polyline (A\* + line-of-sight straightening).
 //!
-//! 查询的形状锚在真源 `MoveUtility` 的两个同族方法上：
+//! The shape of the queries follows two sibling methods of `MoveUtility`:
 //!
-//! * `TryGetCanNavmeshTargetPosition(from, target)`——目标先过一次
-//!   `NavMesh.SamplePosition(·, 5.0)` 吸附，再 `CalculatePath`；任一步
-//!   失败就把目标沿「目标→起点」方向拉回一档（t = 0.9, 0.8, …, 0.0，
-//!   共十档，首试是原目标）重来；全败时返回起点本身（「哪儿也去不了
-//!   就原地」）。本模块的 [`path`] 转录这条链，只把「返回末拐点」放宽
-//!   为「返回整条折线」（末拐点是折线的最后一个元素，消费侧自取），
-//!   全败折成 `None`（原地把不走折线的决定留给调用方）。
-//! * 同文件的 `CanNavmeshMoveTargetPosition` 证明严判形态（不吸附、
-//!   不拉回、按末拐点与目标的水平距离过阈）也在源里并存——严判与 NPC
-//!   出发门走 [`calculate_path`]：它转写引擎 `CalculatePath` 本身（两端
-//!   各经一只查询盒映射，连通给完整折线、不连通给部分折线，两种都算
-//!   成功），比对末拐点的事由各门自己做。
+//! * `TryGetCanNavmeshTargetPosition(from, target)` — the target is first
+//!   snapped by `NavMesh.SamplePosition(·, 5.0)`, then `CalculatePath` runs;
+//!   if any step fails, the target is pulled back one step along
+//!   "target→start" (t = 0.9, 0.8, …, 0.0, ten steps in total, the first try
+//!   being the raw target) and retried; if every step fails it returns the
+//!   start itself ("nowhere to go, so stay put"). [`path`] in this module
+//!   implements this chain, relaxing "return the last corner" to "return the
+//!   whole polyline" (the last corner is the last element, and the consumer
+//!   takes it), with total failure folded into `None` (staying put is the
+//!   caller's decision).
+//! * `CanNavmeshMoveTargetPosition` in the same file shows that a strict form
+//!   (no snapping, no pull-back, threshold on the horizontal distance from
+//!   the last corner to the target) also exists — the strict form and NPC
+//!   departure gates use [`calculate_path`]: it implements the engine's
+//!   `CalculatePath` itself (each end mapped through one query box; connected
+//!   gives the full polyline, disconnected gives a partial polyline, both
+//!   count as success), and each gate compares the last corner itself.
 //!
-//! 折线的整直：真源 `CalculatePath` 返回的 corners 是整直后的直线路
-//! 径（原生代理内部的搜索 + straight path 后处理在原生墙后）。本模块
-//! 用「格上 A\* + 贪心视线拉直」做同形转录：A\* 给出绕洞的格链，视线
-//! 拉直把能直连的连续段合并。视线判定走 Amanatides-Woo 超覆盖：线段
-//! 穿过的每一格都必须可行走；恰好过角点时两侧格与对角格都要可走
-//! （保守侧：只有半径一格的站上，角点邻格可能是洞）。
+//! Straightening the polyline: the corners returned by `CalculatePath` form a
+//! straightened straight-line path (the agent's internal search and the
+//! straight-path post-processing). This module reproduces that shape with
+//! "A\* on the cells + greedy line-of-sight straightening": A\* gives the
+//! cell chain around holes, and the sight test merges consecutive segments
+//! that can be joined directly. The sight test uses an Amanatides-Woo
+//! traversal: every cell the segment crosses must be walkable; when it passes
+//! exactly through a corner, both side cells and the diagonal cell must be
+//! walkable (the conservative side: only one cell of radius is walkable, and
+//! a corner's neighbour cell may be a hole).
 
 use super::grid::Grid;
 use super::polymesh::PolyMesh;
 use super::region::Regions;
 
-/// 端点吸附上限：真源移动侧查询里 `SamplePosition` 的 maxDistance 字面量。
+/// Endpoint snap limit: the `maxDistance` literal of `SamplePosition` in the
+/// move-side query.
 pub const SNAP_MAX_DISTANCE: f32 = 5.0;
 
 /// 点是否落在可行走格上（出界按不可走）。
@@ -77,7 +88,7 @@ pub(crate) fn nearest_walkable(
                 }
                 let center = grid.cell_center((cx + dx) as usize, (cz + dz) as usize);
                 let d = (center[0] - p[0]).powi(2) + (center[1] - p[1]).powi(2);
-                if best.map_or(true, |(_, bd)| d < bd) {
+                if best.is_none_or(|(_, bd)| d < bd) {
                     best = Some((center, d));
                 }
             }
@@ -93,7 +104,7 @@ pub(crate) fn nearest_walkable(
     }
     match best {
         Some((center, d)) => {
-            if max_dist.map_or(true, |m| d <= m * m) {
+            if max_dist.is_none_or(|m| d <= m * m) {
                 Some(center)
             } else {
                 None
@@ -185,7 +196,7 @@ pub(crate) fn nearest_walkable_in_box(
                     continue;
                 }
                 let d = (center[0] - p[0]).powi(2) + (center[1] - p[1]).powi(2);
-                if best.map_or(true, |(_, bd)| d < bd) {
+                if best.is_none_or(|(_, bd)| d < bd) {
                     best = Some((center, d));
                 }
             }

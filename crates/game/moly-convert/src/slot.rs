@@ -78,6 +78,7 @@ const TITLE_FIXTURE: &str = "convert";
 
 /// The slot page's serialized nodes.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct PageBindings {
     /// `ComponentRoot/MysekaiConvertFurnitureSlotView`.
     pub view: String,
@@ -88,17 +89,6 @@ pub struct PageBindings {
     pub balloon_transition: String,
 }
 
-impl Default for PageBindings {
-    fn default() -> Self {
-        Self {
-            view: String::new(),
-            balloon: String::new(),
-            balloon_text: String::new(),
-            balloon_base_right_image: String::new(),
-            balloon_transition: String::new(),
-        }
-    }
-}
 
 /// The slot page's nodes and cells.
 #[derive(Debug, Clone)]

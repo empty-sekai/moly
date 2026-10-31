@@ -19,12 +19,12 @@ impl Alignment {
     }
 }
 
-/// Render spaces whose source mesh kernel without 3D rotation is transcribed
+/// Render spaces whose source mesh kernel without 3D rotation is implemented
 /// (`moly_law::particle::mesh_transform`): View, World and Local share one
 /// kernel body. The draw call passes that body a render-space angle: zero for
 /// World and Local, and for View while the renderer allows roll. View without
 /// roll passes a camera-derived angle, and Facing and Velocity have their own
-/// bodies; none of those is transcribed, so they have no variant here.
+/// bodies; none of those is implemented, so they have no variant here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AxisBody { View, World, Local }
 impl AxisBody {
@@ -289,7 +289,7 @@ pub struct MeshDraw {
     /// Authored renderer flip proportion per axis.
     pub flip: Vec3,
     /// None when the particle arrays use 3D rotation (the Euler transform);
-    /// otherwise the transcribed render space of the transform about each
+    /// otherwise the implemented render space of the transform about each
     /// particle's axis of rotation, decided at admission.
     pub axis_body: Option<AxisBody>,
 }

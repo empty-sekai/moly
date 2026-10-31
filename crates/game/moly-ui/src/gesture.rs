@@ -20,8 +20,8 @@ use crate::markers::{in_zone, JoystickState};
 use bevy::input::touch::TouchPhase;
 use bevy::prelude::*;
 
-/// 手势种类的闭集（真源 GestureType 的单指子集；数值对应真源
-/// TAP=1、DOUBLE_TAP=4、DRAG=16、LONG_TOUCH=128）。
+/// Closed set of gesture kinds (the single-finger subset of the game's
+/// `GestureType`; the values are TAP=1, DOUBLE_TAP=4, DRAG=16, LONG_TOUCH=128).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GestureKind {
     Tap,
@@ -31,13 +31,14 @@ pub enum GestureKind {
 }
 
 impl GestureKind {
-    /// tap 族判定（真源对话引擎的门是位掩码 0x85 = 1|4|128）。
+    /// Tap-family test (the dialogue engine gates on the bit mask
+    /// 0x85 = 1|4|128).
     pub fn is_tap_family(self) -> bool {
         matches!(self, GestureKind::Tap | GestureKind::DoubleTap | GestureKind::LongTouch)
     }
 }
 
-/// 事件态（真源 InputState：BEGAN=0、UPDATE=1、END=2）。
+/// Event state (as `InputState`: BEGAN=0, UPDATE=1, END=2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GestureState {
     Began,
@@ -45,9 +46,11 @@ pub enum GestureState {
     End,
 }
 
-/// 手势事件（真源 GestureEventData 的单指投影）：种类 + 态 + 触点
-/// 屏位（逻辑像素）+ 当帧增量。单指族的位 = 触点当前位（源各发布器
-/// 对 1/4/16/128 都取首触点当前位覆写）；增量只有 DRAG 事件携带。
+/// Gesture event (the single-finger projection of `GestureEventData`):
+/// kind + state + touch screen position (logical pixels) + this frame's
+/// delta. For the single-finger kinds the position is the touch's current
+/// position (every publisher overwrites the position for 1/4/16/128 with the
+/// first touch's current position); only DRAG events carry a delta.
 #[derive(Debug, Clone, Copy, Message)]
 pub struct GestureEvent {
     pub kind: GestureKind,
@@ -94,8 +97,8 @@ fn pointer_id(source: PointerSource) -> i32 {
     }
 }
 
-/// 单触点的跟踪面（真源 TouchData 的字段子集：StartPosition/
-/// CurrentPosition/Delta/touchingTime）+ 输入源标记。
+/// Tracking surface of a single touch (the subset of `TouchData`'s fields:
+/// StartPosition/CurrentPosition/Delta/touchingTime) + the input source tag.
 struct Touch {
     start: Vec2,
     current: Vec2,
@@ -105,14 +108,15 @@ struct Touch {
     ui_owned: bool,
 }
 
-/// 在跟指针的来源：鼠标或某根手指（三处读法按源分路，见模块注释）。
+/// The source of the tracked pointer: the mouse or a given finger (the three
+/// readers branch on the source, see the module comment).
 #[derive(Clone, Copy, PartialEq)]
 enum PointerSource {
     Mouse,
     Finger(u64),
 }
 
-/// 手势层状态（真源 GestureLayer 字段面的单指子集）。
+/// Gesture layer state (the single-finger subset of `GestureLayer`'s fields).
 #[derive(Resource, Default)]
 pub struct GestureLayerState {
     cursor: Option<Vec2>,

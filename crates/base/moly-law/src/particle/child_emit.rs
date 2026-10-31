@@ -111,7 +111,7 @@ pub fn start_frame(owner: &ChildOwner, world_space: bool, position: [f32; 3], ve
     };
     for c in 0..3 {
         for row in 0..4 {
-            matrix[4 * c + row] = owner.emitter_scale[c] * matrix[4 * c + row];
+            matrix[4 * c + row] *= owner.emitter_scale[c];
         }
     }
     StartFrame { matrix, emitter_velocity, look_rotation }

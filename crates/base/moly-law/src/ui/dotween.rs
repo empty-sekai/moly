@@ -157,7 +157,7 @@ impl FloatTween {
             }
         }
         let end = self.end;
-        let (start, change) = *self.started.get_or_insert_with(|| (current, end - current));
+        let (start, change) = *self.started.get_or_insert((current, end - current));
         self.position += delta;
         self.complete = self.duration <= self.position;
         let position = if self.complete {

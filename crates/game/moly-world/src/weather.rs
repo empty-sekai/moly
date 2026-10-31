@@ -77,7 +77,8 @@ const DEFAULT_PHENOMENON: &str = "001_sunny";
 /// 交叉淡化时长（秒）。
 const CROSS_FADE_SECONDS: f32 = crate::weather_transition::HOME_ENVIRONMENT_FADE_SECONDS;
 
-/// 耀斑衰减指数的下限（与真源链同值；0 会让 powSafe 分支整支为 0）。
+/// Lower bound of the flare falloff exponent (same value as the product chain; 0
+/// would make the whole powSafe branch evaluate to 0).
 const FLARE_EXPONENT_FLOOR: f32 = 1e-3;
 
 /// 金字塔纹理的格式：半浮点，与产品链的 HalfFloat 缓冲同一档。
@@ -97,8 +98,9 @@ struct ResolvedPhenomenon {
     renderer_type: i32,
     home_light_dir: Vec3,
     sky_bottom_color: [f32; 4],
-    /// 档位的清单 id（现象主表的 id 列）。真源问候链的 tweet 门按它相等
-    /// 比较，不是按名字——名字只是资产目录名。
+    /// List id of the level (the id column of the phenomenon master). The
+    /// greeting chain's tweet gate compares it by equality, not by name — the name
+    /// is only the asset directory name.
     id: i32,
     name: String,
     /// L1 光向公式按本档 config 的角度解出。
@@ -132,9 +134,10 @@ struct ResolvedPhenomenon {
     /// 律 uber 装箱的 `_Bloom_Params`：`[intensity, 归一线性 tint.rgb]`。
     /// 同上，tint 的亮度归一是非线性打包，插值是近似（语料恒等）。
     bloom_uber: [f32; 4],
-    /// `_Bloom_Enable_States.x` 的档值（`brightEnable`，0/1）。淡化时与
-    /// 轴门一起折成权重乘进强度（真源里 `w = enable.x · intensity` 是
-    /// 一次乘法，稳态取值两边精确一致）。
+    /// `_Bloom_Enable_States.x` value of the level (`brightEnable`, 0/1). During a
+    /// fade it is folded into a weight together with the axis gate and multiplied
+    /// into the intensity (`w = enable.x · intensity` is a single multiplication, so
+    /// the steady-state values agree exactly on both sides).
     bloom_bright_gate: f32,
     /// `_BloomOverlayStrength` 的档值。
     bloom_overlay: f32,
@@ -151,17 +154,23 @@ struct ResolvedPhenomenon {
     stock_bloom: StockBloomParams,
     /// 本档渐变条（天空壳的第二槽）。
     ramp: Handle<Image>,
-    /// 站点覆写变体：真源对 config 与 postprocess 两件是**逐资产**的两级
-    /// 查找——站点自己的环境包里 `ExistsAsset` 命中就整件用站点的，否则
-    /// 用现象全局包的（两侧独立回退，不是成对门）。提取产物把带覆写的
-    /// 站点列在清单 `overrides` 对象里，键是**环境站名**（主表
-    /// `assetbundleName`）：first_floor 带覆写的有 17 档，016 另带
-    /// flowergarden；999 没有覆写，站内站外都用全局解。渐变条覆写包不携带，
-    /// 变体与全局共享同一份。运行时按 `SiteActive.env_site` 取用（见
-    /// [`effective`]）。切站不是即时换：换站的交叉淡化按移动态取时长
-    /// （炮台 0.5 秒、门与楼层间 0 秒，见 `weather_transition::EnvironmentMove`），
-    /// 后处理 profile 在淡化结束那一帧整份替换（真源 `RefreshPostProcess`
-    /// 直写 `Volume.sharedProfile`，不插值）。
+    /// Site override variant: config and postprocess are **per-asset**, each
+    /// looked up with its own two-level search — if the site's own environment
+    /// bundle provides the asset (`ExistsAsset` hit) the whole asset is taken
+    /// from the site, otherwise from the phenomenon's global bundle (the two
+    /// sides fall back independently, they are not a paired gate). The extraction
+    /// output lists sites with overrides in the `overrides` object of the index,
+    /// keyed by the **environment site name** (`assetbundleName` in the master):
+    /// 17 levels of first_floor have overrides, 016 also brings flowergarden, and
+    /// 999 has none, so it uses the global resolution both inside and outside the
+    /// site. The override bundle does not carry the ramp; a variant shares the same
+    /// ramp with the global level. At runtime it is selected by
+    /// `SiteActive.env_site` (see [`effective`]). A site switch is not instant: the
+    /// switch crossfade takes its duration from the move kind (0.5 s for the
+    /// cannon, 0 s for doors and floor transitions, see
+    /// `weather_transition::EnvironmentMove`), and the post-processing profile is
+    /// replaced as a whole on the frame the fade ends (`RefreshPostProcess` writes
+    /// `Volume.sharedProfile` directly, with no interpolation).
     sites: Vec<(String, Box<ResolvedPhenomenon>)>,
 }
 
@@ -189,9 +198,10 @@ struct PendingPhenomenon {
     config: Handle<JsonAsset>,
     postprocess: Handle<JsonAsset>,
     ramp: Handle<Image>,
-    /// 站点覆写的装载请求（键 = 站点类型名）。两侧各自可选：清单里某个
-    /// 站点只列了一件时，另一件按真源的逐资产查找回退到全局——不是
-    /// 数据损伤（语料里两件总是成对出现）。
+    /// Load requests for site overrides (keys = site type names). Each side is
+    /// optional: if a site lists only one of the two assets, the other falls back
+    /// to the global level under the per-asset lookup — this is not data damage
+    /// (in the extraction output the two always come in pairs).
     overrides: Vec<(String, OverridePair)>,
 }
 
@@ -213,16 +223,22 @@ struct WeatherRun {
 
 pub use crate::audio_inputs::CurrentPhenomenon;
 
-/// 默认现象 id：真源现象主表的公开常量（值 1），与 [`DEFAULT_PHENOMENON]
-/// （001_sunny）是同一档——清单里该档的 id 就是 1。
+/// Default phenomenon id: a public constant of the phenomenon master (value 1),
+/// the same level as [`DEFAULT_PHENOMENON`] (001_sunny) — the id of that level in
+/// the index is 1.
 const DEFAULT_PHENOMENON_ID: i32 = 1;
 
-/// 当前现象档的 id——问候链 tweet 门的比较对象：真源在选取时读「当前
-/// 现象 id」，与条件行的 value1 相等才放行（名字不进这条门）。与档名
-/// 同点写：装载落定取默认档 id，切档取目标档 id——真源在交叉淡化的
-/// 视觉等待**之前**就写当前现象 id，这里的写点同为淡化起点。在配送站
-/// 它是配送现象 id（ClientConfig 面板 IntConfigs 170），不是当日现象。
-/// 本机与 wasm 两端的应用装配都装 `WeatherPlugin`，两端同由天气链写它。
+/// Id of the current phenomenon level — the value the greeting chain's tweet gate
+/// compares: the engine reads "the current phenomenon id" when selecting and lets
+/// the condition pass only when it equals the row's value1 (the name is not part
+/// of this gate). It is written at the same point as the level name: the default
+/// level id once loading settles, the target level id on a switch — the current
+/// phenomenon id is written **before** the crossfade's visual wait, and the write
+/// point here is likewise the start of the fade. At the delivery station it is the
+/// delivery phenomenon id (ClientConfig panel IntConfigs 170), not the phenomenon
+/// of the day.
+/// Both the native and the wasm application assemblies install
+/// `WeatherPlugin`, and on both ends the weather chain writes it.
 #[derive(Resource)]
 pub struct CurrentPhenomenonId(pub i32);
 
@@ -275,8 +291,9 @@ pub struct WeatherPostParams {
     /// 太阳光晕门与采纳值。
     pub sun_on: bool,
     pub sun: SunFlareParams,
-    /// 真源坐标系里的方向光向量（光照设置原值，未经零值钳）：太阳光晕的
-    /// 屏幕轴逐帧由它与渲染相机变换算出。
+    /// Light vector in the product's coordinate system (the raw lighting-setting
+    /// value, without the zero clamp): the sun halo's screen axis is computed
+    /// from it and the rendering camera transform every frame.
     pub sun_light: [f32; 3],
     /// 颜色分级 LUT pass 的输入；`None` 直到第一份档案解出。
     pub lut: Option<LutStack>,
@@ -362,9 +379,11 @@ fn blend_color(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
     color_lerp(PLAYER_COLOR_SPACE, a, b, t)
 }
 
-/// 两档按进度混合：光色走真源颜色混合（[`blend_color`]），光向球面插值；
-/// 雾、扩散、耀斑、泛光、调色取已提交的那一档（`WeatherTransition::committed`，
-/// 淡化结束那一帧整份替换），不插值。
+/// Blends the two levels by progress: light colour goes through the product's
+/// colour blend ([`blend_color`]), light direction is slerped; fog, diffusion,
+/// flare, bloom and grading take the committed level
+/// (`WeatherTransition::committed`, replaced as a whole on the frame the fade
+/// ends) and are not interpolated.
 /// EnvironmentShaderView blends the light/config. Volume.sharedProfile,
 /// sky-bottom color and emission type are committed only after that transition.
 /// They are not interpolated, even when their stored values are numeric.
@@ -650,9 +669,10 @@ fn resolve_all(
     // 问候链的门按 id 比较，档名对不上门。
     phenomenon.0 = resolved[run.current].name.clone();
     phenomenon_id.0 = resolved[run.current].id;
-    // 对外档位表与当前档同点落定：浏览器与宿主 UI 读到的清单从这一刻起就
-    // 是完整的，不存在「先看到空表、再看到档位」的中间态。顺序按 id 排，
-    // 与真源现象主表一致。
+    // The level table and the current level settle at the same point: the index the
+    // browser and host UI read is
+    // a complete index from this moment on, with no intermediate state of "empty
+    // table first, levels later". Sorted by id, the same as the phenomenon master table.
     *catalogue = PhenomenonCatalogue(display_options);
     let sun_on = resolved.iter().filter(|r| r.sun_on).count();
     let bloom_on = resolved.iter().filter(|r| r.bloom_on).count();
@@ -777,9 +797,11 @@ fn resolve_phenomenon(
     }
 }
 
-/// 一档在指定环境站的生效解：站点覆写表里列了该站就取覆写变体，否则取
-/// 全局解（真源逐资产两级查找的取用侧）。取用本身没有过渡；过渡在
-/// [`write_environment`] 里按淡化进度与提交点发生。
+/// Resolution of a level in a given environment site: if the site override table
+/// lists that site, the override variant is used, otherwise the global resolution
+/// (the consumer side of the per-asset two-level lookup). Selection itself has no
+/// transition; the transition happens in [`write_environment`] according to fade
+/// progress and the commit point.
 fn effective<'a>(r: &'a ResolvedPhenomenon, site: &str) -> &'a ResolvedPhenomenon {
     r.sites
         .iter()
@@ -1416,15 +1438,19 @@ pub(crate) struct WeatherPyramid {
     bloom_uploads: Vec<CachedTexture>,
 }
 
-/// 扩散金字塔的层级布局，逐项照源 pass：**高取档案的 `bufferHeight`
-/// 原值**（不钳视口——源侧的描述符里根本没有视口，只有宽高比进得来），
-/// 宽 = `trunc(宽高比 × 基高)`，级数 = `min(maxIterations,
-/// trunc(log2(基高) − 1))`，且 `trunc(log2(基高) − 1) < 1` 时强取 1。
+/// Diffuse pyramid layer layout, item for item as the pass does it: **the raw
+/// `bufferHeight` of the profile is taken** (not clamped to the viewport — the
+/// pass descriptor has no viewport at all, only the aspect ratio comes in),
+/// width = `trunc(aspect × base height)`, level count = `min(maxIterations,
+/// trunc(log2(base height) − 1))`, and forced to 1 when
+/// `trunc(log2(base height) − 1) < 1`.
 ///
-/// 每边至少 1 是源侧自己的地板（逐级折半那一步取 `max(1, ...)`），
-/// 不是我方防御。此前这里额外钳了视口高、并把两边地板抬到 16、宽用
-/// 四舍五入——三处都让小窗口下的模糊半径与真游戏不同，而没有任何
-/// 判据会红：基高恒 540、常见视口更高，三处偏差同时休眠。
+/// At least 1 per side is a floor of the pass itself (the per-level halving
+/// step takes `max(1, ...)`), not a defensive measure here. An earlier version
+/// additionally clamped to the viewport height, raised both floors to 16 and
+/// rounded the width; all three made the blur radius in small windows differ
+/// from the game, and no test caught it: the base height is always 540, common
+/// viewports are taller, so all three deviations stay dormant.
 fn pyramid_levels(
     viewport_width: u32,
     viewport_height: u32,
@@ -1726,13 +1752,18 @@ fn write_weather_uniforms(
     );
 }
 
-/// Prepare：太阳光晕的屏幕轴与亮度因子，每帧一次（相机每帧在动）。
+/// Prepare: the sun halo's screen axis and brightness factor, once per frame (the
+/// camera moves every frame).
 ///
-/// 读渲染的那台相机的世界变换（抽取后的视图），换进真源坐标系交给律：
-/// 本仓世界 = 真源世界的 x 镜像 `S = diag(-1, 1, 1)`，本仓相机沿本地 −z
-/// 看、真源相机沿本地 +z 看，所以真源相机的本地到世界矩阵是
-/// `S · M · diag(1, 1, −1)`。光向量本身就是真源坐标（见 `sun_light`）。
-/// 视图不是恰好一台（肖像捕获相机除外）时不猜：响亮报一次，轴写零。
+/// Reads the world transform of the camera being rendered (the extracted view) and
+/// moves it into the product's coordinate system for the rule: this repository's
+/// world is the x mirror of the product's world, `S = diag(-1, 1, 1)`; this
+/// repository's camera looks along local −z and the product camera along local
+/// +z, so the product camera's local-to-world matrix is
+/// `S · M · diag(1, 1, −1)`. The light vector is already in product coordinates
+/// (see `sun_light`).
+/// When the view is not exactly one (other than the portrait capture camera) it
+/// does not guess: it reports once, loudly, and writes a zero axis.
 fn write_sun_flare_axis(
     params: Res<WeatherPostParams>,
     gpu: Res<WeatherPostGpu>,

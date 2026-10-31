@@ -324,7 +324,7 @@ pub fn try_greeting(
             let engine = std::cell::RefCell::new(&mut *rng);
             let mut engine_int = |len: usize| {
                 let mut guard = engine.borrow_mut();
-                crate::npc_objective::engine_int_draw(&mut **guard, len)
+                crate::npc_objective::engine_int_draw(&mut guard, len)
             };
             let mut engine_float = |_total: f32| -> f32 {
                 unreachable!("the general lottery draws no float range")

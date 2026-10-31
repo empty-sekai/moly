@@ -1,30 +1,38 @@
-//! 玩家观众 avatar 的材质：`Mysekai/Avatar` 程序的 Bevy Material。
+//! Player and audience avatar material: the Bevy `Material` of the `Mysekai/Avatar` program.
 //!
-//! 式子全在 moly-law 的 shading::avatar（纯函数 + 逐值判据），本模块只做
-//! 装配：把穿戴集（`avatar_wear` 面板解析出的皮肤包/调色/饰件贴图）摊进
-//! uniform 槽，换到玩家 avatar 合成体的网格实体上。WGSL 在
-//! `shaders/avatar_material.wesl`，逐式镜像律。
+//! The formulas all live in moly-law's shading::avatar (pure functions + value
+//! tests); this module only wires them up: the wear (skin bundle / tint /
+//! accessory texture resolved by the `avatar_wear` panel) is spread into the
+//! uniform slots and applied to the mesh entity of the player avatar's composed
+//! body. The WGSL is in `shaders/avatar_material.wesl`, mirroring the formulas.
 //!
-//! **这是「接错」的修复，不是「没接」。** 真源玩家 avatar 装配链
-//! （`CreateMysekaiMaterialAsync`）运行时 `new Material(Mysekai/Avatar)` 现建，
-//! **把模型包里序列化的那份材质整份丢弃**——而那份正是装载器导出成 glb
-//! 带出来的 PBR。本模块把玩家 avatar 的材质从那份 PBR 换成真源那条管线。
-//! 皮肤贴图不再写死默认包：`_SkinTex` 由穿戴集面板的解析链决定
-//! （coordinate.costume ?? costume ?? "default"——服装是纯贴图换肤），
-//! `_SkinColor` 由 skinColor 列决定（玩家链不读 coordinate 的色）。
+//! **This fixes a wrong wiring, not a missing one.** The player avatar assembly
+//! chain (`CreateMysekaiMaterialAsync`) creates a `new Material(Mysekai/Avatar)`
+//! at runtime and **discards the material serialized in the model bundle** —
+//! which is exactly the PBR the loader exports into the glb. This module replaces
+//! the player avatar's material with that of the avatar program.
+//! The skin texture is no longer hard-wired to a default bundle: `_SkinTex` comes
+//! from the wear panel's resolution chain
+//! (coordinate.costume ?? costume ?? "default" — a costume is a texture-only
+//! reskin), and `_SkinColor` comes from the skinColor row (the player chain does
+//! not read the coordinate colour).
 //!
-//! **与名册的 `Mysekai/Character` 是两份不同的程序**（16 属性 vs 20，只共有
-//! `_DitherAlpha`/`_groupDither`；pass 集也不同）。**不照 character_material
-//! 的 shader 抄**——它没有 face/body 遮罩、球面距离场、眉毛穿透那一族。
-//! 但换装链复用同一形状：建计划 → 贴图到齐换装（`remove StandardMaterial`
-//! 再 `insert AvatarMaterial`）。
+//! **It is a different program from the roster's `Mysekai/Character`** (16
+//! properties vs 20, sharing only `_DitherAlpha`/`_groupDither`; the pass sets
+//! differ as well). **character_material's shader is not reused as a base** — it
+//! has no face/body masks, spherical distance field or eyebrow-piercing family.
+//! The reskin chain does reuse the same shape: build a plan → swap the material
+//! once textures arrive (`remove StandardMaterial`, then `insert AvatarMaterial`).
 //!
-//! ⛔ **顶点 UV0.z（part-index）是数据，不是绘制结构。** 真源合并网格
-//! （`AvatarUtility.CombineMesh`）把每个 part 的 part-index 烘进它的 UV0.z，
-//! 合并出的单网格单材质靠它分派贴图。本仓的合成体 glb **只有 2 分量 UV**
-//! ——那是提取缺口（`CombineMesh` 没在提取侧把 part-index 烘进 UV0.z），
-//! 不是消费缺口。⇒ 本模块**缺 z 分量时响亮拒绝**，**不拆绘制**（拆成多绘制
-//! 是另一个结构，真源是单网格单材质靠 UV0.z 分派）；着色器按「UV0.z 会在」写。
+//! ⛔ **The vertex UV0.z (part-index) is data, not draw structure.** The merged
+//! mesh (`AvatarUtility.CombineMesh`) bakes each part's part-index into its UV0.z,
+//! and the resulting single mesh with a single material dispatches textures by it.
+//! This repository's composed glb **has 2-component UVs only** — an extraction gap
+//! (`CombineMesh` does not bake the part-index into UV0.z on the extraction side),
+//! not a consumption gap. ⇒ This module **rejects loudly when the z component is
+//! missing** and **does not split the draw** (splitting into several draws is a
+//! different structure; the product is one mesh with one material dispatching by
+//! UV0.z); the shader is written on the assumption that UV0.z is present.
 //!
 //! Dither: the runtime material creation (`AvatarUtility`) enables the
 //! keyword `_USE_DITHER`, and the dither writer (`SetDitherAlpha`) switches
@@ -365,13 +373,17 @@ pub fn write_frame_state(
 #[derive(Component)]
 pub struct AvatarToon;
 
-/// Update：avatar 合成体挂载后建材质换装。穿戴集（[`AvatarWear`]）供给
-/// `_SkinTex`/`_SkinColor`/`_AccessoryTex`（服装 = 纯贴图换肤，皮肤包由
-/// 面板解析链决定）。挂件实体（`WearPart`）不扫——它们的材质各归各
-/// （饰件槽 1 / 荧光棒自己的 PBR），且件网格没有 part-index 通道，被
-/// 扫到会在判据处响亮拒绝。缺 part-index 通道（UV0.z 载体）时响亮
-/// panic——那是提取缺口（合成器未烘 part-index），不静默取默认、不拆
-/// 绘制。一次性：换装完成插 [`AvatarToon`] 闩后不再进。
+/// Update: once the avatar composed body is attached, build its material and swap
+/// it in. The wear ([`AvatarWear`]) supplies `_SkinTex`/`_SkinColor`/`_AccessoryTex`
+/// (a costume is a texture-only reskin, and the skin bundle is decided by the
+/// panel's resolution chain). Accessory entities (`WearPart`) are not scanned —
+/// they have their own materials (accessory slot 1 / the penlight's own PBR), and
+/// their meshes have no part-index channel, so a scan would hit the check and be
+/// rejected loudly. A missing part-index channel (UV0.z carrier) panics loudly —
+/// that is an extraction gap (the combiner did not bake the part-index), and the
+/// code neither silently falls back to a default nor splits the draw. One-shot:
+/// once the swap completes and the [`AvatarToon`] latch is inserted, it does not
+/// run again.
 pub fn plan_and_swap(
     mut commands: Commands,
     server: Res<AssetServer>,
@@ -410,7 +422,8 @@ pub fn plan_and_swap(
         if mesh_entities.is_empty() {
             continue; // audience scene has not expanded yet
         }
-        // part-index 通道（UV0.z 载体）判据：真源合并网格靠它分派贴图。
+        // part-index channel (UV0.z carrier) check: the merged mesh dispatches
+        // textures by it.
         for entity in &mesh_entities {
             let mesh = mesh_assets
                 .get(&meshes_3d.get(*entity).expect("网格实体有 Mesh3d").0)
@@ -427,8 +440,9 @@ pub fn plan_and_swap(
             LoadState::Loaded => {}
             _ => continue, // 未到齐，下一帧再试
         }
-        // 材质值：默认形象为底，穿戴集覆写调色与贴图（真源运行时现建材质，
-        // 把模型包里序列化的那份整份丢弃）。
+        // Material values: the default look is the base, and the wear overrides tint
+        // and textures (the material is created at runtime and the serialized
+        // material in the model bundle is discarded entirely).
         let mut law_material = law::default_material();
         law_material.skin_color = wear.skin_color;
         let material = AvatarMaterial {
@@ -475,21 +489,28 @@ pub fn plan_and_swap(
     }
 }
 
-/// 缺 part-index 通道即响亮拒绝（fail-closed）：真源靠顶点 part 序号分派
-/// 贴图，提取侧把它烘成第二套 UV（TEXCOORD_1，消费端读作 UV_1）的 x 分量。
-/// 本仓 glb 缺 TEXCOORD_1 ⇒ 提取侧未烘，不静默取默认（那样整片喂成身体
-/// 贴图），不拆绘制（真源是单网格单材质）。
+/// A missing part-index channel is rejected loudly (fail-closed): textures are
+/// dispatched by the vertex part index, baked on the extraction side into the x
+/// component of the second UV set (TEXCOORD_1, read as UV_1 on the consuming
+/// side). The glb here has no TEXCOORD_1 ⇒ it was not baked on the extraction
+/// side; the code does not silently use a default (that would feed the body
+/// texture everywhere) and does not split the draw (the product is a single mesh
+/// with a single material). The panic message and the shader-side comments still
+/// describe the extraction gap in detail.
 fn assert_part_index(mesh: &Mesh) {
-    // 载体是第二套 UV（TEXCOORD_1 → Bevy 的 ATTRIBUTE_UV_1），不是 UV0 的
-    // 第三分量：Bevy 两套 UV 顶点属性都是 Float32x2，3 分量 UV 会被装载器
-    // 整段丢弃；第二套 UV 的 x 是唯一既装载得进又载得了值的形状（提取侧
-    // 注释记了这个取舍，消费端照它读）。
+    // The carrier is the second UV set (TEXCOORD_1 → Bevy's ATTRIBUTE_UV_1), not
+    // the third component of UV0: both of Bevy's UV vertex attributes are
+    // Float32x2, and a 3-component UV is discarded entirely by the loader; the x
+    // component of the second UV set is the only shape that both loads and carries
+    // a value (the extraction side documents this trade-off, and the consuming
+    // side reads it that way).
     let has_part_channel = mesh.attribute(Mesh::ATTRIBUTE_UV_1).is_some();
     if !has_part_channel {
         panic!(
-            "玩家 avatar 合成体缺 part-index 通道：真源靠顶点 part 序号分派贴图，\
-             提取侧把它烘成第二套 UV（TEXCOORD_1）的 x 分量，而本 glb 没有 TEXCOORD_1——\
-             提取侧合成器未烘 part-index，需在提取侧补齐后再接 Mysekai/Avatar 的槽分派"
+            "player avatar composite has no part-index channel: textures are assigned by the \
+             per-vertex part index, which the extractor bakes into the x component of the \
+             second UV set (TEXCOORD_1), and this glb has no TEXCOORD_1; re-extract the \
+             avatar with the part index baked before using the Mysekai/Avatar slot assignment"
         );
     }
 }

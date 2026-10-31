@@ -1,23 +1,32 @@
-//! 站点声源：site json 侧车 `components` 表里的 MysekaiSoundObject 实例 →
-//! 展开后场景实体上的 [`crate::audio::SoundObject`] 组件。
+//! Site sound sources: MysekaiSoundObject instances in the site json sidecar's
+//! `components` table -> a [`crate::audio::SoundObject`] component on the
+//! expanded scene entity.
 //!
-//! 声源不是家具 prefab 的事：游戏内容里它是站点场景侧的一等条目，全部
-//! 站点合计恰一处（草原站瀑布），其余站点的侧车没有这个组件键——键缺席
-//! 是空表，不是缺陷（与 inactiveNodes 同一条可选键纪律）。`node` 是斜杠
-//! 分隔的**全链路径**，相对站点主根、不含根自身，与 inactiveNodes 同一
-//! 坐标系；`fields` 带声音名与最大距离（真源序列化字段）。cue 到包名不
-//! 在侧车里：一次性与常驻 SE 全部活在共享 SE 包（真源常量），挂组件时
-//! 由本模块补上。
+//! A sound source is not a furniture prefab concern: in the game content it is
+//! a first-class entry on the site scene side, with exactly one in total over
+//! all sites (the waterfall at the grassland site). The sidecars of the other
+//! sites have no such component key — an absent key is an empty table, not a
+//! defect (the same optional-key rule as inactiveNodes). `node` is the
+//! slash-separated **full-chain path**, relative to the site root and without
+//! the root itself, in the same coordinate system as inactiveNodes; `fields`
+//! carries the sound name and the max distance (the serialized fields). The
+//! package name is not in the sidecar: one-shot and resident SE all live in
+//! the shared SE package (a constant), which this module fills in when it
+//! attaches the component.
 //!
-//! 时机：scene 展开且侧车解析完成后一次挂上（常驻闩 + 完成标记，换站
-//! 拆除重来）。挂点在 inactiveNodes 清扫之后——路径查找发生在清扫后的
-//! 树上，miss 先对 inactiveNodes 名单分类再报：名单内的路径是合法清扫
-//! （真源里禁用/隐藏的对象不跑唤醒、不注册），名单外的 miss 才是
-//! 响亮的数据错。
+//! Timing: attached once after the scene is expanded and the sidecar is
+//! parsed (a resident latch + a done marker; a site change tears it down and
+//! starts over). The attach point is after the inactiveNodes sweep — path
+//! lookup happens on the swept tree, and a miss is classified against the
+//! inactiveNodes list before it is reported: a path on the list is a
+//! legitimate sweep (disabled/hidden objects do not wake, do not register),
+//! and only a miss outside the list is a loud data error.
 //!
-//! 换站不撤 A 套运行态（前后名/音量/在播实体）：真源的声源对象管理器
-//! 组件不在任何场景内容里（进世界时代码态创建、跨站点常驻），换站后
-//! 旧声持续、回到站点续更新是源行为，照搬。
+//! A site change does not tear down the Set A state (previous name / volume /
+//! sounding entity): the sound source object manager is not part of any scene
+//! content (created in code when the world is entered, resident across
+//! sites), so after a site change the old sound continues, and updating again
+//! on return to the site is the original behaviour, reproduced here.
 
 use crate::markers::{SiteActive, SiteScenesReady, SiteRoot};
 use bevy::asset::LoadState;
@@ -61,9 +70,12 @@ pub fn teardown(commands: &mut Commands) {
     commands.remove_resource::<SiteSoundFed>();
 }
 
-/// Update：侧车装载完成后解析一次。失败响亮 panic（资产边界的唯一拒绝
-/// 点），未到齐静默等下一帧。禁用实例（m_Enabled=0）在这里就筛掉：
-/// 真源里禁用的组件不跑唤醒、不注册，挂上反而是发明。
+/// Update: parse once after the sidecar has loaded. A failure panics loudly
+/// (the single refusal point at the asset boundary); an incomplete load waits
+/// silently for the next frame. Disabled instances (m_Enabled=0) are filtered
+/// here: disabled components do not wake and do not register, so attaching
+/// them
+/// would add state the game does not have.
 pub fn parse(
     mut commands: Commands,
     server: Res<AssetServer>,
@@ -182,7 +194,7 @@ pub fn apply(
                 .as_deref()
                 .is_some_and(|list| list.contains(&row.node))
             {
-                swept += 1; // 名单内的路径：合法清扫，真源里本就不注册
+                swept += 1; // path on the list: legitimate sweep, never registered
             } else {
                 error!(
                     "声源 {} 的节点路径在场景树中对不上：{}",

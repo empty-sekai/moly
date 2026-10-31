@@ -231,7 +231,7 @@ fn derived<T>(
             return tables.clone();
         }
     }
-    let tables = Arc::new(build(&**document));
+    let tables = Arc::new(build(document));
     cache.insert(path.to_owned(), (document.clone(), tables.clone()));
     tables
 }
@@ -3678,7 +3678,7 @@ fn sound_position(
             rotation: Quat::from_xyzw(qx, -qy, -qz, qw),
             scale: Vec3::from(local.scale),
         };
-        matrix = matrix * transform.to_matrix();
+        matrix *= transform.to_matrix();
     }
     Ok(Some(matrix.transform_point3(Vec3::ZERO)))
 }

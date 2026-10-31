@@ -85,8 +85,8 @@ pub struct StretchRenderer {
     pub camera_velocity_scale: f32,
     /// The renderer scale per world axis.
     pub scale: V3,
-    /// Screen limits: lower = z * limits[0] + limits[2], upper = z * limits[1]
-    /// + limits[3], with z the camera-space depth coordinate; a negative limit
+    /// Screen limits: lower = z * limits\[0\] + limits\[2\], upper = z * limits\[1\]
+    /// + limits\[3\], with z the camera-space depth coordinate; a negative limit
     /// is off.
     pub limits: [f32; 4],
     /// [`normal_bend`] of the renderer's normalDirection.

@@ -163,7 +163,7 @@ impl MeshShapeCache {
                 sum += area;
                 triangles.push(MeshTriangle { area, corners, material: included });
             }
-            total_area = sum + total_area;
+            total_area += sum;
             included += 1;
         }
         if triangles.is_empty() {
@@ -228,7 +228,7 @@ impl MeshShapeCache {
         if cumulative <= target {
             let mut x = from;
             while x < count {
-                cumulative = cumulative + self.triangles[x].area;
+                cumulative += self.triangles[x].area;
                 if cumulative >= target {
                     return x;
                 }
@@ -242,7 +242,7 @@ impl MeshShapeCache {
             let mut x = from;
             while x > 0 {
                 x -= 1;
-                cumulative = cumulative - self.triangles[x].area;
+                cumulative -= self.triangles[x].area;
                 if cumulative < target {
                     return x;
                 }

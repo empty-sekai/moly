@@ -1,19 +1,23 @@
-//! rig.json `cloth` 节 → 律侧入参结构的翻译。
+//! Translation of the rig.json `cloth` section into this module's input
+//! structures.
 //!
-//! 数据面以 `sd_*.rig.json` 为准（31 份普查）：
-//! * `cloth.components[*]`：`vertices{bones,parent,root,selection,depth}`
-//!   + `clothParams`（ClothParams 序列化原样）+ `constraints`
-//!   （本批只有 `structDistanceDataList` / `rootDistanceDataList`
-//!   两族有数据，条目形 `{vertexIndex,targetVertexIndex,length}`）；
-//! * `cloth.colliders[*]`：`{kind, bone, node, pathId, center,
-//!   radius | axis,length,startRadius,endRadius}`；
-//! * `selectionEnum`：invalid=0 / move=1 / fixed=2 / extend=3。
-//!   31 份 rig 全量普查只有 fixed(482)/move(990)——`extend` 与
-//!   `invalid` 在解算器里响亮拒绝（不具名其行为，数据来了再说）。
+//! The data surface follows `sd_*.rig.json` (survey of 31 files):
+//! * `cloth.components[*]`: `vertices{bones,parent,root,selection,depth}`
+//!   + `clothParams` (ClothParams serialized as-is) + `constraints`
+//!   (on this data set only `structDistanceDataList` / `rootDistanceDataList`
+//!   have data, entry shape `{vertexIndex,targetVertexIndex,length}`);
+//! * `cloth.colliders[*]`: `{kind, bone, node, pathId, center,
+//!   radius | axis,length,startRadius,endRadius}`;
+//! * `selectionEnum`: invalid=0 / move=1 / fixed=2 / extend=3.
+//!   The full survey of the 31 rigs has only fixed(482)/move(990) —
+//!   `extend` and `invalid` are rejected loudly by the solver (their
+//!   behavior is not implemented).
 //!
-//! 翻译只做形状搬运与响亮报错，不造默认值；`clothParams` 的
-//! 消费子集逐字段对应反编译 `ClothParams` 的序列化槽（按声明里的
-//! 字段偏移对齐，不按名字对），读不到的参数 = 数据损伤 = `Err`。
+//! Translation only moves shapes around and fails loudly; it never
+//! manufactures defaults. The consumed subset of `clothParams` maps
+//! field by field onto the serialization slots of `ClothParams` (aligned
+//! by each field's declared offset, not by name); a parameter that
+//! cannot be read means damaged data means `Err`.
 
 use super::bezier::BezierParam;
 use super::collider::ColliderDef;
@@ -268,9 +272,10 @@ pub enum Selection {
 pub struct ChainDef {
     /// 组件名（如 `C_hair_N_offset`），诊断用。
     pub name: String,
-    /// 提取器按骨名模式的分类（hair/other/…）；**分类输出不是
-    /// 真源语义**——"other" 链实为饰品（见 REPORT 未决①），只作
-    /// 记录不作行为开关。
+    /// The extractor's classification by bone-name pattern
+    /// (hair/other/…). It is not a behavior category (chains labelled
+    /// "other" include accessories), so it is recorded only and never
+    /// switches behavior.
     pub class: String,
     /// 骨名（链内序 = 顶点序）。
     pub bones: Vec<String>,
@@ -280,7 +285,7 @@ pub struct ChainDef {
     pub root: Vec<i32>,
     /// 选择集。
     pub selection: Vec<Selection>,
-    /// 深度 ∈ [0,1]（曲线求值横轴）。
+    /// 深度 ∈ \[0,1\]（曲线求值横轴）。
     pub depth: Vec<f32>,
     /// 结构距离条目（directed，rig 双向原样：0→1 与 1→0 各一条）。
     pub struct_distance: Vec<(u32, u32, f32)>,
@@ -434,8 +439,8 @@ fn parse_selection(v: &JsonValue, chain: &str) -> Result<Selection, String> {
         1 => Ok(Selection::Move),
         2 => Ok(Selection::Fixed),
         other => Err(format!(
-            "cloth schema: 链 `{chain}` 出现 selection={other}：本批 31 份 rig \
-             普查只有 move/fixed，extend/invalid 的解算行为在反编译里未转录，不猜"
+            "cloth schema: chain `{chain}` has selection={other}; only move and \
+             fixed are supported, extend/invalid are not implemented"
         )),
     }
 }

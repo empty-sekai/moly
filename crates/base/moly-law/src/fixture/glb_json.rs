@@ -1,11 +1,15 @@
-//! glb JSON 块用的最小 JSON 读取器（仅判据编译）。
+//! Minimal JSON reader used for the glb JSON chunk (tests only).
 //!
-//! 与 `particle::json` / `weather::json` 是同一约定的第三份同构私有件：
-//! 那两份的模块头具名了「各自演化比一条跨域的公共依赖便宜，重复在此
-//! 具名」——本 crate 零外部依赖，corpus 判据要读 glb 的 JSON 块，照
-//! 抄而不是去 pub 别人的。行为逐行同源：对象保留插入序、转义处理、
-//! 尾随字节放行。只在本模块的测试里使用，`#[cfg(test)]` 门着，不进
-//! lib 构建。
+//! A third isomorphic private copy of the same convention as
+//! `particle::json` / `weather::json`: each of those names in its module
+//! header that evolving separately is cheaper than one cross-domain
+//! shared dependency, and this copy is named here for the same reason —
+//! this crate has zero external dependencies, and the corpus tests need
+//! to read the glb JSON chunk, so the code is duplicated here rather
+//! than making the other copies public. Behavior is identical line for
+//! line: objects keep insertion order, escape handling, and trailing
+//! bytes are allowed. Used only in this module's tests, behind
+//! `#[cfg(test)]`, and not part of the lib build.
 
 /// 一个已解析的 JSON 值。
 #[derive(Debug, Clone, PartialEq)]

@@ -92,7 +92,7 @@ pub struct Admitted {
 /// whose default arm is that literal); the second UI-Uber pass (LightMode
 /// `SekaiUI`) is drawn only by the custom render loop that MySekai's URP
 /// asset does not run, so each batch is drawn exactly once.
-fn ui_pass<'a>(material: &'a Value) -> Result<&'a Value, String> {
+fn ui_pass(material: &Value) -> Result<&Value, String> {
     let passes = material["shader"]["shaderPasses"]
         .as_array()
         .ok_or("shader passes not exported; re-extract")?;
@@ -412,11 +412,11 @@ pub fn admit(
     // A constant start delay: the first Play writes it to the system state's
     // start delay word and the native update counts it down (the native birth
     // path is required below). A random one is evaluated with the system
-    // seed's hash, which is not transcribed.
+    // seed's hash, which is not implemented.
     if crate::particle_runtime::has_start_delay(&emitter)
         && crate::particle_runtime::play_start_delay(&emitter).is_none()
     {
-        return Err("random start delay: Play's seed-hash evaluation is not transcribed".into());
+        return Err("random start delay: Play's seed-hash evaluation is not supported".into());
     }
     if crate::particle_runtime::has_distance_emission(&emitter) {
         return Err(
@@ -428,7 +428,7 @@ pub fn admit(
             Some(ShapeTexture::None) => {}
             None => return Err("missing source shape texture reference; re-extract".into()),
             Some(ShapeTexture::Reference { .. }) => {
-                return Err("source shape texture (ApplyTexture) not transcribed".into())
+                return Err("source shape texture (ApplyTexture) not supported".into())
             }
         }
     }

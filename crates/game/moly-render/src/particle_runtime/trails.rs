@@ -81,7 +81,7 @@ fn source_position(p: [f32; 3]) -> [f32; 3] {
     [-p[0], p[1], p[2]]
 }
 
-/// What this runtime qualifies of an authored TrailModule: the transcribed
+/// What this runtime qualifies of an authored TrailModule: the implemented
 /// recording and geometry laws, restricted to the inputs the runtime supplies
 /// exactly. `None` without a TrailModule. The `dieWithParticles` flag is not
 /// read by the kill pass, the recording or the geometry job, so both of its
@@ -100,8 +100,8 @@ pub fn qualify(emitter: &EmitterParams) -> Result<Option<TrailGeometryLaw>, &'st
         // above zero, and nothing clears the mark; the start size array is
         // the side's size. With a writer the module reads the SizeModule's
         // post-simulation write, whose order against the trail update is not
-        // transcribed here.
-        return Err("size-affected trail with a current-size writer: the order of the size write and the trail update is not transcribed");
+        // implemented here.
+        return Err("size-affected trail with a current-size writer: the order of the size write and the trail update is not supported");
     }
     if params.split_sub_emitter_ribbons || params.attach_ribbons_to_transform {
         return Err("ribbon trail controls on a per-particle trail are not executed");
@@ -148,10 +148,10 @@ pub fn owner_ready(system: &Runtime) -> bool {
 
 fn refusal(refused: Refused) -> &'static str {
     match refused {
-        Refused::Ribbon => "ribbon trail mode is not transcribed",
-        Refused::CurveMode(_) => "curve-mode trail lifetime or width is not transcribed",
+        Refused::Ribbon => "ribbon trail mode is not supported",
+        Refused::CurveMode(_) => "curve-mode trail lifetime or width is not supported",
         Refused::OutsideLoadClamp(_) => "trail control outside the engine's load clamp",
-        Refused::LightingData => "trail lighting data selects a vertex layout that is not transcribed",
+        Refused::LightingData => "trail lighting data selects a vertex layout that is not supported",
         Refused::PerceptualGradient => "trail gradient pairing evaluated through the device libm",
         Refused::SingularView => "view matrix too close to singular for the trail job",
         Refused::LinearColour => "linear colour space trail colours use the device libm",
@@ -176,7 +176,7 @@ fn emitter_scale(system: &Runtime) -> Result<[f32; 3], &'static str> {
         Some(crate::particle_geometry::Scaling::Hierarchy) => system.trail.as_ref().and_then(|trail| trail.owner)
             .map(|owner| owner.emitter_scale)
             .ok_or("Hierarchy scaling: the trail job's emitter scale comes with the owner words, which are not attached"),
-        Some(crate::particle_geometry::Scaling::Shape { .. }) => Err("Shape scaling: the trail job's reading of it is not transcribed"),
+        Some(crate::particle_geometry::Scaling::Shape { .. }) => Err("Shape scaling: the trail job's reading of it is not supported"),
         None => Err("legacy billboard carries no authored scaling mode"),
     }
 }
@@ -192,7 +192,7 @@ pub fn draw_eligible(emitter: &EmitterParams, evidence: Option<ShapeEmitterEvide
         // The owner words the host attaches to a Local simulation carry it.
         Some(crate::particle_geometry::Scaling::Hierarchy) if emitter.simulation_space == SimulationSpace::Local => Ok(()),
         Some(crate::particle_geometry::Scaling::Hierarchy) => Err("Hierarchy scaling of a World simulation: the trail job's emitter scale is not produced here"),
-        Some(crate::particle_geometry::Scaling::Shape { .. }) => Err("Shape scaling: the trail job's reading of it is not transcribed"),
+        Some(crate::particle_geometry::Scaling::Shape { .. }) => Err("Shape scaling: the trail job's reading of it is not supported"),
         None => Err("legacy billboard carries no authored scaling mode"),
     }
 }

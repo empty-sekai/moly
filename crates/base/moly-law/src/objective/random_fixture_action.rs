@@ -177,9 +177,7 @@ pub const CONDITION_TYPE_FIXTURE_ID: i32 = 2;
 /// `IsFixtureAction`: any of the talk's condition rows has the fixture-id
 /// type.
 pub fn is_fixture_action(condition_types: &[i32]) -> bool {
-    condition_types
-        .iter()
-        .any(|kind| *kind == CONDITION_TYPE_FIXTURE_ID)
+    condition_types.contains(&CONDITION_TYPE_FIXTURE_ID)
 }
 
 /// `IsUseTimeline`: the talk's pre-action exists (`Some`, its timeline group

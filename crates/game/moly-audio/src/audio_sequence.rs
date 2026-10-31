@@ -1,27 +1,42 @@
-//! 洗牌序列（序列类型 2）的选轨律与它的抽签源——纯函数，不依赖引擎。
+//! Track selection for shuffle sequences (sequence type 2) and their draw
+//! source — pure functions, independent of the engine.
 //!
-//! 音频中间件的 cue 引用一条**序列**：序列列出若干轨，每轨是「起播延迟 →
-//! noteOn」的一小段事件程序。序列类型 2（洗牌）每起一轮只放一轨：
+//! A cue of the audio middleware references a **sequence**: a sequence lists
+//! several tracks, each a short event program of "start delay -> noteOn".
+//! Sequence type 2 (shuffle) plays one track per round:
 //!
-//! - **位置**：有符号 16 位，cue 表装载时每条序列置 -1；每起一轮先推进——
-//!   `pos + 1 < n` 则 +1，否则归 0。位置写回 cue 表自己的那一行，所以同一
-//!   cue 停了再放，位置接着走（直到 cue 表被卸载重装才回 -1）。
-//! - **顺序表**：紧跟在 cue 表里那 n 个轨号之后的同宽空间。首轮（推进前的
-//!   位置为负）先把作者序的轨号整段抄进去；推进后位置为 0 时重洗：逐格
-//!   `i = 0..n` 与 `range(0, n-1)` 抽中的格对换（不是 Fisher-Yates）。随后若
-//!   `n >= 3`、不是首轮、且新表首格等于**重洗前**表的末格，再把首格与
-//!   `range(1, n-1)` 抽中的格对换——跨轮不连放同一轨。放的是 `顺序表[位置]`。
-//! - **抽签源**：播放器自己的 xorshift128（Marsaglia：`t = x ^ x<<11`，
-//!   `w' = w ^ w>>19 ^ t ^ t>>8`）。种子按 Mersenne Twister 的初始化递推铺成
-//!   四个状态字（`s0 = 1812433253·(seed ^ seed>>30)`，
-//!   `s_i = 1812433253·(s_{i-1} ^ s_{i-1}>>30) + i`）。区间抽签 =
-//!   `lo + next() mod (top - lo + 1)`，`top = max(lo, hi)` 按**有符号**比较
-//!   取，取模是无符号的。区间宽回绕成 0 时按处理器的除零语义，余数就是
-//!   被除数本身。播放器建立时以单调时钟的纳秒数（低 32 位）起种，所以种子
-//!   是运行时状态：本仓按自己的时钟起种，与真源同分布、不同值。
+//! - **Position**: signed 16-bit, set to -1 for every sequence when the cue
+//!   table loads; every round first advances it — if `pos + 1 < n` then +1,
+//!   otherwise wrap to 0. The position is written back into the cue table's own
+//!   row, so the same cue stopped and started again continues from its
+//!   position (it returns to -1 only when the cue table is unloaded and
+//!   reloaded).
+//! - **Order table**: the same-width space right after the cue table's n track
+//!   numbers. The first round (position negative before advancing) copies the
+//!   authored track numbers in whole; when the advanced position is 0 the
+//!   table is reshuffled: for every cell `i = 0..n`, swap it with the cell drawn
+//!   from `range(0, n-1)` (not Fisher-Yates). Then, if `n >= 3`, this is not
+//!   the first round, and the new table's first cell equals the **pre-shuffle**
+//!   table's last cell, swap the first cell with the cell drawn from
+//!   `range(1, n-1)` — the same track never plays in two consecutive rounds.
+//!   What plays is `order table[position]`.
+//! - **Draw source**: the player's own xorshift128 (Marsaglia:
+//!   `t = x ^ x<<11`, `w' = w ^ w>>19 ^ t ^ t>>8`). The seed is spread into
+//!   four state words by the Mersenne Twister initialization recurrence
+//!   (`s0 = 1812433253·(seed ^ seed>>30)`,
+//!   `s_i = 1812433253·(s_{i-1} ^ s_{i-1}>>30) + i`). A range draw =
+//!   `lo + next() mod (top - lo + 1)`, with `top = max(lo, hi)` taken by a
+//!   **signed** comparison and the modulo unsigned. When the range width wraps
+//!   to 0, the remainder follows the processor's divide-by-zero semantics and
+//!   is the dividend itself. The player seeds it with the low 32 bits of the
+//!   monotonic clock in nanoseconds, so the seed is run-time state: this crate
+//!   seeds it from its own clock, with the same distribution as the original
+//!   game but different values.
 //!
-//! 这里只放律本身。谁调、何时起下一轮（本轮那一轨的声音放完、没有被叫停、
-//! 序列带重放标志）在消费侧（区域环境音通道）。
+//! Only the rules live here. Who calls them and when the next round starts
+//! (this round's track has played out, was not stopped, and the sequence
+//! carries the repeat flag) is on the consumption side (the area ambience
+//! channel).
 
 /// 序列类型码：洗牌（中间件 cue 类型枚举里的 2）。
 pub const SEQUENCE_TYPE_SHUFFLE: u8 = 2;

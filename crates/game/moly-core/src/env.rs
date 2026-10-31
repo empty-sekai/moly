@@ -1,11 +1,16 @@
-//! 站点全局量：一张表，一帧写一次，站点材质按名消费。
+//! Site globals: one table, written once per frame, read by the site
+//! materials by name.
 //!
-//! 表的字段与真源站点 shader 的全局块一一对应；`FieldObjectGlobals` 是
-//! 全集，Ground 族读的是它的子集，不另立第二张表。资源以中性初值落表
-//! ——现象未到、相机未刷时，消费它的每个式子精确化简为无贡献，而不是
-//! 静默无光。现象侧的量（光、雾、投影色）由天气系统每帧写入
-//! （`weather.rs`）；晴天常量只在 Startup 写一次 toon 边界；相机态每帧
-//! 刷新。
+//! The table's fields correspond one-to-one with the site shader's global
+//! block; `FieldObjectGlobals` is the full set, and the Ground family reads a
+//! subset of it, without a second table. The resource starts with neutral
+//! values — while the phenomenon is not yet present or the camera has not
+//! refreshed, every expression that consumes it reduces exactly to no
+//! contribution rather than silently leaving the scene unlit. The
+//! phenomenon-side quantities (light, fog, projection colour) are written each
+//! frame by the weather system (`weather.rs`); the sunny-day constants write
+//! the toon boundary only at Startup; the camera state is refreshed each
+//! frame.
 
 use bevy::prelude::*;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
@@ -105,8 +110,9 @@ impl SiteEnv {
     pub fn gpu_bytes(&self) -> Vec<u8> {
         let g = &self.globals;
         let mut bytes = Vec::with_capacity(ENV_BYTES);
-        // 光向只在推进全局量的这一份上钳零：`light_vector` 原值另有 CPU 读者
-        // （影子相机），真源那一路读的也是未钳的设置值。
+        // The light direction is clamped to zero only on this copy that feeds
+        // the globals: the raw `light_vector` has another CPU reader (the
+        // shadow camera), and that path also reads the unclamped setting.
         push(
             &mut bytes,
             moly_law::weather::light_pass::clamp_zero4([
@@ -202,8 +208,9 @@ pub fn apply_sunny_phenomena(mut env: ResMut<SiteEnv>) {
     env.emission_type = 1.0;
 }
 
-/// PostUpdate：相机态刷新——眼位、视图矩阵、投影参数、屏幕参数、时间。
-/// 真源把这些量当作每帧的全局 uniform，这里同节奏。
+/// PostUpdate: refresh the camera state — eye position, view matrix,
+/// projection parameters, screen parameters, time. The game uploads these as
+/// per-frame global uniforms, and this runs at the same cadence.
 pub fn write_frame_state(
     time: Res<Time>,
     mut env: ResMut<SiteEnv>,

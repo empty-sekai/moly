@@ -1,15 +1,21 @@
-//! ClientConfig 可下发面板：服务端下发的四张类型字典（键为整型 id）。
+//! ClientConfig server-delivered panel: the four type dictionaries the server
+//! sends down (integer ids as keys).
 //!
-//! 真源是一族静态 getter：每个 getter 的方法体都是同一形状的壳——
-//! 「按整数字面量 id 查一张类型字典」，查表失败打日志并回 0。四张
-//! 字典按类型分表（FloatConfigs / IntConfigs / StringConfigs /
-//! BoolConfigs），同 id 跨表是两个键。面板产物（`client-config.json`，
-//! 从主表 clientConfigs 提取）就是这四张字典的定型面：值的唯一来源。
+//! The game defines a family of static getters, one per key: each getter
+//! body has the same shape — look up a typed dictionary by an integer
+//! literal id, log and return 0 when the lookup fails. The four dictionaries
+//! are keyed by type (FloatConfigs / IntConfigs / StringConfigs /
+//! BoolConfigs), so the same id in two tables is two distinct keys. The panel
+//! data (`client-config.json`, built from the clientConfigs master tables)
+//! is the fixed form of these four dictionaries: the only source of values.
 //!
-//! 消费侧的取值一律走本模块的键常量（常量名 = 真源 getter 名）。
-//! 缺席即响亮拒绝：文件装载失败在解析点 panic；面板在场但缺某键，
-//! 在取值点 panic 并具名表与键。散写常量的回落路径不存在——迁移过的
-//! 键，旧常量已删。
+//! Consumers read every value through this module's key constants (the
+//! constant name is the getter's name).
+//! A missing value is a loud refusal: a file that fails to load panics at
+//! the parse point; a panel that is present but lacks a key panics at the
+//! lookup point, naming the table and the key. There is no fallback path to
+//! scattered constants — for a migrated key the old constant has been
+//! removed.
 
 use bevy::asset::{Assets, LoadState};
 use bevy::prelude::*;
@@ -18,7 +24,7 @@ use std::collections::HashMap;
 use moly_assets::json::JsonAsset;
 
 // ---------------------------------------------------------------------------
-// 键常量（真源 getter 名 → 整型 id；面板字典的键）
+// Key constants (getter name → integer id; the keys of the panel dictionaries)
 // ---------------------------------------------------------------------------
 
 /// 捏合缩放的距离换算比例（FieldCameraConfig.AddDistanceRatio，
@@ -242,9 +248,12 @@ fn parse_table<T>(
 // 资源与取值
 // ---------------------------------------------------------------------------
 
-/// 四张类型字典（真源按表名分四张 Dictionary，同 id 跨表是两个键）。
-/// 取值面只在本 crate；类型本身对外可见是因为相机域的取景/输入系统是
-/// 公开函数、签名里带着它（同站点取景模型的可见性故事）。
+/// The four type dictionaries (the game keeps one Dictionary per table
+/// name; the same id in two tables is two distinct keys).
+/// Lookups happen only in this crate; the type itself is public because the
+/// camera domain's framing/input systems are public functions that carry it
+/// in their signatures (the same visibility situation as the site framing
+/// model).
 #[derive(Resource)]
 pub struct ClientConfigs {
     float: HashMap<i32, f32>,
@@ -253,9 +262,12 @@ pub struct ClientConfigs {
 }
 
 impl ClientConfigs {
-    /// FloatConfigs 键。缺键响亮拒绝并具名键——真源查表失败只回 0 打
-    /// 日志，那是「服务端漏配」的运维事故面；本地面板缺键是面板与消费
-    /// 者对不上号的构造错误，静默回 0 会把事故伪装成 0 值行为。
+    /// FloatConfigs key. A missing key is a loud refusal that names the key:
+    /// the game logs and returns 0 when its lookup fails, which is an
+    /// operations incident (the server omitted the value); a key missing from
+    /// the local panel instead means the panel and its consumer disagree —
+    /// a construction error — and silently returning 0 would disguise that
+    /// incident as a behaviour with value 0.
     pub fn float(&self, key: i32) -> f32 {
         *self
             .float

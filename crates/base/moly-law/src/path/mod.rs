@@ -1,48 +1,69 @@
-//! 行走律：把「路径拐点 + 速度 + dt」一帧一帧复算成一个位置和一个朝向，
-//! 一次一个 NPC。`dt` 是显式入参——帧间移动的「平滑」完全由它决定。
+//! Walking rule: recomputes "path corners + speed + dt" frame by frame into a
+//! position and a heading, one NPC at a time. `dt` is an explicit parameter —
+//! the "smoothness" of frame-to-frame movement is decided entirely by it.
 //!
-//! 真源不自己积分位置：它配置寻路代理（`SetupNavMeshAgent`：半径、高度、
-//! 停止距离、速度等），起步（`SetupMoveNavMeshParameter`：清 `isStopped`、
-//! 写加速度与所选速度），交出目的地（`SetDestinationIfMoving`），之后每帧
-//! 的推进发生在代理的原生实现里——`velocity`、`steeringTarget`、
-//! `remainingDistance` 全是没有函数体的 extern 绑定。那面墙是边界，本模块
-//! 不复算墙后的传递函数；复算的是四周可读的合同：
+//! The move loop does not integrate the position itself: it configures a
+//! navigation agent (`SetupNavMeshAgent`: radius, height, stopping distance,
+//! speed and so on), starts it (`SetupMoveNavMeshParameter`: clears
+//! `isStopped`, writes the acceleration and the selected speed), hands it a
+//! destination (`SetDestinationIfMoving`), and from then on the agent's own
+//! implementation advances every frame — `velocity`, `steeringTarget` and
+//! `remainingDistance` are all extern bindings without a function body. That
+//! opaque boundary is not re-derived here; what this module recomputes is the
+//! surrounding contract:
 //!
-//! * 起步把所选速度写进代理的 `speed`，而 `speed` 的语义是**最大**移动
-//!   速度、`remainingDistance` 沿当前路径计量——最强可读陈述是「沿拐点
-//!   折线、每秒至多 `speed`」，本模块按恰好 `speed` 走。
-//! * 到达是真源移动循环自己的逐帧判断：与移动目标的直线距离低于
-//!   [`ARRIVAL_DISTANCE`] 即跳出循环。判定放在帧首：帧中才进带的行走者
-//!   本帧仍在走、下一帧才报到达；进带后原地保持——带内最终停在哪在墙后，
-//!   保持是诚实答案，残差按构造留在带内。
-//! * 行走中的朝向按 `LookAtNavMeshCorner` 复算：读路径拐点表里固定的
-//!   一位（行走者自身条目的下一位；折算到 [`NpcPathWalkSlot`] 的行即
-//!   第 0 拐点，下标从不前进），从当前位置归一化指向它；该拐点距自身不足
-//!   [`DIRECTION_EPSILON`] 时回退单位朝向 [`FORWARD_FALLBACK`]。固定下标
-//!   的怪癖一并保留：站上首拐点取回退而不看前方，越过首拐点后倒退着
-//!   朝向它。
+//! * The start writes the selected speed into the agent's `speed`; `speed`
+//!   means the **maximum** movement speed, and `remainingDistance` measures
+//!   along the current path. The strongest statement available is "along the
+//!   corner polyline, at most `speed` per second"; this module walks at
+//!   exactly `speed`.
+//! * Arrival is the move loop's own per-frame check: once the straight-line
+//!   distance to the move target is below [`ARRIVAL_DISTANCE`] the loop exits.
+//!   The check runs at the start of the frame: a walker that crosses into the
+//!   band mid-frame still walks that frame and reports arrival on the next
+//!   one. Inside the band it holds still — this implementation does not move
+//!   the walker further within the band, and the residual stays inside the
+//!   band by construction.
+//! * The walking heading follows `LookAtNavMeshCorner`: read one fixed
+//!   position in the corner table (the entry after the walker's own entry;
+//!   as a [`NpcPathWalkSlot`] row that is corner 0, and the index never
+//!   advances) and normalize the current position toward it; when that corner
+//!   is closer than [`DIRECTION_EPSILON`], fall back to the unit heading
+//!   [`FORWARD_FALLBACK`]. The fixed-index quirk is kept as well: standing on
+//!   the first corner takes the fallback instead of looking ahead, and past
+//!   the first corner the walker faces back at it.
 //!
-//! # 加速度与刹车：代理的逐帧传递函数（[`crowd`]）
+//! # Acceleration and braking: the per-frame transfer of the agent ([`crowd`])
 //!
-//! 起步写过一个加速度（8.0），移动循环每帧按「剩余距离 < 0.3」改写自动
-//! 刹车开关。消费这些输入的是引擎的人群更新：它的函数体（转向、积分、沿
-//! 导航单元移动、剩余距离）已经可读，移植在 [`crowd`] 与 `carve` 的走廊里；
-//! NPC 的逐帧移动走那一条。本文件的 [`advance`]（恒速折线）不再是 NPC 的
-//! 移动律，只留给仍按折线复算的调用方。
+//! The start writes an acceleration (8.0), and every frame the move loop
+//! rewrites the automatic-braking switch when "remaining distance < 0.3".
+//! These inputs are consumed by the crowd update (turning, integration,
+//! movement along navmesh cells, remaining distance), implemented in
+//! [`crowd`] and in the `carve` corridor; NPC per-frame
+//! movement takes that route. [`advance`] in this module (constant-speed
+//! polyline) is no longer the NPC movement rule; it remains for callers that
+//! still recompute along a polyline.
 //!
-//! 朝向也不按避障类型门控：真源的朝向代码只在避障类型非零时运行，而该
-//! 类型被两处以两个不同的值条件写入，任一时刻立着的是哪个，没有可读来源
-//! 能裁决。按它门控等于发明它的状态——朝向规则在行走中无条件生效，门控
-//! 留给消费朝向的那一侧。
+//! The heading is not gated by the avoidance type either: the heading code
+//! only runs when the avoidance type is non-zero, and that type is written
+//! in two places under two different value conditions, so which one holds at
+//! any moment is not modelled here. Gating on it would be inventing its
+//! state — the heading rule applies unconditionally while walking, and gating
+//! is left to the side that consumes the heading.
 //!
-//! # 拒绝是响的
+//! # Refusal is loud
 //!
-//! 速度为负或非数、拐点或持久状态含非有限值、dt 为负或非数——该 NPC
-//! 本帧被拒绝：位置与朝向字节不动、剩余距离报未知（无穷，与引擎侧属性在
-//! 距离未知时的读数一致）、不给到达、立拒绝标记。真源的速度写入只产得出
-//! 零（停机清零）或非负的表值，其余值无从发生；非有限值一旦进位置状态，
-//! 之后的快照不再有字节一致的确定性与可复算性。静默修数等于替没人写下过
-//! 的语义作主，所以宁可响。
+//! A negative or non-numeric speed, a corner or persistent state holding a
+//! non-finite value, or a negative or non-numeric dt rejects that NPC for the
+//! frame: position and heading bytes stay unchanged, the remaining distance
+//! is reported as unknown (infinity, matching what the engine-side property
+//! reads when the distance is unknown), no arrival is reported, and the
+//! refusal flag is set. The only speeds the move
+//! loop ever writes are zero (cleared on stop) or non-negative table values;
+//! nothing else can occur. Once a non-finite value enters the position state,
+//! later snapshots are no longer byte-identical or recomputable. Silently
+//! fixing such a value would mean inventing semantics nobody wrote down, so
+//! refusing loudly is preferred.
 
 pub mod crowd;
 pub mod look_at;
@@ -59,15 +80,18 @@ pub use turn::{
 pub use walk::{WalkState, WalkVerdict, advance, facing_direction};
 pub use waypoint::{Waypoint, WaypointDraw, WaypointKind, WAYPOINT_SAMPLE_DISTANCE, build_waypoints};
 
-/// 到达阈：真源移动循环自己的字面量——与移动目标的直线距离低于它即跳出
-/// 循环。数值上与配置代理时写的停止距离相同，但那是两处不同位置的两个
-/// 字面量（一处喂原生代理的刹车，一处是循环自己的比较），不合并成一个
-/// 公共常数，免得漂移出虚假的「单一常数」声明。
+/// Arrival threshold: the move loop's own literal — once the straight-line
+/// distance to the move target is below it, the loop exits. It equals the
+/// stopping distance written when configuring the agent, but these are two
+/// literals at two different places (one feeds the agent's braking, the other
+/// is the loop's own comparison). They are kept as separate constants so no
+/// false "single constant" claim can arise.
 pub const ARRIVAL_DISTANCE: f32 = 0.1;
 
 /// 近零回退阈：目标拐点距自身不超过它时，朝向取回退值而不做除以近零
 /// 模长的归一化。
 pub const DIRECTION_EPSILON: f32 = 1e-5;
 
-/// 回退朝向：真源在目标拐点近零时使用的单位前向 `[0, 0, 1]`。
+/// Fallback heading: the unit forward `[0, 0, 1]` used when the target
+/// corner is almost coincident with the walker.
 pub const FORWARD_FALLBACK: [f32; 3] = [0.0, 0.0, 1.0];

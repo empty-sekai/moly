@@ -1488,13 +1488,13 @@ pub fn place(
         let type_tabs: Vec<_> = bindings
             .tabs
             .iter()
-            .map(|tab| pixel(&*view, &tab.button))
+            .map(|tab| pixel(&view, &tab.button))
             .collect();
         let list_tabs: Vec<_> = bindings
             .strip
             .tabs
             .iter()
-            .map(|tab| pixel(&*view, &tab.button))
+            .map(|tab| pixel(&view, &tab.button))
             .collect();
         let controls: Vec<_> = [
             bindings.strip.sort_button.clone(),
@@ -1502,13 +1502,13 @@ pub fn place(
             bindings.recycle_button.clone(),
         ]
         .iter()
-        .map(|path| pixel(&*view, path))
+        .map(|path| pixel(&view, path))
         .collect();
         let cells: Vec<_> = bindings
             .cells
             .iter()
             .take(5)
-            .map(|cell| pixel(&*view, &cell.button))
+            .map(|cell| pixel(&view, &cell.button))
             .collect();
         info!(
             "[inventory] tap map (window px, window {}x{}): back {back:?}, types Fixture/Material/Item/Tool {type_tabs:?}, \

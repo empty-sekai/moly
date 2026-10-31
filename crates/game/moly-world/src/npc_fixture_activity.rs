@@ -785,7 +785,7 @@ impl Factory<'_, '_> {
     ) -> Result<bool, FactoryIssue> {
         // A fixture this NPC failed to reach at an earlier departure stays
         // excluded until the list is cleared.
-        if unmovable.iter().any(|uid| *uid == target.uid) {
+        if unmovable.contains(&target.uid) {
             return Ok(false);
         }
         if self.reservations.npc_target_in_use(target)

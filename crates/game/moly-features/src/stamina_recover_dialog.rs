@@ -268,7 +268,7 @@ pub fn install(app: &mut App) {
 // Selectors
 // ---------------------------------------------------------------------------
 
-fn component<'a>(doc: &'a UiPrefab, id: i64) -> &'a UiComponent {
+fn component(doc: &UiPrefab, id: i64) -> &UiComponent {
     doc.nodes
         .iter()
         .flat_map(|node| node.components.iter())
@@ -734,10 +734,10 @@ fn click(
     };
     let page = Page::from_document(doc);
     for position in taps {
-        let point = to_canvas(position, &window, scale);
-        if hit(&view, &layouts, &page.close, point, canvas)
-            || hit(&view, &layouts, &page.negative, point, canvas)
-            || !hit(&view, &layouts, &page.window, point, canvas)
+        let point = to_canvas(position, window, scale);
+        if hit(view, &layouts, &page.close, point, canvas)
+            || hit(view, &layouts, &page.negative, point, canvas)
+            || !hit(view, &layouts, &page.window, point, canvas)
         {
             info!("[stamina-recover] the close button, cancel or a tap outside (OnCloseExternal) -> Close");
             close_dialog(&mut screens, &mut recover, live_id, &mut finished);
@@ -746,24 +746,23 @@ fn click(
         let Some(live) = recover.live.as_mut() else {
             return;
         };
-        if hit(&view, &layouts, &page.tabs.0, point, canvas) {
+        if hit(view, &layouts, &page.tabs.0, point, canvas) {
             if live.top != Top::Consumption {
                 info!("[stamina-recover] OnLiveBoostUseOrRecoverTabChangeTab(Consumption)");
                 live.top = Top::Consumption;
             }
-        } else if hit(&view, &layouts, &page.tabs.1, point, canvas) {
-            if live.top != Top::Recover {
+        } else if hit(view, &layouts, &page.tabs.1, point, canvas)
+            && live.top != Top::Recover {
                 info!("[stamina-recover] OnLiveBoostUseOrRecoverTabChangeTab(Recover)");
                 live.top = Top::Recover;
             }
-        }
         if live.top == Top::Recover {
-            if hit(&view, &layouts, &page.item_cell.1, point, canvas) {
+            if hit(view, &layouts, &page.item_cell.1, point, canvas) {
                 if live.method != Method::Item {
                     info!("[stamina-recover] OnLiveBoostUseContentTabChangeTab(Item)");
                 }
                 live.method = Method::Item;
-            } else if hit(&view, &layouts, &page.crystal_cell.1, point, canvas) {
+            } else if hit(view, &layouts, &page.crystal_cell.1, point, canvas) {
                 if live.method != Method::Crystal {
                     info!("[stamina-recover] OnLiveBoostUseContentTabChangeTab(Crystal)");
                 }
@@ -771,12 +770,12 @@ fn click(
             }
         }
         match (live.top, live.method) {
-            (Top::Consumption, _) => step_select(&view, &layouts, live, &page, Select::Convert, point, canvas),
-            (Top::Recover, Method::Crystal) => step_select(&view, &layouts, live, &page, Select::Crystal, point, canvas),
+            (Top::Consumption, _) => step_select(view, &layouts, live, &page, Select::Convert, point, canvas),
+            (Top::Recover, Method::Crystal) => step_select(view, &layouts, live, &page, Select::Crystal, point, canvas),
             (Top::Recover, Method::Item) => {
                 let count = recover.rows.len();
                 for index in 0..count {
-                    if !row_hit(&view, &layouts, &page, index, point, canvas) {
+                    if !row_hit(view, &layouts, &page, index, point, canvas) {
                         continue;
                     }
                     let Some(live) = recover.live.as_mut() else {
@@ -798,7 +797,7 @@ fn click(
         let Some(live) = recover.live.as_ref() else {
             return;
         };
-        if !hit(&view, &layouts, &page.positive, point, canvas) {
+        if !hit(view, &layouts, &page.positive, point, canvas) {
             continue;
         }
         let enabled = match (live.top, live.method) {
@@ -872,7 +871,7 @@ fn row_hit(view: &UiPrefabView, layouts: &UiLayouts, page: &Page, index: usize, 
     };
     let top = -rect.pivot.y * rect.size.y;
     let y = point.y - (top - index as f32 * (ROW_HEIGHT + ROW_GAP));
-    y <= 0.0 && y >= -ROW_HEIGHT && (point.x - rect.center().x).abs() <= rect.size.x * 0.5
+    (-ROW_HEIGHT..=0.0).contains(&y) && (point.x - rect.center().x).abs() <= rect.size.x * 0.5
 }
 
 fn taps(gestures: &mut MessageReader<GestureEvent>, consumed: &mut ActionTapConsumed) -> Option<Vec<Vec2>> {

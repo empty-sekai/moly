@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
-use moly_assets::json::master::{self, MasterData, MasterError, MasterTable};
+use moly_assets::json::master::{MasterData, MasterError, MasterTable};
 use serde_json::Value;
 
 use super::order::{self, FixtureFilter, Tab};

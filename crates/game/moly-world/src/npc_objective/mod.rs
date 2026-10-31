@@ -1,93 +1,135 @@
-//! npc 目标机：每名名册成员的目标状态机——步间停顿、决策梯、目标层
-//! 抽签与目的地解算，全链消费 `moly_law::objective` 的律。
+//! npc objective machine: the objective state machine of each roster member — the
+//! pause between steps, the decision ladder, objective-tier lottery and destination
+//! resolution, the whole chain consuming the rules in `moly_law::objective`.
 //!
-//! 源的形状（方法体逐段核过）：
-//! - 主循环每轮「步间停顿（TryRest）→ 决策梯（DecideObjective）→ 执行
-//!   目标 → 丢弃」；停顿在决策**之前**无条件插入，时长 = 1000 ×
-//!   trunc(角色表 pauseSeconds 列)，对话态保持续停；「立即可执行下一
-//!   目标」旗一次性跳过整轮停顿。**AI 起动时装配（SetUp）先立这面旗**
-//!   ——首判不落 15 秒停顿，出生即决策。
-//! - 决策梯是一列谓词短路。产品可触发的档有四档：槽位空（两次复位后
-//!   建对话数据立对话目标）、槽位无对话（立无对话目标）、对话打断标记
-//!   （同一对话数据重立对话目标，随后清可打断位）、全部落空（目标层
-//!   百分比抽签，四条对话道各走自己的工厂）。其余档要产品没有的输入
-//!   （摆拍、换站/过场保持、问候、摆放后反应），按构造不可达，快照里
-//!   按恒假带入。
-//! - 目标层抽签：一张 [0,100) 抽签分三窗（家具道 / 已读窗 / 通用对话）；
-//!   家具道内第二张分无对话行为与家具对话，家具对话再分第三张（常设 /
-//!   已读重温）。
-//! - 无对话目标的**收场补位**（ForceUpdateObjective：复位 + 空槽档的建数）
-//!   是断环器：无对话槽位不补位，下一轮梯子又立无对话目标、永不换道。
-//!   时间轴放完时补两次（取消仍在等待的目标补一次、时间轴自己再补一次），
-//!   目标本身在下一帧见到取消才结束；移动失败补一次、当帧结束。补位都在
-//!   同一帧做完，两次复位都清掉「立即执行下一目标」旗，所以其后是完整
-//!   停顿，停顿后的决策读最后一次补位的数据（通常落到梯末抽签）。
-//! - **对话内容来自对话列表**：空槽补位与四条对话道各调源的对话工厂
-//!   （`npc_talk_lottery`），抽签读客户端对话列表，不读 master 目录。
-//!   通用对话的目标位先走社交链、未命中走游走链，两链都从角色自己的
-//!   位置出发，游走档按角色自己所在站点的类型切室内档。落点交给执行层
-//!   前过一遍身份判定（落点与挂点比 x/z），命中先导航到接近点，再执行
-//!   局部 FitTurning/FitWalking。
-//! - **其它角色读现值**：成员按名册序逐个决策，每名成员轮完后从它的组件
-//!   回读社交链候选（位置、导航目的地、对话目标位）与家具对话门的视图
-//!   （对话类型、当前目标、动作状态、上一条对话），同帧后决策的成员读到
-//!   先决策者的新数据。
-//! - 普通对话社交池只含同站、不同角色且有真实 Current TalkData 的成员。
-//!   导航 destination 与 Current.TargetPosition 是独立输入；后者用于
-//!   最终 0.7m 排斥，不能拿前者代替。未完成工厂的占位不算真实 Current。
-//! - **选取不验达，出发验一次**：选取只采样；社交链与游走链的验路取静态
-//!   CalculatePath 的布尔（部分路径也算成功）。执行层出发前按 MoveAsync
-//!   的门对选中目标判一次：对话数据带目标家具的走
-//!   IfMoveTargetFixtureActionPosition，失败把该摆放记入本成员的不可达表
-//!   （UnmovableFixtureList，两条家具道此后都跳过它，保存布局或换站清空）；
-//!   其余走 IfMoveTargetPosition。过门后的路线取 GeneratePath。门未过 =
-//!   移动失败，目标收场进停顿。
-//! - **决策前的保持**：无对话工厂的 master 表、挂点表与本站本代的站点
-//!   快照还在装载时整条决策不抽签（同 CanRunningAI 的位置）。快照已建成
-//!   但留有缺口（摆放/地块数据未闭合）不算装载：只让无对话道这次选不出
-//!   行为，这一轮按工厂空结果收场，缺口只报一次；工厂读到的其它宿主数据
-//!   缺口同样处理——重试改变不了它们，保持就等于让成员永远站住。
-//! - **工厂空结果**：普通工厂找不到 master、无对话工厂没有合格行时对话
-//!   数据为空，返回的对话目标即刻结束，照常停顿，下一轮走空槽档补位。
+//! The engine's shape (each method body checked section by section):
+//! - Each round of the main loop is "pause between steps (TryRest) → decision ladder
+//!   (DecideObjective) → execute the objective → discard"; the pause is inserted
+//!   unconditionally **before** the decision, its duration is 1000 ×
+//!   trunc(pauseSeconds column of the character table), and a talk state keeps
+//!   pausing; the "next objective may run immediately" flag skips the whole pause
+//!   once. **AI start assembly (SetUp) raises this flag first** — the first decision
+//!   does not wait 15 s, the character decides and departs on spawn.
+//! - The decision ladder is a short-circuited column of predicates. The product can
+//!   trigger four tiers: slot empty (after two resets, build talk data and an
+//!   objective), slot holds no talk (build a no-talk objective), talk-interrupt flag
+//!   (re-establish the talk objective on the same data, then clear the interruptible
+//!   bit), and all falling through (objective-tier percentage lottery, the four talk
+//!   lanes each running their own factory). The remaining tiers need inputs the
+//!   product does not have (posing, site-switch/cutscene hold, greeting,
+//!   reaction-after-placement); they are unreachable by construction and enter
+//!   snapshots as constantly false.
+//! - Objective-tier lottery: one [0,100) draw is split into three windows (fixture
+//!   lane / already-read window / generic talk); inside the fixture lane a second
+//!   draw separates no-talk behaviour from fixture talk, and fixture talk is split by
+//!   a third draw (fixture-common / already-read re-watch).
+//! - The **finish fill-in** of a no-talk objective (ForceUpdateObjective: reset + the
+//!   empty-slot tier's data build) is the cycle breaker: without a fill-in for
+//!   no-talk slots the next round of the ladder would establish another no-talk
+//!   objective and never switch lanes.
+//!   When the timeline finishes it fills in twice (once for the target still waiting
+//!   on cancellation, once for the timeline itself), and the objective itself ends
+//!   when it sees the cancellation on the next frame; on a movement failure it fills
+//!   in once and ends the same frame. Fill-ins all happen in the same frame, and both
+//!   resets clear the "run next objective immediately" flag, so a full pause follows
+//!   and the post-pause decision reads the data of the last fill-in (usually falling
+//!   through to the end-of-ladder lottery).
+//! - **Talk content comes from the talk list**: the empty-slot fill-in and the four
+//!   talk lanes each call the engine's talk factory (`npc_talk_lottery`), which draws
+//!   from the client talk list, not from the master catalog.
+//!   The generic talk target first takes the social chain and, on a miss, the wander
+//!   chain; both chains start from the character's own position, and the wander tier
+//!   picks its indoor tier by the type of the site the character is on. The landing
+//!   point passes an identity check before it is handed to the execution layer
+//!   (landing point against attach points by x/z); on a hit it first navigates to an
+//!   approach point, then runs a local FitTurning/FitWalking.
+//! - **Other characters read current values**: members decide in roster order, and
+//!   after each member's round its social-chain candidates (position, navigation
+//!   destination, talk target position) and the fixture-talk gate's view (talk type,
+//!   current target, action state, previous talk) are read back from its components,
+//!   so members deciding later in the same frame see the earlier decider's new data.
+//! - The generic talk social pool contains only members on the same site, with a
+//!   different character and a real Current TalkData. The navigation destination and
+//!   Current.TargetPosition are independent inputs; the latter is used for the final
+//!   0.7 m repulsion and the former cannot replace it. A placeholder from an
+//!   unfinished factory is not a real Current.
+//! - **Selection does not validate reachability, departure validates once**:
+//!   selection only samples; path validation for the social and wander chains takes
+//!   the boolean of a static CalculatePath (a partial path counts as success). Before
+//!   departure the execution layer tests the selected target once at the MoveAsync
+//!   gate: talk data with a target fixture goes through
+//!   IfMoveTargetFixtureActionPosition, and a failure records that placement in the
+//!   member's unreachable table (UnmovableFixtureList; both fixture lanes skip it
+//!   afterwards, and saving the layout or switching sites clears the table); the rest
+//!   go through IfMoveTargetPosition. A route past the gate is taken from GeneratePath.
+//!   Gate not passed = movement failure, the objective finishes and the pause follows.
+//! - **Holding before the decision**: while the no-talk factory's master table, the
+//!   attach-point table and the site snapshot for this site and generation are still
+//!   loading, the whole decision draws nothing (the same position as CanRunningAI).
+//!   A snapshot that is built but has gaps (placement/parcel data not closed) does not
+//!   count as loading: it only prevents the no-talk lane from choosing a behaviour
+//!   this time, the round finishes with the factory's empty result, and the gap is
+//!   reported only once; other host-data gaps the factory reads are handled the same
+//!   way — retrying cannot change them, and holding would mean the member never moves.
+//! - **Empty factory result**: when the generic factory finds no master or the
+//!   no-talk factory has no qualifying row, the talk data is empty, the returned talk
+//!   objective ends at once, the usual pause follows, and the next round takes the
+//!   empty-slot tier's fill-in.
 //!
-//! 替身，具名：
-//! * **内容绑定**：通用对话数据保存所选 master、既有 preAction 投影、
-//!   目标位与 self 成员。Previous 只在 AI Reset 沿迁移；玩家窗口结束
-//!   不更新它。
-//! * **家具对话的工厂与表**：三个建数工厂、家具可用性一对谓词、家具标签
-//!   条件与常设家具对话（fixture-common）都在 `npc_talk_lottery`；它们读
-//!   的表（等待通信表、常设家具对话两表、标签组表）各自装载，资产源缺表
-//!   时走到该路径按具名缺口收场（对话数据为空，进停顿），不静默换道。源
-//!   异常（抽签池空且无上一条、成员数桶空、行类型越界、缺 master 的解引
-//!   用）让该角色的 AI 循环终止。
-//! * **对话打断重跑**：打断标记 4 在同一数据上重立对话目标。无目标家具的
-//!   数据与常设家具对话（类型 5，无前置动作、无时间轴）按原数据重走；其余
-//!   带目标家具的数据（类型 2/3/6）重跑按具名缺口收场。
-//! * **抽签引擎**：整数档与浮点档都在成员引擎上抽（整数 `[0,n)`、浮点
-//!   `[0,总和]` 两端可达），引擎序列本身不在律内。序列上的抽取每次新建
-//!   一个运行时随机数生成器，种子取线程种子器的下一个值；种子器由进程级
-//!   生成器播种，那个种子来自操作系统随机数，没有回放能复现，宿主取一个
-//!   固定根。
-//! * **无对话道座位查表**：当前 NoTalk 工厂从真实角色行为行及 timeline
-//!   组读取动作点。
-//! * **贴合身份判定（b__1）**：源比 AITalkData.TargetPosition 与挂点
-//!   StartLoc 的 x/z；产品的落点面是全部已摆放实例的组合挂点世界位
-//!   （`fixture_attach`，含未锚定摆放）——环带落点恰好撞上挂点坐标也
-//!   命中判定，与源同形（执行层不问目标从哪条道来）。
-//! * **入场目标**：源装配先立打断标记 14（入场站目标）再开主循环；产品
-//!   不建模入场位（成员直接落座在可行走面上），只迁它的时序承重件——
-//!   起动旗（首判立即执行）原样迁。
-//! * **可行格与验路**：出生、目标与执行共用侵蚀后格场。高度几何只给
-//!   已验证的导航位置落高；格场仍是原生导航网格的近似，引擎路径查询的
-//!   查询盒映射、部分路径与末拐点判定在它上面转写。
-//! * **移动失败收场的无对话目标**：补位照常（断环），不跳过停顿——源在
-//!   执行开始时立的旗，被移动失败分支的 ForceUpdateObjective（先 Reset）
-//!   清掉。
+//! Stand-ins, named:
+//! * **Content binding**: generic talk data stores the chosen master, the existing
+//!   preAction projection, the target position and the self member. Previous migrates
+//!   only on an AI Reset; the end of a player window does not update it.
+//! * **Fixture-talk factories and tables**: the three data-building factories, the
+//!   fixture-availability predicate pair, the fixture tag conditions and
+//!   fixture-common talks all live in `npc_talk_lottery`; the tables they read
+//!   (wait-for-communication table, the two fixture-common talk tables, the tag-group
+//!   table) load independently, and when the asset source lacks a table the path
+//!   finishes with a named gap (empty talk data, into the pause) instead of silently
+//!   switching lanes. Engine exceptions (empty lottery pool with no previous entry,
+//!   empty member-count bucket, out-of-range row type, dereference of a missing
+//!   master) terminate that character's AI loop.
+//! * **Talk-interrupt rerun**: interrupt flag 4 re-establishes the talk objective on
+//!   the same data. Data without a target fixture and fixture-common talks (type 5,
+//!   no pre-action, no timeline) re-run on the original data; the other data with a
+//!   target fixture (types 2/3/6) finishes the re-run with a named gap.
+//! * **Lottery engine**: both the integer and the float tier draw from the member
+//!   engine (integers `[0,n)`, floats `[0,sum]`, both ends reachable), and the engine
+//!   sequence itself is not part of the rules. Each draw on the sequence creates a
+//!   new runtime random number generator whose seed is the next value of the thread
+//!   seeder; the seeder is seeded by a process-level generator whose seed comes from
+//!   the operating system's random source, which no replay can reproduce, so the host
+//!   takes a fixed root.
+//! * **No-talk lane seat lookup**: the current NoTalk factory reads action points
+//!   from real character behaviour rows and timeline groups.
+//! * **Attachment identity check (b__1)**: the engine compares
+//!   AITalkData.TargetPosition with the x/z of the attach point StartLoc; the
+//!   product's landing surface is the composed attach-point world positions of all
+//!   placed instances (`fixture_attach`, including unanchored placements) — a ring
+//!   landing point that happens to coincide with an attach-point coordinate still
+//!   passes the check, the same as the engine (the execution layer does not ask which
+//!   lane the target came from).
+//! * **Entry objective**: assembly first raises interrupt flag 14 (entry-site
+//!   objective) and then starts the main loop; the product does not model an entry
+//!   position (members are seated directly on the walkable surface) and carries over
+//!   only its timing-critical part — the start flag (the first decision runs
+//!   immediately) is carried over as is.
+//! * **Walkable cells and path validation**: spawning, targeting and execution share
+//!   the eroded cell field. The height geometry only supplies the height of validated
+//!   navigation positions; the cell field remains an approximation of the navigation
+//!   mesh, and the engine path query's query-box mapping, partial-path handling and
+//!   final-corner decision are implemented on top of it.
+//! * **No-talk objectives finishing after a movement failure**: the fill-in happens as
+//!   usual (breaking the cycle) without skipping the pause — the flag the engine
+//!   raises when execution starts is cleared by the movement-failure branch's
+//!   ForceUpdateObjective (which resets first).
 //!
-//! 目标面（[`ObjectiveFace`]）与玩家的约束面同源网格（站点域解析的
-//! navmesh 面），但保留高度：目标域的采样要的是面上的三维最近点
-//! （源 SamplePosition 语义），投影面裁不了高度。站点换装后面按代数
-//! 重建；构建端带格桶索引，逐格最近点查询不扫全网格。
+//! The target surface ([`ObjectiveFace`]) uses the same mesh as the player's
+//! constraint surface (the navmesh surface resolved by the site domain) but keeps
+//! height: sampling in the target domain needs the 3D closest point on the surface
+//! (SamplePosition semantics), and a projected surface cannot supply height. After a
+//! site reskin the surface is rebuilt algebraically; the build carries a cell-bucket
+//! index, so per-cell closest-point queries do not scan the whole mesh.
 //!
 //! The `controller` submodule sits beside this loop and shares nothing with
 //! it: the per-character machine's phase, its state objects, the transition
@@ -2277,8 +2319,8 @@ pub fn decide(
                         together: Some(&together.0),
                     };
                     let engine = std::cell::RefCell::new(&mut *rng);
-                    let mut engine_int = |n| engine_int_draw(&mut **engine.borrow_mut(), n);
-                    let mut engine_float = |n| engine_float_draw(&mut **engine.borrow_mut(), n);
+                    let mut engine_int = |n| engine_int_draw(&mut engine.borrow_mut(), n);
+                    let mut engine_float = |n| engine_float_draw(&mut engine.borrow_mut(), n);
                     let mut pick = |n| seeder.seeder().pick(n);
                     let mut draws = npc_talk_lottery::Draws {
                         engine_int: &mut engine_int,
@@ -2333,7 +2375,7 @@ pub fn decide(
                     snap.target_fixture =
                         slot.current.as_ref().and_then(|data| data.target_fixture);
                     snap.site_type = actions.site_type.clone();
-                    snap.talk_target = prepared_social_target(&slot);
+                    snap.talk_target = prepared_social_target(slot);
                     snap.state = actions.current as u8;
                     snap.cancel_reports = mind.cancel_reports();
                     snap.position = state.0.position;
@@ -2359,7 +2401,7 @@ pub fn decide(
                             "unit": unit.0,
                             "t": time.elapsed_secs_f64(),
                             "site": actions.site_type,
-                            "talk_target": prepared_social_target(&slot),
+                            "talk_target": prepared_social_target(slot),
                             "executing": mind.executing,
                             "position": state.0.position,
                             "destination": if mind.executing { target.0 } else { state.0.position },
@@ -2474,7 +2516,7 @@ pub fn decide(
                             if !tweeting {
                                 // The pre-action's timeline: data from the general
                                 // factory carries no fixture timeline.
-                                finish_objective(unit.0, &mut mind, &mut slot, frame, false);
+                                finish_objective(unit.0, &mut mind, &slot, frame, false);
                             }
                         }
                     }
@@ -2484,7 +2526,7 @@ pub fn decide(
                                 "[npc unit={}] frame={frame} greeting objective ended: first talk complete",
                                 unit.0
                             );
-                            finish_objective(unit.0, &mut mind, &mut slot, frame, false);
+                            finish_objective(unit.0, &mut mind, &slot, frame, false);
                         }
                     }
                     // The entry-site objective waits for its cancel, which ends
@@ -2502,7 +2544,7 @@ pub fn decide(
                                     "[npc unit={}] frame={frame} stacked move: 1.0 s delay done, objective ends without arrival",
                                     unit.0
                                 );
-                                finish_objective(unit.0, &mut mind, &mut slot, frame, true);
+                                finish_objective(unit.0, &mut mind, &slot, frame, true);
                             } else {
                                 mind.body = Some(BodyWait::Stacked { since, delay });
                             }
@@ -2528,7 +2570,7 @@ pub fn decide(
                 // Respect a later owner that installed another objective during
                 // the hidden interval. The Talk/hold guards above also still apply.
                 if !mind.executing && mind.current == Some(cancelled) {
-                    finish_objective(unit.0, &mut mind, &mut slot, frame, false);
+                    finish_objective(unit.0, &mut mind, &slot, frame, false);
                 }
             }
             // TryCancelIfCharacterOverlap is the presenter's call 8
@@ -2571,14 +2613,14 @@ pub fn decide(
                     unit.0, mind.current
                 );
                 mind.rest = None;
-                finish_objective(unit.0, &mut mind, &mut slot, frame, true);
+                finish_objective(unit.0, &mut mind, &slot, frame, true);
                 continue;
             }
             if outcome == Some(crate::npc::RouteOutcome::Arrived) {
                 if mind.current == Some(ObjectiveType::Talk) {
                     on_talk_arrived(unit.0, frame, &mut slot, &mut mind, &mut actions, &mut rest);
                 } else {
-                    finish_objective(unit.0, &mut mind, &mut slot, frame, false);
+                    finish_objective(unit.0, &mut mind, &slot, frame, false);
                 }
             }
             // The AI loop: after an objective ends, one Yield frame, then
@@ -3019,7 +3061,7 @@ pub fn decide(
                     &actions.site_type,
                     epoch.0,
                     state.0.position,
-                    &placements,
+                    placements,
                     &targets,
                     &mind.unmovable_fixtures,
                     face,
@@ -3084,7 +3126,7 @@ pub fn decide(
                     let fixtures: &[npc_talk_lottery::PlacedFixture] =
                         placed.get_or_insert_with(|| {
                             let fixtures = fixture_activities.talk_lottery_fixtures(
-                                &placements,
+                                placements,
                                 catalog.site_type_value(&actions.site_type),
                             );
                             // The placed fixtures the talk gates read, logged when
@@ -3136,7 +3178,7 @@ pub fn decide(
                                 position,
                                 talk,
                                 &fixture.uid,
-                                &placements,
+                                placements,
                                 &other_targets,
                                 unmovable,
                                 face,
@@ -3152,7 +3194,7 @@ pub fn decide(
                             result
                         };
                         let geometry =
-                            |uid: &str| fixture_activities.talk_fixture_geometry(uid, &placements);
+                            |uid: &str| fixture_activities.talk_fixture_geometry(uid, placements);
                         let host = TalkFixtureHost {
                             // FindNPC(unit).Position: the deciding character's own
                             // live position, the others' as last read.
@@ -3189,11 +3231,11 @@ pub fn decide(
                         let engine = std::cell::RefCell::new(&mut trial);
                         let mut engine_int = |len: usize| {
                             let mut guard = engine.borrow_mut();
-                            engine_int_draw(&mut **guard, len)
+                            engine_int_draw(&mut guard, len)
                         };
                         let mut engine_float = |total: f32| {
                             let mut guard = engine.borrow_mut();
-                            engine_float_draw(&mut **guard, total)
+                            engine_float_draw(&mut guard, total)
                         };
                         let mut sequence_pick = |count: usize| trial_seeder.pick(count);
                         let mut draws = npc_talk_lottery::Draws {
@@ -3220,13 +3262,13 @@ pub fn decide(
                                                 fixture_activities.hfsm_target_available(
                                                     entity,
                                                     &fixture.uid,
-                                                    &placements,
+                                                    placements,
                                                     &other_targets,
                                                     face,
                                                 )
                                             };
                                         let reachable=|fixture:&npc_talk_lottery::PlacedFixture,timeline:bool|->Result<bool,String> {
-                                        let geometry=fixture_activities.talk_fixture_geometry(&fixture.uid,&placements)?;
+                                        let geometry=fixture_activities.talk_fixture_geometry(&fixture.uid,placements)?;
                                         if timeline && !geometry.locators.is_empty() {
                                             return Ok(geometry.locators.iter().any(|(_,p)|face.has_path(position,face.sample(p.start.position,0.5).unwrap_or(p.start.position))));
                                         }
@@ -3245,7 +3287,7 @@ pub fn decide(
                                             Some((_uid, Some(plan))) => Ok(H::Prepared(plan)),
                                             Some((uid, None)) => {
                                                 let geometry = fixture_activities
-                                                    .talk_fixture_geometry(&uid, &placements)
+                                                    .talk_fixture_geometry(&uid, placements)
                                                     .map_err(npc_talk_lottery::Halt::Gap)?;
                                                 let center = fixture_worlds
                                                     .get(geometry.entity)
@@ -3343,7 +3385,7 @@ pub fn decide(
                                     face,
                                     config,
                                     &catalog,
-                                    &mut **engine.borrow_mut(),
+                                    &mut engine.borrow_mut(),
                                     &mut record,
                                 );
                                 hfsm_general_destination = Some(destination.unwrap_or(position));
@@ -3496,7 +3538,7 @@ pub fn decide(
                                     let talk_id = data.talk_id;
                                     match prepare_fixture_talk(
                                         &fixture_activities,
-                                        &placements,
+                                        placements,
                                         resolved,
                                         entity,
                                         unit.0,
@@ -3548,7 +3590,7 @@ pub fn decide(
                                 })
                                 .and_then(|resolved| {
                                     let geometry = fixture_activities
-                                        .talk_fixture_geometry(&fixture, &placements)?;
+                                        .talk_fixture_geometry(&fixture, placements)?;
                                     // SetTweetId(common id), then SetTweetId(master):
                                     // the talk's pre-action tweet when it has one.
                                     let tweet_id = fixture_activities
@@ -3605,7 +3647,7 @@ pub fn decide(
                                         .and_then(|resolved| {
                                             prepare_fixture_talk(
                                                 &fixture_activities,
-                                                &placements,
+                                                placements,
                                                 resolved,
                                                 entity,
                                                 unit.0,
@@ -3820,7 +3862,7 @@ pub fn decide(
                 record.emit("empty_talk_data", calls);
                 fixture_activities.clear_pending(entity);
                 mind.begin_objective(ObjectiveType::Talk);
-                finish_objective(unit.0, &mut mind, &mut slot, frame, true);
+                finish_objective(unit.0, &mut mind, &slot, frame, true);
                 info!(
                     "[npc unit={}] 目标裁决：{draws_word} → {} 空数据（{reason}），对话目标即刻结束，进入停顿",
                     unit.0,
@@ -3957,7 +3999,7 @@ pub fn decide(
                                 &actions.site_type,
                                 epoch.0,
                                 from,
-                                &placements,
+                                placements,
                                 &fixture_targets,
                                 &mind.unmovable_fixtures,
                                 face,
@@ -4026,7 +4068,7 @@ pub fn decide(
                 // data gap takes the same path without evaluating the factory.
                 slot.reset_ai_talk_data();
                 mind.begin_objective(ObjectiveType::Talk);
-                finish_objective(unit.0, &mut mind, &mut slot, frame, true);
+                finish_objective(unit.0, &mut mind, &slot, frame, true);
                 let outcome_word = if none_talk_gap {
                     "工厂未求值"
                 } else {
@@ -4234,7 +4276,7 @@ pub fn decide(
                             );
                             continue 'cascade;
                         }
-                        finish_objective(unit.0, &mut mind, &mut slot, frame, true);
+                        finish_objective(unit.0, &mut mind, &slot, frame, true);
                         info!(
                             "[npc unit={}] 目标裁决 {source_word}：{draws_word} → {objective_word}（{detail}）→ 落点 ({:.2},{:.2},{:.2}) 出发门未过{}",
                             unit.0,
@@ -4262,7 +4304,7 @@ pub fn decide(
                         face,
                         landing,
                         fit,
-                        &mut *rng,
+                        &mut rng,
                         polyline,
                         if hfsm
                             && slot
@@ -4290,7 +4332,7 @@ pub fn decide(
                                     path.0 =
                                         moly_law::path::NpcPathWalkSlot::from_corners(Vec::new());
                                     *phase = MotionPhase::Dwelling { remaining: None };
-                                    finish_objective(unit.0, &mut mind, &mut slot, frame, true);
+                                    finish_objective(unit.0, &mut mind, &slot, frame, true);
                                     if mind.force_updates > 0 {
                                         continue 'cascade;
                                     }
@@ -4380,7 +4422,7 @@ pub fn decide(
                             record.emit("no_route", calls);
                             // GeneratePath 两次查询都没给出拐点（TryGeneratePath
                             // 失败 ⇒ NoneRoute）：移动失败收场，进停顿等下一轮。
-                            finish_objective(unit.0, &mut mind, &mut slot, frame, true);
+                            finish_objective(unit.0, &mut mind, &slot, frame, true);
                             info!(
                                 "[npc unit={}] 目标裁决 {source_word}：{draws_word} 门[{}]={:.0} [{}]={:.0} [{}]={:.0} [{}]={:.0} → {objective_word}（{detail}）→ 落点 ({:.2},{:.2},{:.2}) GeneratePath 无拐点，移动失败",
                                 unit.0,
@@ -4403,7 +4445,7 @@ pub fn decide(
                     record.emit("no_destination", calls);
                     // 三条链全未命中：站定收场（无对话目标照常补位断环，但不
                     // 立跳过旗——见模块注释），进停顿等下一轮。
-                    finish_objective(unit.0, &mut mind, &mut slot, frame, true);
+                    finish_objective(unit.0, &mut mind, &slot, frame, true);
                     info!(
                         "[npc unit={}] 目标裁决 {source_word}：{draws_word} 门[{}]={:.0} [{}]={:.0} [{}]={:.0} [{}]={:.0} → {objective_word}（{detail}）→ 未命中，站定",
                         unit.0,
@@ -4744,11 +4786,11 @@ impl CascadeScene<'_, '_> {
             let engine = std::cell::RefCell::new(&mut trial);
             let mut engine_int = |len: usize| {
                 let mut guard = engine.borrow_mut();
-                engine_int_draw(&mut **guard, len)
+                engine_int_draw(&mut guard, len)
             };
             let mut engine_float = |total: f32| {
                 let mut guard = engine.borrow_mut();
-                engine_float_draw(&mut **guard, total)
+                engine_float_draw(&mut guard, total)
             };
             let mut sequence_pick = |count: usize| trial_seeder.pick(count);
             let mut draws = npc_talk_lottery::Draws {
@@ -5015,14 +5057,18 @@ fn try_play_tweet(
     true
 }
 
-/// 出生/重播种落位：可行走格集上按名册位次等距取格（`index × 总格数 /
-/// count`），格角采样落高度。清空与在面由构造承载——可行走格在构建时
-/// 已验「容差内采到面」且**不含任何摆放盒内的格**（烘焙刻洞的替身），
-/// 落位不再逐点复核。确定性：同名册同一面复算同位。
+/// Spawn/reseed placement: cells are taken at equal spacing over the walkable cell
+/// set by roster position (`index × cell count / count`), and the height is sampled
+/// at the cell corner. Clearing and presence are guaranteed by construction — at
+/// build time walkable cells are already verified to "sample the surface within
+/// tolerance" and **contain no cell inside any placement box** (the stand-in for
+/// holes carved by baking), so placement is not re-checked point by point.
+/// Deterministic: the same roster on the same surface recomputes the same positions.
 ///
-/// 替身，具名：真源的出生点/出生人数未取证（服务端站点管理按进度下
-/// 发），这里以「面内等距散布」替身——分散在可行走面上的初始分布，
-/// 首判（出生当帧）立刻把每员派往各自的目标。
+/// Stand-in, named: the engine's spawn points and spawn count are not modelled
+/// (the server's site management delivers them by progress), so "even spread over the
+/// surface" stands in — an initial distribution over the walkable surface, and the
+/// first decision (on the spawn frame) sends each member to its own target at once.
 pub fn seed_position(face: &ObjectiveFace, index: usize, count: usize) -> [f32; 3] {
     let walkable = face.walkable();
     let cell = walkable[index * walkable.len() / count];

@@ -1297,8 +1297,9 @@ pub fn prepare(
         }
         return;
     }
-    // 缺键 census 点名（真源不预验剧本：这些不是装载失败，是执行期
-    // 降级项的预告——各分发臂按真源语义处理，见模块注释）。
+    // Missing-key census report (scripts are not pre-validated: these are not load
+    // failures but announcements of runtime degradations — each dispatch arm handles
+    // them as described in the module comment).
     for (label, map) in [
         ("facial", &census.facial),
         ("动作段", &census.motion),
@@ -1307,7 +1308,7 @@ pub fn prepare(
         if !map.is_empty() {
             let (kinds, steps, keys) = Census::summary(map);
             warn!(
-                "[player-talk] 候选核验：{label} 缺 {kinds} 种（{steps} 步），如 {keys:?}——执行期按真源降级（眼/口 → 格 0；动作/表情件 → 不起播不出件）"
+                "[player-talk] candidate check: {label} is missing {kinds} kinds ({steps} steps), e.g. {keys:?} — degraded at runtime (eye/mouth → slot 0; motion/emote parts → no start, no part)"
             );
         }
     }
@@ -1330,9 +1331,12 @@ pub fn prepare(
     *prepared_roster = roster.clone();
 }
 
-/// 候选段数据面的装载期点名账（缺键 census）：键 →（步次，首见 unit）。
-/// 真源的对话引擎不预验剧本（缺键是执行期事件，见模块注释），装载期
-/// 只点名不拒绝——会话照开，缺键在执行期按真源语义降级。
+/// Load-time record of missing keys in the candidate segment data (the census):
+/// key → (step count, first unit seen).
+/// The dialogue engine does not pre-validate scripts (a missing key is a runtime
+/// event, see the module comment); loading only reports it and does not reject —
+/// the session still opens, and missing keys are degraded at runtime as described
+/// in the module comment.
 #[derive(Default)]
 struct Census {
     facial: std::collections::BTreeMap<String, (u32, u32)>,
@@ -1499,9 +1503,11 @@ impl PlayerTalkSession {
         self.row.lua.trim_end_matches(".lua")
     }
 
-    /// NPC 参演者实体（对话相机的取位面读它——真源取位表由出场角色的
-    /// 髋变换构成，玩家链的出场角色就是这位 NPC；玩家的取位条目走
-    /// avatar 视变换标记，不经本访问器）。
+    /// The NPC participant entity (the talk camera's placement surface reads it —
+    /// the placement table is built from the hip transforms of the characters on
+    /// stage, and in the player chain the on-stage character is this NPC; the
+    /// player's placement entry goes through the avatar view-transform marker and
+    /// not through this accessor).
     pub fn npc_entity(&self) -> Entity {
         self.npc
     }
@@ -1754,8 +1760,10 @@ fn communication_arrived(
 // 触发消费：六门求值 → 池 → 抽签 / 重播 → 会话开场
 // ---------------------------------------------------------------------------
 
-/// Update：消费拾取链的玩家对话请求。会话在播、自主对话在播、候选或
-/// 站点未就绪都不发起（真源态梯同形：对话态下按钮不再走通用分支）。
+/// Update: consumes player dialogue requests from the pickup chain. A request is
+/// not started while a session is playing, an autonomous dialogue is playing, or
+/// the candidates or the site are not ready (the same state ladder: in the talk
+/// state the button no longer takes the generic branch).
 pub fn consume_trigger(
     time: Res<Time>,
     mut commands: Commands,
@@ -2917,7 +2925,8 @@ pub fn advance_session(
             &mut transitions,
             &mut motion.avatars,
         );
-        // 该击即耗尽：WaitClicked 放行后清闩（真源同款）。
+        // This click is spent: clear the latch once WaitClicked releases (same as
+        // the engine).
         window.consume_click(TalkSession::Player(&mut *session));
         session.click_releases += 1;
         // advance can already be parked at the next wait_click this frame.
@@ -3266,8 +3275,9 @@ fn dispatch_step(
             );
         }
         TalkStep::Label { name } => {
-            // 名字栏 SetText：锚点跳转的语料零出现，此 op 在窗体侧是
-            // 名字栏写（真源 Label → 名字栏文本组件）。
+            // Name bar SetText: a label step of an anchored jump occurs 0 times in
+            // the corpus; this op is a name-bar write on the window side
+            // (Label → name-bar text component).
             window.set_label_at(TalkSession::Player(&mut *session), index, name);
             info!(
                 "[player-talk] 段 {} 步 {} label：名字栏 SetText（{} 字，名字不进日志）",

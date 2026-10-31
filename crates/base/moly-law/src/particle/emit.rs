@@ -109,7 +109,7 @@ pub struct Burst {
     /// The repeat interval. A second and later firing needs `> 0` (`C#
     /// readable`: the interval's setter rejects non-positive values).
     pub repeat_interval: f32,
-    /// The firing probability p in [0,1]. At p=1 the burst always fires; the
+    /// The firing probability p in \[0,1\]. At p=1 the burst always fires; the
     /// engine stores 1-p.
     pub probability: f32,
 }

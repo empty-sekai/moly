@@ -605,19 +605,19 @@ fn script(masters: &Masters) -> Vec<NoticeCollectItem> {
         .collect();
     let mut out = Vec::new();
     if let Some(row) = common.first() {
-        out.push(material(*row, 3, false, false));
+        out.push(material(row, 3, false, false));
     }
     if let Some(row) = rare.first() {
-        out.push(material(*row, 1, false, false));
+        out.push(material(row, 1, false, false));
     }
     if let Some(row) = common.get(1) {
-        out.push(material(*row, 2, false, true));
+        out.push(material(row, 2, false, true));
     }
     if let Some(row) = common.get(2) {
-        out.push(material(*row, 5, true, false));
+        out.push(material(row, 5, true, false));
     }
     if let Some(row) = rare.last() {
-        out.push(material(*row, 1, false, true));
+        out.push(material(row, 1, false, true));
     }
     if let Some(row) = masters.items.first() {
         // The item arm of `MysekaiResourceUtility.NoticeCollectItem`: never
@@ -633,7 +633,7 @@ fn script(masters: &Masters) -> Vec<NoticeCollectItem> {
         });
     }
     for row in common.iter().skip(3).take(2) {
-        out.push(material(*row, 1, false, false));
+        out.push(material(row, 1, false, false));
     }
     out
 }

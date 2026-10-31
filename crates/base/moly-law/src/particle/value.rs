@@ -24,7 +24,7 @@ use crate::particle::value::MinMaxCurve::{Constant, TwoConstants, TwoCurves};
 /// the evaluation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CurveKey {
-    /// The key time, normalized to [0,1]: particle module curves always use
+    /// The key time, normalized to \[0,1\]: particle module curves always use
     /// normalized time.
     pub time: f32,
     pub value: f32,

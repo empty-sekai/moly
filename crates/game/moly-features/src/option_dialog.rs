@@ -152,7 +152,7 @@ impl Group {
     }
 
     /// 组在本地档里的那一片。
-    fn data<'a>(self, settings: &'a LocalVolumeSettings) -> &'a VolumeSettingData {
+    fn data(self, settings: &LocalVolumeSettings) -> &VolumeSettingData {
         match self {
             Group::Live => &settings.live,
             Group::System => &settings.system,
@@ -252,8 +252,8 @@ impl VolumeSlider {
         }
     }
 
-    /// 开框装值：档值 ×100 取整（真源 Setup：滑杆装 `(int)(值×100)` 的
-    /// 整数位）。
+    /// The value loaded when the dialog opens: the setting ×100, rounded
+    /// (Setup fills the slider with the integer part of `(int)(value x 100)`).
     fn initial(self, settings: &LocalVolumeSettings) -> u8 {
         let value = match self.kind() {
             SliderKind::Bgm => self.group().data(settings).bgm,
@@ -285,8 +285,9 @@ fn draft_group(draft: &[u8; 6], group: Group) -> VolumeSettingData {
     }
 }
 
-/// 延时预览的延迟（真源 CP_DelayCall 的 0.15s 字面量）：每拍滑杆变更
-/// 重排（b__0 先取消在途再重排）——停手 0.15s 后才响预览声。
+/// The preview delay (the 0.15s literal of `CP_DelayCall`): each slider change
+/// reschedules it (cancelling the pending call first) — the preview sound
+/// plays only 0.15s after the last change.
 const PREVIEW_DELAY_SECONDS: f32 = 0.15;
 
 // ---------------------------------------------------------------------------
@@ -850,11 +851,11 @@ impl OptionBindings {
             Ok(LiveBinding {
                 selectors: LIVE_SELECTORS
                     .iter()
-                    .map(|name| selector(doc, f(*name)))
+                    .map(|name| selector(doc, f(name)))
                     .collect(),
                 groups: LIVE_TOGGLES
                     .iter()
-                    .map(|(_, name)| group(doc, f(*name)))
+                    .map(|(_, name)| group(doc, f(name)))
                     .collect(),
                 vibration_root: object_ref(doc, &live.fields["_vibrationRoot"])
                     .expect("vibration root"),

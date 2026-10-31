@@ -59,7 +59,6 @@ pub mod tools;
 pub use local::check_seed_local;
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use bevy::ecs::system::SystemParam;
@@ -620,7 +619,7 @@ pub fn apply_arrivals(
                         saved.as_deref(),
                     );
                 }
-                fill_cache(&mut *copies.cache, seq, &request, outcome);
+                fill_cache(&mut copies.cache, seq, &request, outcome);
                 if let (Some(Call::Craft(request)), Some(before)) = (&request, before) {
                     emit_craft(outcome, request, before, &copies);
                 }

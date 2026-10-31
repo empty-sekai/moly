@@ -585,7 +585,7 @@ pub fn plan(
             not_play_on_awake += 1;
             continue;
         }
-        match judge(
+        if let Some(plan) = judge(
             system,
             doc,
             &active.scene,
@@ -595,11 +595,8 @@ pub fn plan(
             &server,
             &mut tally,
         ) {
-            Some(plan) => {
-                tally.admitted += 1;
-                plans.push(plan);
-            }
-            None => {}
+            tally.admitted += 1;
+            plans.push(plan);
         }
     }
     // An environment site effect can live inside the site scene itself (the festival

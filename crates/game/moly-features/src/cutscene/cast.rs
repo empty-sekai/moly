@@ -60,7 +60,7 @@ use moly_assets::scene_state::{RefreshSourceActivity, SourceNodeActivity};
 use serde_json::Value;
 
 use crate::fixture_activity_provider::FixtureActivityProvider;
-use crate::fixture_activity_state::{FixtureActivityIdentity, FixtureActivityOwner};
+use crate::fixture_activity_state::FixtureActivityIdentity;
 use crate::fixture_activity_timeline::{
     self as timeline, CutScenePayload, InfiniteClip, SourceAssetId, StartTimeline, TimelineClipKey,
     TimelineDefinition, TimelinePayload,

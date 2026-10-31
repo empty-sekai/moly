@@ -246,7 +246,7 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 }
 
 fn dir_key(path: &Path) -> String {
-    path.to_string_lossy().trim_end_matches(|c: char| c == '\\' || c == '/').to_lowercase()
+    path.to_string_lossy().trim_end_matches(['\\', '/']).to_lowercase()
 }
 
 /// Builds `to` with `build`, which writes to a `.part` sibling. That sibling is

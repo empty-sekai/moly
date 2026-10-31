@@ -1,15 +1,24 @@
-//! 角色 toon 材质：`Mysekai/Character` 程序的 Bevy Material。
+//! Character toon material: the Bevy Material of the `Mysekai/Character`
+//! shader.
 //!
-//! 式子全在 moly-law 的 shading::character（纯函数 + `resolve`），本模块
-//! 只做装配：把骨架档案（rig json）里的 Unity 属性喂给律的 `resolve`，
-//! 得到的值摊进 uniform 槽；WGSL 在 `shaders/character_material.wesl`，
-//! 逐句转录律的片元链。变体两件：眉按纹理槽在场（已裁），雾按全局量
-//! 桥在场（换装等雾档案到齐，变体全侧一致）。
+//! All formulas live in moly-law's shading::character (pure functions plus
+//! `resolve`); this module only assembles: it feeds the Unity properties of
+//! the rig profile (rig json) into the law's `resolve` and spreads the
+//! resulting values over the uniform slots. The WGSL lives in
+//! `shaders/character_material.wesl` and
+//! implements the law's fragment chain. Two variants: the eyebrow variant
+//! is keyed on its texture slot being present (already decided), the fog
+//! variant on the global
+//! bridge being present (wait for the fog profile to arrive, e.g. on an
+//! outfit change, so the variant is the same on every side).
 //!
-//! 头参考点是**材质槽**量不是全局量：源里它是 MaterialPropertyBlock
-//! 的 uniform、按渲染器各写各的，所以它进每材质自己的参数块，由头骨
-//! 实体的世界位逐帧回写——缺省留在原点时球面距离场中心滑到世界原点，
-//! 球面界线整条错位（分界线成因之一）。
+//! The head reference point is a **material slot** value, not a global: it
+//! is a MaterialPropertyBlock uniform, written separately per renderer, so it
+//! goes into each material's own parameter block and is written back every
+//! frame from the world position of the head bone entity. Left at the origin
+//! by default, the centre of the sphere distance field slides to the world
+//! origin and the whole sphere boundary shifts (one cause of the boundary
+//! line).
 //!
 //! The parameter block lives in a uniform buffer that the material owns for
 //! its whole life. The per-frame head reference and dither values are stored
@@ -527,7 +536,8 @@ pub fn apply_fog(
     );
 }
 
-/// PostUpdate：相机态刷新——屏幕参数与投影参数，真源里是每帧全局量。
+/// PostUpdate: camera state refresh. The screen and projection parameters are
+/// frame globals.
 pub fn write_frame_state(
     mut env: ResMut<CharacterEnv>,
     // 只认 3D 主相机：气泡层的 2D 覆盖相机共存，不过滤则 single() 失败
@@ -762,12 +772,17 @@ fn build_material(
     });
     Ok(CharacterMaterial {
         key: CharacterKey {
-            // 眉变体的门在真源是 keyword 变体 + 独立渲染通道（MysekaiEyebrow
-            // LightMode 的 Render Eyelash pass，专用 eyebrowRenderer 与
-            // mtl_chr_eyebrow_00 材质——都不在提取的角色包里）。提取的
-            // eye/mouth 槽 keywords 恒空：_EyebrowTex 引用是 Unity 序列化
-            // 残留，变体从未开。纹理在场 ≠ 变体开——按纹理在场开门会把
-            // 眉蒙版（采样区 84% 黑）的 discard 套到眼网格上，整片脸丢。
+            // The eyebrow variant is gated on a keyword variant plus a
+            // separate render pass (the Render Eyelash pass of the
+            // MysekaiEyebrow LightMode, with a dedicated eyebrowRenderer and
+            // the mtl_chr_eyebrow_00 material, none of which is in the
+            // extracted character packages). The extracted eye/mouth slot
+            // keywords are always empty: the `_EyebrowTex` reference is a
+            // leftover of Unity serialization and the variant was never
+            // enabled. A texture being present is not the variant being
+            // enabled; keying on texture presence would apply the eyebrow
+            // mask's discard (84% black over the sampled area) to the eye
+            // mesh and drop the whole face.
             eyebrow: false,
             fog,
         },

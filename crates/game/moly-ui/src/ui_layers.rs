@@ -1862,7 +1862,7 @@ pub fn advance(
     }
     let stack = &mut *stack;
     let mut ctx = Ctx {
-        registry: &mut *screen_registry,
+        registry: &mut screen_registry,
     };
     // The screen animations' DOTween update comes first: an animation built
     // later in this frame takes its first delta on the next frame.

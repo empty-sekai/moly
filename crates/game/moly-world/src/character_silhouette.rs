@@ -1075,7 +1075,7 @@ fn extract_silhouette_draws(
         doors
             .iter()
             .filter(|(_, _, attribute, _, _, shown, parent)| {
-                attribute.0 == wanted && part_shown(*shown, *parent)
+                attribute.0 == wanted && part_shown(shown, *parent)
             })
             .count()
     };
@@ -1972,7 +1972,7 @@ fn character_silhouette(
 ) {
     let (view_target, depth, target) = view.into_inner();
     #[cfg(not(target_arch = "wasm32"))]
-    finish_pending_probe(world, &mut render_context);
+    finish_pending_probe(world, &render_context);
     let Some(target) = target else {
         return;
     };
@@ -2033,14 +2033,14 @@ fn character_silhouette(
         if inner.next_probe == 0 {
             inner.next_probe = PROBE_FIRST_FRAME;
         }
-        let due = match probe_interval() {
+        
+        match probe_interval() {
             Some(interval) if inner.frames_drawn >= inner.next_probe => {
                 inner.next_probe = inner.frames_drawn + interval;
                 true
             }
             _ => false,
-        };
-        due
+        }
     };
     #[cfg(not(target_arch = "wasm32"))]
     let probe = probe_due.then(|| begin_probe(world, &mut render_context, target));

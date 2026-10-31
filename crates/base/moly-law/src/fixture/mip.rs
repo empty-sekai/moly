@@ -82,8 +82,10 @@ mod tests {
     // `#[ignore]` + env 门（`MOLY_ASSET_ROOT`）：默认跳过时是红的
     // skip（`cargo test -- --ignored` 列表可见），env 在时真断言。
 
-    /// 摆放面包名（产品侧摆放表的包名列；扩员时两侧同补——这张表是
-    /// 判据的分母，漏一行 = 少核一张）。
+    /// Placed-package names (the package-name column of the placement
+    /// table on the product side; extend both sides together — this
+    /// table is the denominator of the check, a missing row = one
+    /// package fewer verified).
     const PLACED_PACKAGES: [&str; 29] = [
         "mysekai__fixture__mdl_bir1103_fixture_chair1",
         "mysekai__fixture__mdl_bir1103_fixture_cake1",
@@ -116,11 +118,15 @@ mod tests {
         "mysekai__fixture__mdl_chr0004_fixture_nenerobo1",
     ];
 
-    /// 摆放面 Basic 主贴图的期望表：(贴图名, 宽, 高, 源序列化 mip 计数)。
-    /// mip 计数逐张贴图从资产包里核得——它们不是「log2(最长边)+1」的
-    /// 推导值，是独立量出来的源事实，这行表就是判据的锚：律或贴图任
-    /// 一边变了，corpus 测试红。闭集：表外贴图名出现即红（新摆入的包
-    /// 必须先来这行表里补上它的源 mip 计数）。
+    /// Expected table of Basic main textures on the placed set:
+    /// (texture name, width, height, mip count as serialized).
+    /// The mip count of every texture is verified from the asset
+    /// packages one by one — they are not the derived value
+    /// "log2(longest edge)+1", but independently measured facts about
+    /// the game; this table is the anchor of the check: changing either
+    /// the formula or a texture turns the corpus test red. Closed set:
+    /// a texture name outside the table turns it red (a newly placed
+    /// package must first add its serialized mip count here).
     #[rustfmt::skip]
     const EXPECTED: [(&str, u32, u32, u32); 36] = [
         ("tex_bir1103_fixture_chair1_1",        256,  256,  9),
@@ -258,7 +264,7 @@ mod tests {
     #[ignore = "MOLY_ASSET_ROOT not set: 0 of the 29 placed packages were checked"]
     fn placed_basic_main_texes_match_source_mip_counts() {
         let Some(rows) = placed_basic_main_texes() else {
-            panic!("MOLY_ASSET_ROOT 未设置——corpus 判据需要它指向 local-data");
+            panic!("MOLY_ASSET_ROOT is not set; this corpus test needs it to point at the asset store");
         };
         assert_eq!(rows.len(), EXPECTED_ROWS, "摆放面行数漂移");
         for (package, name, width, height) in &rows {

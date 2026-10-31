@@ -7,7 +7,7 @@
 // 深度图（只读不写），混合因子随材质（不透明 One/Zero、混合
 // SrcAlpha/OneMinusSrcAlpha，单一 _SrcBlend/_DstBlend 对两个目标同因子）。
 //
-// # 片元式（源第二目标支路逐句）
+// # 片元式（游戏第二目标支路的步骤顺序）
 //
 // 主贴图采样（带全局 mip 偏置）→ 遮罩采样（同 uv 同偏置，只取 xyz）→
 // （alpha clip 变体：主贴图 alpha − 0.5 < 0 丢弃）→ Bayer 抖动
@@ -154,25 +154,25 @@ struct SiteEnv {
 
 // ---- 色彩域（改这个 pass 的输出之前先读）----
 //
-// 真源是 **gamma 色彩空间**构建：遮罩采样不解码，`遮罩 × 门` 按编码值
-// 直写 Target1；那张缓冲在 gamma 工程里不做任何 sRGB 变换 ⇒ **源的 Target1
+// 游戏是 **gamma 色彩空间**构建：遮罩采样不解码，`遮罩 × 门` 按编码值
+// 直写 Target1；那张缓冲在 gamma 工程里不做任何 sRGB 变换 ⇒ **游戏的 Target1
 // 携带的是存储（gamma）域的值**，泛光预滤波读到的就是它。
 //
 // 本 pass 两头与主 pass **不同**，别照 `fixture_material.wesl` 套：
 //
 //   1 遮罩贴图按 sRGB 装载 ⇒ 采样时硬件解码 ⇒ 要 [`srgb_format_encode`]
-//     编回存储域，才等于源那次不解码的采样；
+//     编回存储域，才等于游戏那次不解码的采样；
 //   2 **本 pass 的目标是 `Rgba16Float`**（`fixture_emission.rs` 的
 //     `EMISSION_FORMAT`）⇒ **硬件不做 sRGB 编码** ⇒ 写出侧**没有**要抵消
 //     的东西，**不要**在这里套主 pass 那个 `srgb_format_decode`。
-//     写进去的值原样留在缓冲里 = 源的 Target1。
+//     写进去的值原样留在缓冲里 = 游戏的 Target1。
 //
 // ⇒ 于是缓冲携带存储域值，而泛光预滤波的阈值是 `GammaToLinearSpace(threshold)`
-//   ——那个 gamma→linear **是真源自己做的**（游戏自带的泛光 pass 在装配侧
+//   ——那个 gamma→linear **是游戏自己做的**（游戏自带的泛光 pass 在装配侧
 //   `SetVector(scatter', clamp, GammaToLinearSpace(threshold), 同值×0.5)`，
-//   律侧 `moly_law::weather` 的打包逐项同形）。**它不是我方为补偿域错加的
-//   转换**，所以本次收口**不动**它：存储域的输入配线性化的阈值，正是源那条
-//   链自带的怪癖，照抄才对上。谁要把那个 g2l 当成「我方的 bug」删掉，
+//   律侧 `moly_law::weather` 的打包逐项同形）。**它不是为补偿域错加的
+//   转换**，所以本次收口**不动**它：存储域的输入配线性化的阈值，正是游戏那条
+//   链自带的怪癖，照写才对上。谁要把那个 g2l 当成「我方的 bug」删掉，
 //   泛光的门限会整体搬家。
 //
 // ⚠ 主贴图这次采样**只取 `.a`**：硬件的 sRGB 变换不作用于 alpha，采样得到

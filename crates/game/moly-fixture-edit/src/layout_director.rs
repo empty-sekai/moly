@@ -390,7 +390,7 @@ pub fn save(world: &mut World) -> Result<String, String> {
     // Outside the free layout mode the site's put cost may not pass its
     // limit: the same budget the editor's road plan is held to.
     if !rules.free_layout {
-        let budget = moly_features::fixture_put_limit::budget(world, &next.site_type(), &next.editor_rows())?;
+        let budget = moly_features::fixture_put_limit::budget(world, next.site_type(), &next.editor_rows())?;
         if budget.remaining < 0 {
             return Err(format!(
                 "the site's put cost would be {} over its limit of {}",

@@ -1,5 +1,6 @@
 use super::*;
 use moly_features::site::FloorGridLayout;
+use moly_law::fixture::Vector3Int;
 use std::collections::{HashMap, HashSet};
 
 /// Rules with no master rows, no bundle meta and no zones.

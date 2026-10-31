@@ -15,7 +15,7 @@ use bevy::prelude::*;
 use bevy::asset::LoadState;
 use moly_assets::json::JsonAsset;
 use moly_layout::validate::Missing;
-use moly_layout::{Rules, SiteGrid, Zone};
+use moly_layout::{Rules, Zone};
 
 use super::{assets::FixtureAreas, put_effect};
 use moly_features::site::FloorGridLayout;

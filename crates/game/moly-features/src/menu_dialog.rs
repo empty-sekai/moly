@@ -1,27 +1,34 @@
-//! 菜单对话框（真源 `MysekaiMenuDialog`，`DialogType::MysekaiMenuDialog`——日服 7.0.0 客户端该对话框的枚举值，Dialog 槽）——
-//! 场地屏外壳菜单钮的目标：体力/等级两格 + 12 个可按件的导航中枢。
+//! Menu dialog (matches `MysekaiMenuDialog`,
+//! `DialogType::MysekaiMenuDialog` — the enum value 0 of this dialog in
+//! the version 7.0.0 client (enum value 0), Dialog slot) — the target of the field screen's shell menu
+//! button: the stamina and rank cells plus 12 tappable items forming a
+//! navigation hub.
 //!
-//! ## 入口与身份（Dialog 槽，不是层栈）
+//! ## Entry and identity (Dialog slot, not the layer stack)
 //!
-//! 外壳菜单钮 `ShowMenu` → `DialogUtility.ShowMysekaiMenu(onChangeSite)`：
-//! 先 `TryGetActiveDialog(MysekaiMenuDialog, Layer_Dialog)`（已开 ⇒ 只
-//! 重新 Setup，不重复实例化），否则 `InstantiateDialog(DialogType::MysekaiMenuDialog, Layer_Dialog)`
+//! Shell menu button `ShowMenu` → `DialogUtility.ShowMysekaiMenu(onChangeSite)`:
+//! first `TryGetActiveDialog(MysekaiMenuDialog, Layer_Dialog)` (if it is open,
+//! only Setup runs again and no new instance is made), otherwise
+//! `InstantiateDialog(DialogType::MysekaiMenuDialog, Layer_Dialog)`
 //! → `Initialize(messageBody=null, onClose=null, allowCloseExternal=true)`
-//! → SetActive(false) → `Setup(ViewData)` → `Open`。**框外点按收框成立**
-//! （allowCloseExternal = true，Initialize 第三参原生核过）。ViewData 的
-//! `OnChangeSite` 在本对话框体内从不被调用（仅存字段，构造点穷举：仅
-//! 两处读都是 ShouldEnable 两格）——本仓不设对应物，具名。
+//! → SetActive(false) → `Setup(ViewData)` → `Open`. **A tap outside closes the
+//! dialog** (allowCloseExternal = true, the third argument of Initialize).
+//! ViewData's `OnChangeSite` is never invoked from this dialog body (it is
+//! only stored; every read after construction serves the two ShouldEnable
+//! cells) — this repository has no counterpart, a named gap.
 //!
-//! 本仓经屏幕管理器走这条生命周期：开框 `show_dialog(MysekaiMenuDialog,
-//! LayerDialog, DialogBackKey::Close)` + `open_dialog`，滑入结束
-//! `dialog_open_finished`；收框 `close_dialog`，滑出结束
-//! `dialog_destroyed`；管理器交来的返回键（`SubWindowDialog` 的
-//! `OnHardwareBackKeyProcess` = `CloseProcess`）收框。
+//! This repository runs that lifecycle through the screen manager: opening with
+//! `show_dialog(MysekaiMenuDialog, LayerDialog, DialogBackKey::Close)` +
+//! `open_dialog` and `dialog_open_finished` when the slide-in ends; closing
+//! with `close_dialog` and `dialog_destroyed` when the slide-out ends; the back
+//! key the manager routes (the `SubWindowDialog` hardware back key handler,
+//! `OnHardwareBackKeyProcess` = `CloseProcess`) closes it.
 //!
-//! ViewData 派生（原生 `ShowMysekaiMenu`）：`IsOwner()` ·
+//! ViewData derivation (`ShowMysekaiMenu`): `IsOwner()` ·
 //! `ShouldEnableInventoryButton = !IsVisiting()` ·
-//! `ShouldEnableInfoButton = !IsVisiting()`。单机（无多人域）⇒ 恒真；
-//! 访客态走 mock 面板一格。
+//! `ShouldEnableInfoButton = !IsVisiting()`. Single player (no multiplayer
+//! domain), so these are always true; the visiting state is a mock panel
+//! member.
 //!
 //! ## The eleven buttons: source handler, source rule, product
 //!
@@ -59,66 +66,83 @@
 //! field reaches them, and `ViewData.OnChangeSite` is stored but never
 //! invoked here.
 //!
-//! ## 两格取值链（+ 一处普查修正）
+//! ## The two cells' value chains (and one correction of the field census)
 //!
-//! - **体力格**（`UpdateStaminaGateView`，见 [`update_stamina_gate_view`]）：
-//!   `HarvestUtility.GetStaminaData(0)` 读
-//!   `UserDataManager.UserMysekaiStamina{normal,enhance,boost}`（**服务端
-//!   用户态**，本仓为服务端模型的客户端副本）并算出 boost 存量
-//!   `GetBoostStaminaStockCount`；`GetStaminaGageRate` 读 master 三池上限；
-//!   `MysekaiStaminaView.UpdateStaminaView(体力, 存量, false)` 定量表色、
-//!   渐变开关、图标精灵与色、存量底板与存量数字精灵；
-//!   `UpdateStaminaGageRate(体力, 三率, false)` 定量表填充。体力空 ⇒
-//!   `_recoverStaminaLabel` 亮（`IsEmptyStamina` = normal ≤ 0 且 boost ≤ 0
-//!   且 enhance < 1）。缺口：`icon_stamina_boost_h40` 与
-//!   `txt_stamina_2..9` 不在 UI 根的运行时精灵里（提取缺口，逐名报一次，
-//!   保留序列化精灵）；`SetNativeSize` 随之未接；渐变图是量表图
-//!   `Coffee.UISoftMask.SoftMask` 的子图形，软遮罩未移植，开着时画整张。
-//! - **等级格**：`MysekaiRankModel` 读 `UserMysekaiGamedata.totalExp`
-//!   （**服务端用户态**，mock 面板下发）→ 查 master 等级表（运行时根的
-//!   `mysekai-ranks.json`，移植见 `moly_law::ui::mysekai_rank`）得等级、
-//!   本级与下级累计经验，进 `UIPartsMysekaiRankGauge`。
-//!   `UIPartsMysekaiRankGauge.Setup` 把等级经 `_rankText.SetText` 写成数字，
-//!   再调 `_gaugeExp.Setup(等级, 最高等级, 总经验, 本级累计, 下级累计,
-//!   "MSG_REST_VALUE")`：未到最高等级时剩余文字走
-//!   `SetWordingText("MSG_REST_VALUE", [下级累计 - 总经验])`，到最高等级时走
-//!   `SetWordingText("WORD_MAX")`；写进的是 `restTextMesh`（`restText` 为空
-//!   时）。两区的客户端都是这两个键。量表 `UIPartsGauge.Setup(总经验 -
-//!   本级累计, 下级累计 - 本级累计)`（到最高等级时 `(0, 1)`）把比值写进
-//!   `fillImage` 的 fillAmount。那张图是一个 stencil `Mask` 的图形，量表
-//!   条是它的子节点：由 UI 渲染器的 stencil 消费者按遮罩图形的覆盖裁切
-//!   （`ui_layout/stencil_mask.rs`）。量表条上的 `UiEffect.GradientColor`
-//!   未解码（提取缺口），条仍是白色。
-//! - ⚠ **普查的「宝石余额」一格在真源里不存在**：字段表穷举无 jewel
-//!   字段、原生树本文件 `grep -ic jewel` = 0 ⇒ 三格修正为两格。宝石是
-//!   恢复对话框的消耗货币，不在本对话框的显示面。
-//! - ⚠ 「体力视图直接持 `ScreenLayerMysekaiHUD` 引用回写」也查无字段
-//!   （原生 HUD grep = 0）：恢复完成后的体力回写走**回调**——
-//! `Show2ButtonDialog` 时传 `onRecoverFinish = UpdateStaminaGateView`。
-//!   恢复对话框（`crate::stamina_recover_dialog`）收框后发
-//!   [`RecoverFinished`]，[`on_recover_finish`] 读同一份副本重写本格。
+//! - **Stamina cell** (`UpdateStaminaGateView`, see
+//!   [`update_stamina_gate_view`]): `HarvestUtility.GetStaminaData(0)` reads
+//!   `UserDataManager.UserMysekaiStamina{normal,enhance,boost}` (**server user
+//!   state**; this repository keeps the client's copy of the server model) and
+//!   derives the boost stock `GetBoostStaminaStockCount`; `GetStaminaGageRate`
+//!   reads the three pool maxima from master data;
+//!   `MysekaiStaminaView.UpdateStaminaView(stamina, stock, false)` sets the
+//!   gauge colour, the gradient switch, the icon sprite and colour, the stock
+//!   backing and the stock number sprite; `UpdateStaminaGageRate(stamina,
+//!   three rates, false)` sets the gauge fill. When stamina is empty,
+//!   `_recoverStaminaLabel` lights up (`IsEmptyStamina` = normal ≤ 0 and
+//!   boost ≤ 0 and enhance < 1). Gaps: `icon_stamina_boost_h40` and
+//!   `txt_stamina_2..9` are not among the UI root's runtime sprites (a named
+//!   gap, reported once per name, and the serialized sprite is kept);
+//!   `SetNativeSize` is therefore not wired; the gradient image is a child
+//!   graphic of the gauge image with `Coffee.UISoftMask.SoftMask`, and soft
+//!   masking is not supported, so it paints the whole image while open.
+//! - **Rank cell**: `MysekaiRankModel` reads `UserMysekaiGamedata.totalExp`
+//!   (**server user state**, supplied by the mock panel) → looks the master
+//!   rank table up (the runtime root's `mysekai-ranks.json`, implemented in
+//!   `moly_law::ui::mysekai_rank`) for the rank and the cumulative experience
+//!   to this rank and to the next, feeding `UIPartsMysekaiRankGauge`.
+//!   `UIPartsMysekaiRankGauge.Setup` writes the rank as a number through
+//!   `_rankText.SetText`, then calls `_gaugeExp.Setup(rank, max rank, total
+//!   exp, cumulative to this rank, cumulative to the next,
+//!   "MSG_REST_VALUE")`: below the max rank the rest text is
+//!   `SetWordingText("MSG_REST_VALUE", [cumulative to next - total exp])`, at
+//!   the max rank it is `SetWordingText("WORD_MAX")`; it is written into
+//!   `restTextMesh` (when `restText` is empty). The clients of both regions use
+//!   these two keys. The gauge
+//!   `UIPartsGauge.Setup(total exp - cumulative to this rank, cumulative to
+//!   next - cumulative to this rank)` (`(0, 1)` at the max rank) writes the
+//!   ratio into `fillImage`'s fillAmount. That image is a stencil `Mask`
+//!   graphic and the gauge bar is its child: it is clipped to the mask
+//!   graphic's coverage by the UI renderer's stencil consumer
+//!   (`ui_layout/stencil_mask.rs`). `UiEffect.GradientColor` on the gauge bar
+//!   is not decoded (a named gap), so the bar stays white.
+//! - ⚠ **The censused "gem balance" cell does not exist**: the field table
+//!   has no jewel field and this file's native tree has no jewel match, so
+//!   there are two cells rather than three. Gems are the currency the recover
+//!   dialog spends, not part of this dialog's display surface.
+//! - ⚠ "The stamina view writes back through a direct
+//!   `ScreenLayerMysekaiHUD` reference" also has no field (the HUD has no
+//!   match): the stamina write-back after recovery goes through a
+//!   **callback** — `Show2ButtonDialog` passes
+//!   `onRecoverFinish = UpdateStaminaGateView`. The recover dialog
+//!   (`crate::stamina_recover_dialog`) sends [`RecoverFinished`] when it
+//!   closes, and [`on_recover_finish`] reads the same copy and rewrites this
+//!   cell.
 //!
 //! The open line reports both layers for each button (the source rule and
 //! the adaptation) and does not merge them into one number.
 //!
-//! ## 生命周期（Setup 装配序，真源逐句）
+//! ## Lifecycle (the Setup assembly order, hook by hook)
 //!
-//! `Setup(ViewData)`：先 await `WaitHarvestSync`（采集同步，无对应物 ⇒
-//! 当帧通过）→ 八个 `SetupXxxButton`（挂监听 + 写使能）→
-//! `_exitMysekaiButton.enabled = true` → `SetupRawImage`（9 个图标位从
-//! 资产包 `mysekai/ui/mysekai_menu` 逐名装贴图：btn_cheki_menu_avatar
+//! `Setup(ViewData)`: first awaits `WaitHarvestSync` (harvest sync, no
+//! counterpart, so it passes in the same frame) → eight `SetupXxxButton`
+//! calls (attach listeners + write enabled) → `_exitMysekaiButton.enabled =
+//! true` → `SetupRawImage` (9 icon slots whose textures are loaded by name
+//! from the asset bundle `mysekai/ui/mysekai_menu`: btn_cheki_menu_avatar
 //! · btn_cheki_menu_album · btn_mysekai_menu_home · btn_cheki_menu_item
 //! · btn_cheki_menu_crystalShop · btn_cheki_menu_mySekaiInfo ·
-//! btn_cheki_menu_sketch · btn_cheki_menu_photo · btn_mysekai_menu_change）
-//! → `SetupMysekaiRankGauge` → `UpdateStaminaGateView` → 回标题/退出/
-//! 素材交换三个监听 → 教程态 `SetupTutorial` / 生日态 `SetupForBirthday`
-//! 全量置灰覆盖（本仓无教程/生日上下文 ⇒ 不接，具名）。
+//! btn_cheki_menu_sketch · btn_cheki_menu_photo · btn_mysekai_menu_change)
+//! → `SetupMysekaiRankGauge` → `UpdateStaminaGateView` → the back-to-title /
+//! exit / material-exchange listeners → the tutorial-state `SetupTutorial` /
+//! birthday-state `SetupForBirthday` full grey-out override (this repository
+//! has no tutorial or birthday context, so it is not wired, a named gap).
 //!
-//! 关框：`Close` = `CloseProcess` = `HideAsync`（收场动画）+
-//! `PlaySEOneShot("SE_SUBWINDOW_CLOSE")` + `Dispose("mysekai/ui/mysekai_menu")`。
-//! 窗口沿序列化的 SubWindowSlideAnimation 绑定滑动，开关均为 0.2 秒
-//! OutQuart；收场期间视图保留并占用输入。SE_SUBWINDOW_CLOSE 尚缺可播放
-//! 的源 cue，资产包 Dispose 尚无独立对应物。
+//! Closing: `Close` = `CloseProcess` = `HideAsync` (the exit animation) +
+//! `PlaySEOneShot("SE_SUBWINDOW_CLOSE")` +
+//! `Dispose("mysekai/ui/mysekai_menu")`. The window slides along the
+//! serialized SubWindowSlideAnimation binding, both ways 0.2 seconds
+//! OutQuart; the view stays during the exit and keeps input. No playable
+//! cue exists for SE_SUBWINDOW_CLOSE yet, and the asset bundle Dispose has no
+//! separate counterpart yet.
 //!
 //! ## Server state
 //!
@@ -135,16 +159,22 @@
 //! current site's type, read from the active site. The stamina and
 //! total-experience instruments land in the native server document.
 //!
-//! ## 我方选值与具名缺口（改这里之前先读）
+//! ## Chosen values and named gaps (read this before changing them)
 //!
-//! - 贴图与 RectTransform 使用提取数据。滑动目标、背板和内容矩形跟随
-//!   组件引用；动画距离由窗口实际装配尺寸计算，不另设固定屏宽。
-//! - 固定文案并入外壳字符集（图集的**第六个**消费者）：动态值只有整数，
-//!   无自由文本 ⇒ 装载期可枚举全量。缺字形在铺字点 fail-closed。
-//! - **模态**：开着时全部点按先过它（真源 Dialog 槽 blockRaycasts 同
-//!   形）；外壳点按与小地图点按的门都读同一个 menu_open 位（与离开
-//!   确认框同族门）。动作按钮通过共用交互资格读取 menu_open 与
-//!   menu_closing，关闭动画结束前不接受场上点按。
+//! - Textures and RectTransforms come from the region layout documents. The
+//!   slide target, the backing and the content rects follow component
+//!   references; the animation distance is computed from the window's actual
+//!   assembled size, with no separate fixed screen width.
+//! - The fixed texts join the shell charset (the atlas's **sixth** consumer):
+//!   the dynamic values are integers only, with no free text, so the full set
+//!   is enumerable at load time. A missing glyph fails closed at the text
+//!   placement point.
+//! - **Modal**: while it is open every tap goes through it first (the Dialog
+//!   slot's `blockRaycasts` does the same); the shell tap gate and the
+//!   minimap tap gate both read the same menu_open flag (the same gate
+//!   family as the leave confirmation dialog). Action buttons read menu_open
+//!   and menu_closing through the shared interaction eligibility and accept no
+//!   field taps before the close animation ends.
 //! - When the menu finishes opening, one line lists each button's centre in
 //!   window pixels (the tap map for driving the menu with real taps).
 //!
@@ -214,35 +244,37 @@ impl MenuTargets {
 /// 对话框件的身份（命中判定、摆位与文案重建的键）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MenuButton {
-    /// 体力恢复（真源 `_recoverStaminaButton`）。
+    /// Recover stamina (`_recoverStaminaButton`).
     RecoverStamina,
-    /// 宝箱（真源 `_chestButton`）。
+    /// Chest (`_chestButton`).
     Chest,
-    /// 情报（真源 `_mysekaiInfoButton`）。
+    /// Info (`_mysekaiInfoButton`).
     Info,
-    /// 换装（真源 `_mysekaiAvtarChangeButton`，源侧拼写照录）。
+    /// Avatar change (`_mysekaiAvtarChangeButton`, misspelled as in the
+    /// source field name).
     AvatarChange,
-    /// 回标题（真源 `_transitionToTitleButton`）。
+    /// Back to title (`_transitionToTitleButton`).
     TransitionToTitle,
-    /// 退出 mysekai（真源 `_exitMysekaiButton`）。
+    /// Leave MySekai (`_exitMysekaiButton`).
     ExitMysekai,
-    /// 拍照（真源 `_photoShotButton`）。
+    /// Photo (`_photoShotButton`).
     PhotoShot,
-    /// 相册（真源 `_photoAlbumButton`）。
+    /// Album (`_photoAlbumButton`).
     PhotoAlbum,
-    /// 水晶商店（真源 `_crystalShopButton`）。
+    /// Crystal shop (`_crystalShopButton`).
     CrystalShop,
-    /// 白图写生（真源 `_whiteBlueprintSketchButton`）。
+    /// White blueprint sketch (`_whiteBlueprintSketchButton`).
     WhiteBlueprintSketch,
-    /// 素材交换（真源 `_exchangeButton`）。
+    /// Material exchange (`_exchangeButton`).
     Exchange,
-    /// 关闭（真源 `DialogBase.closeButton`）。
+    /// Close (`DialogBase.closeButton`).
     Close,
 }
 
-/// 全部可按件（序即真源装配序：八钮 Setup → exit → 三监听；关闭钮随
-/// DialogBase）。**12 件**——计数定谳承重句：CustomButton 字段穷举 11 +
-/// DialogBase 关闭钮 1，普查的「13/12」对不上字段表。
+/// Every tappable item, in assembly order (eight button Setup calls → exit →
+/// three listeners; the close button comes with DialogBase). **12 items**: the
+/// 11 CustomButton fields plus DialogBase's 1 close button; the censused
+/// "13/12" does not match the field table.
 pub const ALL_BUTTONS: [MenuButton; 12] = [
     MenuButton::RecoverStamina,
     MenuButton::Chest,
@@ -1360,10 +1392,12 @@ fn log_tap_map(view: &UiPrefabView, layouts: &UiLayouts, canvas: Vec2, scale: f3
     info!("[menu_dialog] open: tap map in window pixels: {}", cells.join(" · "));
 }
 
-/// 点按分派：对话框开着 ⇒ 模态（全部点按先过它，真源 Dialog 槽
-/// blockRaycasts 同形；外壳与小地图的点按门都读同一个 menu_open 位）。
-/// 框外点按收框（allowCloseExternal=true）。动作按钮虽先消费事件，
-/// 但其共用交互资格会先读取菜单与对话框态，因而不会穿透本窗口。
+/// Tap dispatch: with the dialog open it is modal (every tap goes through it,
+/// as the Dialog slot's `blockRaycasts` does; the shell and minimap tap gates
+/// both read the same menu_open flag). A tap outside closes the dialog
+/// (allowCloseExternal=true). Action buttons consume events first, but their
+/// shared interaction eligibility reads the menu and dialog state first, so
+/// nothing reaches the field through this window.
 pub fn click(
     mut gestures: MessageReader<GestureEvent>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -1492,11 +1526,14 @@ pub fn click(
                             close_requested = true;
                         }
                         MenuButton::WhiteBlueprintSketch => {
-                            // 真源白图写生钮：Player.ChangeState(SelectSketchItem)
-                            // + ChangeState(GameStateType.Sketch) → Close。他人编辑
-                            // 中的警告子窗单机不可达（恒站主、无他人）。
+                            // White blueprint sketch button:
+                            // Player.ChangeState(SelectSketchItem) +
+                            // ChangeState(GameStateType.Sketch) -> Close. The
+                            // warning sub-dialog for another player's edit is
+                            // unreachable single player (the caller is always
+                            // the site owner and no other player is present).
                             info!(
-                                "[menu_dialog] 白图写生钮按下 → Player.ChangeState(SelectSketchItem)                                  + ChangeState(GameStateType.Sketch) → 关框"
+                                "[menu_dialog] white blueprint sketch button pressed -> Player.ChangeState(SelectSketchItem)                                  + ChangeState(GameStateType.Sketch) -> dialog closed"
                             );
                             sketch_modes.write(crate::home_action::SketchModeRequest::Enter);
                             close_requested = true;

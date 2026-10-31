@@ -1,11 +1,14 @@
-//! 家具域的律：从真源逐句转录的纯计算，无引擎依赖。
+//! Fixture-domain rules: pure computations that match the game, with no
+//! engine dependency.
 //!
-//! 覆盖八件：outline 全局量下发（`outline`）、摆放位置公式（`position`）、
-//! timeline 高度分类（`height`）、挂点配对（`attach`）、占用格旋转
-//! （`areas`）、着色器族谱与 ShaderAttribute 选择（`family`）、
-//! 主贴图 mip 全链级数（`mip`）、质感分支菲涅尔加色（`fresnel`）。
-//! 每件带一份移植时的逐值比对，期望值手算自源式子，在各文件的
-//! `#[cfg(test)]` 里。
+//! Covers eight modules: outline global-parameter upload (`outline`),
+//! placement position formula (`position`),
+//! timeline height classification (`height`), attachment pairing (`attach`),
+//! occupancy cell rotation
+//! (`areas`), shader family tree and ShaderAttribute selection (`family`),
+//! main texture full mip chain level count (`mip`), material-branch fresnel add (`fresnel`).
+//! Each comes with a value-by-value comparison, with expected values computed by hand from the source formula, in each file's
+//! `#[cfg(test)]`.
 
 pub mod areas;
 pub mod attach;

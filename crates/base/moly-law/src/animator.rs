@@ -76,7 +76,7 @@ pub fn loop_clip_time(input_time: f32, start: f32, stop: f32, cycle_offset: f32)
     let shifted = input_time + cycle_offset;
     let mut fraction = fractional(shifted);
     if shifted < 0.0 {
-        fraction = fraction + 1.0;
+        fraction += 1.0;
     }
     duration * fraction + start
 }

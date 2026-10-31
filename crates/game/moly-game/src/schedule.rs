@@ -405,9 +405,12 @@ pub fn install(app: &mut App) {
         // again here would decrement SiteScenePending twice for one scene root.
         .add_observer(character::on_model_scene_ready)
         .add_observer(player_avatar::body::on_scene_ready)
-        // 气泡链的选取门要读当前现象 id；wasm 分支不装天气插件，资源在
-        // 这里兜底建（默认值 = 真源默认现象 1，与档名资源在音频侧兜底建
-        // 同款故事；native 上与天气插件的 init 幂等重合）。
+        // The balloon chain's selection gate reads the current phenomenon
+        // id; the wasm build does not install the weather plugin, so the
+        // resource is created here as a fallback (default value = the game's
+        // default phenomenon 1, the same pattern as the audio side's fallback
+        // for the phenomenon-name resource; on native this coincides
+        // idempotently with the weather plugin's init).
         .init_resource::<weather::CurrentPhenomenonId>()
         .init_resource::<weather_fx::WeatherFxRetirements>()
         .init_resource::<weather_fx::EnvironmentRoot>()
@@ -423,9 +426,10 @@ pub fn install(app: &mut App) {
         // 场地相机当前态（常驻 Normal 起步；位移律读它，缺资源同样在
         // 参数校验处 panic）。
         .init_resource::<camera::FieldCameraState>()
-        // 玩家 avatar 状态机（常驻 Idle、截获门开起步——真源 Setup 期
-        // 31 个状态构造把门开成；相机近距进入守卫读它，缺资源同样在
-        // 参数校验处 panic）。
+        // The player avatar state machine (starts resident in Idle with the
+        // capture gate open — the game's Setup constructs 31 states and
+        // opens the gate; the camera's close-range entry guard reads it, and
+        // a missing resource likewise panics at parameter validation).
         .init_resource::<player_state::PlayerAvatarStates>()
         // 近距态私有旋转镜像（跨会话存续，源常驻单例的等价物）。
         .init_resource::<camera::FpsViewMemory>()
@@ -562,10 +566,12 @@ pub fn install(app: &mut App) {
                     gesture::advance,
                     joystick::spawn_when_ready,
                     joystick::place_ui,
-                    // 接近触发的动作按钮：表解析 → 铺件 → 每帧求交写栈 →
-                    // 摆件 → 点按分派。点按显式排在世界射线拾取之前：
-                    // 真源里屏幕按钮在 UI 事件系统里，本来就先拦下点按，
-                    // 落在按钮上的那一下不该再打一条世界射线。
+                    // Proximity-triggered action buttons: table parse → spawn
+                    // → per-frame overlap test writing the stack → placement
+                    // → tap dispatch. Taps are explicitly ordered before world
+                    // ray picking: the game's screen buttons live in the UI
+                    // event system, so they intercept a press first; a press
+                    // that lands on a button must not also cast a world ray.
                     action_button::parse_tables,
                     action_button::spawn_when_ready,
                     action_button::dash::spawn_when_ready,
@@ -660,11 +666,15 @@ pub fn install(app: &mut App) {
                         // 玩家逻辑仍在自己的根：换站重定位 → 输入 → 位移，
                         // 只将SD外观与角色共用，不加入NPC决策/路径名册。
                         player::reseed.after(player::spawn_when_ready),
-                        // 读输入 → 推进位移这一对必须显式链上：两者对 PlayerInput
-                        // 一写一读构成冲突，但冲突只保证串行、不保证次序——
-                        // executor 让推进先跑时读到的是上一帧的输入，起手/收场
-                        // 各晚一帧（真源 OnTouchJoyStick 在事件回调里烘好向量，
-                        // 同一帧的 UpdateState 就消费它；键盘路同帧同形）。
+                        // Reading input → advancing movement must be chained
+                        // explicitly: the two conflict on PlayerInput (one
+                        // writes, one reads), but a conflict only guarantees
+                        // serialization, not order — if the executor runs the
+                        // advance first it reads the previous frame's input,
+                        // and start/end are each one frame late (the game's
+                        // OnTouchJoyStick bakes the vector in the event
+                        // callback and the same frame's UpdateState consumes
+                        // it; the keyboard path has the same same-frame shape).
                         (crate::player_input::read_input.after(player::reseed), player::advance).chain(),
                         // The player's body is installed by player_avatar::body
                         // above; it installs the sole AvatarDriver.
@@ -685,11 +695,16 @@ pub fn install(app: &mut App) {
                         alone_action_runtime::report.after(alone_action_runtime::attach),
                     ),
                     (
-                        // 驱动（读移动相位换段）与播放探针；玩家速率律排在换段
-                        // 之后：换段以缺省速率起新段，玩家域同帧把速率压回
-                        // 真源式。其后气泡链：烘图集（tweet 行归 NPC 侧解析）
-                        // → HUD 事件消费（NPC 状态机本帧发的事件，排在呈现
-                        // 调用集之后）→ 存活计时与淡坡。
+                        // The driver (switches segments from the movement
+                        // phase) and the playback probes; the player's rate
+                        // rule runs after the segment switch: a switch starts
+                        // the new segment at the default rate and the player
+                        // domain presses the rate back to the game's formula in
+                        // the same frame. Then the balloon chain: atlas bake
+                        // (tweet rows are parsed on the NPC side) → HUD event
+                        // consumption (events the NPC state machine sends this
+                        // frame, after the presenter call set) → lifetime
+                        // timers and the fade slope.
                         player_avatar::drive
                             .after(player::advance)
                             .after(player_avatar::body::wire),
@@ -702,20 +717,26 @@ pub fn install(app: &mut App) {
                         balloon::bake_atlas
                             .after(crate::npc_tweet::parse)
                             .after(player_talk::parse),
-                        // HUD 事件消费 → 显式同步点 → after-edit 反应：同一根
-                        // objective 槽位的两条写入沿。链式定序 + 同步点让
-                        // 反应的让位门看得见 HUD 事件本帧铺的气泡——不定序
-                        // 时两系统并发（命令式写入不构成访问冲突），让位门
-                        // 对同帧的问候气泡是盲的，成员头上会叠两只气泡
-                        // （真源单状态字段，构造上不允许两只并存）。
+                        // HUD event consumption → explicit sync point →
+                        // after-edit reaction: two write paths into the same
+                        // objective slot. Chained ordering plus the sync point
+                        // make the reaction's yield gate see the balloon the
+                        // HUD event spawned this frame — without the ordering
+                        // the two systems run concurrently (command-based
+                        // writes are not an access conflict), the yield gate
+                        // is blind to a same-frame greeting balloon, and two
+                        // balloons stack over one member (a single state field
+                        // cannot hold two by construction).
                         (
                             balloon::hud_event
                                 .after(balloon::bake_atlas)
                                 .after(crate::npc_state::NpcPresenterSet),
                             ApplyDeferred,
-                            // after-edit 反应链：保存回执 → 池选取
-                            // → 上屏 → 5.0s 驻留收场（驻留在上屏之后，真源
-                            // objective 的序）。同一份表与图集资源，呈现复用。
+                            // After-edit reaction chain: save receipt → pool
+                            // pick → on-screen → 5.0s dwell and close-out (the
+                            // dwell follows the on-screen step, the game's
+                            // objective order). The same table and atlas
+                            // resources are reused for presentation.
                             balloon::after_edit_reaction,
                         )
                             .chain(),
@@ -799,8 +820,10 @@ pub fn install(app: &mut App) {
                             // Both conversation drivers publish voice lines before this flush.
                             // Audio observes the same frame as the associated text steps.
                             ApplyDeferred,
-                            // talk voice 起播（音频域消费行请求）：真源行内命令序
-                            // voice 先于 text——行推进同帧起播。
+                            // talk voice start (the audio domain consumes the
+                            // line requests): within a line the game issues
+                            // voice before text — the line advance starts the
+                            // voice in the same frame.
                             audio::serve_voice,
                             fixture_talk::progress_timelines,
                             fixture_talk::progress_turns,
@@ -841,15 +864,20 @@ pub fn install(app: &mut App) {
             )
                 .chain(),
         )
-        // 玩家 avatar 状态机的对话与输入写者（真源 UpdateController 每帧
-        // 分派的等价 + 对话域写者）。单列而不进上面的大 tuple——那个 tuple
-        // 的名册/玩家组已经顶到 Bevy 调度元组的 20 元上限，再塞会整块失去
-        // IntoScheduleConfigs（错误只在 .chain() 处冒「not an iterator」）。
+        // The dialogue and input writers of the player avatar state machine
+        // (the equivalent of the game's per-frame UpdateController dispatch,
+        // plus the dialogue domain's writers). Kept separate from the large
+        // tuple above — that tuple's roster/player group already reaches
+        // Bevy's 20-element limit for schedule tuples, and adding more
+        // removes IntoScheduleConfigs for the whole tuple (the error surfaces
+        // only at `.chain()` as "not an iterator").
         // The harvest action (its own writer of states 7 / 0 and of the gate)
         // runs between the input read and these writers: a gate it opens this
         // frame is seen by the input writer this frame, and the harvest
-        // instrument's synthetic input reaches both. 输入写者排在 read_input
-        // 之后——与那对同款，PlayerInput 一写一读的冲突只保证串行不保证次序。
+        // instrument's synthetic input reaches both. The input writers run
+        // after read_input — the same situation as that pair: the
+        // PlayerInput write/read conflict only guarantees serialization, not
+        // order.
         .configure_sets(
             Update,
             harvest::HarvestActionSet
@@ -1080,9 +1108,11 @@ pub fn install(app: &mut App) {
                     .before(emoticon::advance),
             ),
         );
-    // ---- 场地屏外壳 · 屏幕层栈（追加段：以下全部为新增，未动上面既有行） ----
-    // 层栈命令与外壳对话框请求两条消息沿；层栈资源常驻（栈底场地屏起步，
-    // 真源主场地屏常驻同形）。
+    // ---- Field screen shell · screen layer stack (appended section: all of
+    // ---- the following is new and none of the lines above changed) ----
+    // Two message paths: layer-stack commands and shell dialog requests; the
+    // layer-stack resource is resident (it starts with the field screen at
+    // the bottom of the stack, as the game's main field screen is).
     // The screen manager's registry, hook events and back key.
     ui_layers::install(app);
     app.add_message::<ui_layers::LayerCommand>()

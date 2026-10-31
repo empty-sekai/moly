@@ -1,31 +1,47 @@
-// 天气后处理的全屏 pass 族：直拷（扩散预过滤）、4-tap 降采样、散射上
-// 采样、合成（扩散混合 + 泛光 + 屏幕耀斑），以及泛光自己的三连（阈值
-// 预滤波、平方域降采样、平方域上采样）。片元式逐条转写自产品链的着色
-// 式：扩散的预滤波是直拷（没有阈值）、降采样 4-tap box、上采样低一级
-// 4-tap box 后按散射权重混合；泛光的预滤波走阈值软膝曲线并把输出平方
-// 压缩，金字塔两级都在平方域滤波；合成里扩散层先绕枢轴提对比再按混合
-// 模式并入，泛光块按强度-着色-overlay 三段式并入，屏幕耀斑与太阳光晕
-// 各沿自己的轴两条反向线性渐变各叠一层 hard light（先屏幕、后太阳）。
+// The weather post-processing fullscreen pass family: copy (diffusion
+// prefilter), 4-tap downsample, scatter upsample, composite (diffusion blend +
+// bloom + screen flare), and the bloom's own trio (threshold prefilter, squared-
+// domain downsample, squared-domain upsample). The fragment formulas follow the
+// product chain's shaders: the diffusion prefilter is a plain copy (no
+// threshold), downsampling is a 4-tap box, upsampling is a 4-tap box of the
+// next lower level blended by the scatter weight; the bloom prefilter runs a
+// soft-knee threshold curve and square-compresses its output, and both pyramid
+// levels filter in the squared domain; in the composite the diffusion layer
+// first raises contrast around a pivot and is then merged by blend mode, the
+// bloom block is merged in the intensity–tint–overlay three-step form, and the
+// screen flare and the sun halo each stack one hard-light layer of two opposite
+// linear gradients along their own axis (screen flare first, sun halo second).
 //
-// 本链的输入是**引擎后处理之后**的相机色：引擎的调色查表与引擎泛光在
-// 上游节点里已经做完（见 weather_stock_post.wesl），这里不再调色。
+// The chain's input is the camera colour **after** engine post-processing: the
+// engine's colour LUT and engine bloom are already done in an upstream node (see
+// weather_stock_post.wesl), so no further grading happens here.
 //
-// # 色彩域约定（与产品链同形）
+// # Colour domain conventions (the same as the product chain)
 //
-// 产品的这条链是「gamma 直通」：场景缓冲里存的是编码值，合成开始时显式
-// 解码进线性域、收尾显式编码回去。本管线的场景缓冲是 sRGB 纹理——采样时
-// 硬件自动解码成线性（等价于链上那一步 sRGBToLinear）、写入时硬件自动编码
-// 回去（等价于链尾 linearToSRGB），所以合成式里不再手写这两个往返；
-// 直拷 pass 反而要**手动编码回存储域**再写金字塔，让金字塔与产品链一样
-// 携带编码值（合成里扩散层拿的就是编码值，不二次解码）。
-// 泛光金字塔不同：它的输入是自发光缓冲（半浮点、**存储域**——遮罩采样后
-// 编回存储域，缓冲是 `Rgba16Float`、硬件不再编码），预滤波把存储域值开方
-// 压缩后各级携带压缩值，合成里先平方回存储域再消费。
+// The product's chain is "gamma passthrough": the scene buffer holds encoded
+// values, the composite explicitly decodes to linear at the start and explicitly
+// encodes back at the end. This pipeline's scene buffer is an sRGB texture — the
+// hardware decodes to linear on sampling (equivalent to the chain's sRGBToLinear)
+// and encodes back on write (equivalent to the chain tail's linearToSRGB), so
+// the composite formulas do not hand-write those two round trips; the copy pass
+// must instead **manually encode back to the storage domain** before writing the
+// pyramid, so that the pyramid carries encoded values like the product chain
+// (the composite takes the diffusion layer as encoded values, with no second
+// decode).
+// The bloom pyramid differs: its input is the emission buffer (half-float,
+// **storage domain** — the mask is encoded back to the storage domain after
+// sampling, the buffer is `Rgba16Float` and the hardware does not encode again),
+// the prefilter square-root-compresses storage-domain values, the levels carry
+// compressed values, and the composite squares them back to the storage domain
+// before consuming them.
 //
-// 顶点用引擎的全屏三角形（3 顶点覆盖全屏），uv 即屏幕坐标，原点在左上、
-// v 向下。真源的全屏 blit 原点在左下、v 向上（顶点程序把 uv 直接映成裁剪
-// 坐标 uv·2−1），两个光晕的渐变轴按那个坐标定义 ⇒ 光晕一律用
-// `source_uv = (u, 1 − v)`；只做纹理采样的地方与原点无关。
+// The vertex stage uses the engine's fullscreen triangle (3 vertices cover the
+// screen); uv is the screen coordinate with the origin at the top-left and v
+// pointing down. The product's fullscreen blit has its origin at the bottom-left
+// and v pointing up (the vertex shader maps uv directly to clip coordinates,
+// uv·2−1), and both halos define their gradient axes in that coordinate system
+// ⇒ halos always use `source_uv = (u, 1 − v)`; places that only sample textures
+// do not depend on the origin.
 
 import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
 
@@ -183,9 +199,11 @@ fn bloom_up_fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(sqrt(max(u_bloom_params.x * (low_sq - s_sq) + s_sq, vec3<f32>(0.0))), 1.0);
 }
 
-// 一层光晕：沿轴 `axis` 的两条反向线性渐变，各按 (偏移, 指数, 色的 alpha,
-// 强度) 取权重，依次叠一层 hard light（先色1、后色2）。屏幕耀斑与太阳光晕
-// 是同一个函数在两套 uniform 上各跑一次（真源程序里两段逐字同形）。
+// One halo layer: two opposite linear gradients along `axis`, each weighted by
+// (offset, exponent, colour alpha, strength), stacked in order as hard-light
+// layers (colour 1 first, colour 2 second). The screen flare and the sun halo
+// are the same function run once on each of two uniform sets (the program's two
+// sections have the same form).
 fn flare_layer(
     b_in: vec3<f32>,
     uv: vec2<f32>,
@@ -205,9 +223,11 @@ fn flare_layer(
     return b;
 }
 
-// 合成：基色（上游引擎后处理之后的相机色）clamp 到 100 进线性域（硬件解码
-// 已经给出线性值），扩散 → 泛光 → 屏幕耀斑 → 太阳光晕（真源程序的段序），
-// 收尾硬件编码回存储域。
+// Composite: the base colour (the camera colour after upstream engine post-
+// processing) is clamped to 100 and enters the linear domain (the hardware
+// already decoded it to linear), then diffusion → bloom → screen flare → sun
+// halo (the program's section order), and the hardware encodes back to the
+// storage domain at the end.
 @fragment
 fn weather_composite_fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let c = textureSample(t_a, s_linear, in.uv).rgb;

@@ -1,28 +1,38 @@
-//! 站点取景与相机跟随：真源 FieldCamera 一族的客户端律。
+//! Site framing and camera follow: the site camera rules of the `FieldCamera` family.
 //!
-//! 两层：
-//! - **装载面**：`camera/out/mysekai__camera.json`（JsonAsset 通道）解析成
-//!   `CameraSetting`（静态机位参数）与 `CameraParamAsset`（七条 AnimationCurve）。
-//!   曲线在本仓没有消费方——全反编译语料里 `CameraParam` 的名字引用只出现在
-//!   FieldCamera/FieldCameraModel 自身，模型字段在所有持模文件的读取点为零
-//!   （按偏移与按名字双查、带阳性对照的三轮穷举，结论记在本模块注释与
-//!   研究仓报告里）⇒ 相机运动在真源里**不**由这批曲线驱动：常态跟随走
-//!   Normal 态逐帧律（无曲线），演出走 Timeline 的 FieldCamera*Behaviour
-//!   自带 clip 曲线，搬运走按动画名分道的常数插值。装载面照读、曲线值
-//!   进日志可复算——曲线若真有消费者（例如经运行时补丁注入），数据已在盘。
-//! - **跟随律**：`follow_avatar` 按源 NormalCameraState.OnUpdate 的逐帧律
-//!   推进一个镜像模型（[`FieldCameraModel`]），眼位公式与钳界次序逐行对源
-//!   （式子注释钉在方法旁）。
-//! - **FPS 态**：距离拉到下界后继续捏合进入第一人称（源
-//!   `CanSwitchToFpsMode` 全链 + FPS 态三件套 OnEnter/OnUpdate/OnDrag），FPS
-//!   态反向捏合退出回 Normal（继承支 / case 16 支，按站点类目分道）。
-//!   转场一律 OutQuad 四分量补间（源 `DoTweenCameraSetting` 镜像）。
-//!   ⚠ 源 OnEnter/OnExit 里的 UI 与 dither 族调用**不迁**（本仓无那些
-//!   系统），逐条挂账写在 [`apply_input`] 注释里。
+//! Two layers:
+//! - **Loading**: `camera/out/mysekai__camera.json` (JsonAsset channel) parses into
+//!   `CameraSetting` (static camera placement parameters) and `CameraParamAsset`
+//!   (seven AnimationCurve curves).
+//!   The curves have no consumer in this repository: the only name references to
+//!   `CameraParam` are inside FieldCamera/FieldCameraModel itself, and the model
+//!   fields have zero read sites across every file that holds the model (a
+//!   three-round exhaustive search by offset and by name, with a positive
+//!   control) ⇒ camera motion is **not** driven by these curves: normal follow
+//!   runs the per-frame Normal-state rules (no curves), scripted sequences use
+//!   the clip curves carried by Timeline's FieldCamera*Behaviour, and transport
+//!   uses constant interpolation dispatched by animation name. The load layer
+//!   still read them and the curve values go to the log for recomputation; if a
+//!   consumer ever exists (for example through a runtime patch), the data is
+//!   already on disk.
+//! - **Follow rules**: `follow_avatar` advances a mirrored model
+//!   ([`FieldCameraModel`]) with the per-frame rules of NormalCameraState.OnUpdate;
+//!   the eye formula and the clamp order follow that routine line for line (the
+//!   formulas are commented next to the methods).
+//! - **FPS state**: pinching in again at the minimum distance enters first person
+//!   (the whole `CanSwitchToFpsMode` chain plus the FPS-state OnEnter/OnUpdate/OnDrag
+//!   trio); pinching outward in the FPS state exits back to Normal (the inherit
+//!   branch / case 16 branch, dispatched by site category).
+//!   Transitions always use four-component OutQuad tweens (matching
+//!   `DoTweenCameraSetting`).
+//!   ⚠ The UI and dither-family calls in OnEnter/OnExit are **not** carried over
+//!   (this repository has no such systems); each one is accounted for in the
+//!   [`apply_input`] comment.
 //!
-//! 近远裁剪面与视角锥的注释保留在 [`spawn`]。曲线求值式写在
-//! [`CurveAsset::evaluate`]——它是「与真源逐值可复算」的量法，节拍律化归
-//! 下一单。
+//! The comments on the near/far clip planes and the view frustum live in
+//! [`spawn`]. The curve evaluation formula is documented on
+//! [`CurveAsset::evaluate`]; it is the measurement that can be recomputed value
+//! by value, and expressing the beat rules goes to the next change.
 
 use crate::character::{AvatarRoot, CharacterShell};
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
@@ -46,8 +56,8 @@ pub const MYSEKAI_CAMERA_MSAA: Msaa = Msaa::Off;
 /// 取景中心附近的地表高度采样半径：取「脚下的地面」。
 const SURFACE_RADIUS: f32 = 2.0;
 
-/// 源 NormalCameraState.OnUpdate 的帧时长归一基（字面量 0.016667，非 1/60
-/// 的精确值；native 反编译逐字面量核过）。
+/// Frame-duration normalisation base of NormalCameraState.OnUpdate (the literal
+/// 0.016667, not the exact value of 1/60; every literal is matched).
 pub const FRAME_BASE: f32 = 0.016667;
 
 /// 源 NormalCameraState.OnUpdate 的跟随插值系数：t = clamp((dt/基)·0.1, 0, 1)。
@@ -59,8 +69,9 @@ const GESTURED_MIN_DISTANCE: f32 = 4.5;
 const MIN_PITCH_AT_MAX_ZOOM_FROM: f32 = 8.0;
 const MIN_PITCH_AT_MAX_ZOOM_TO: f32 = 24.0;
 
-/// 滚轮一档折算的捏合像素数。源手势层是触屏、单位是像素；滚轮是 PC
-/// 独有输入，此值是手感常量，非真源量。
+/// Scroll-wheel one notch in pinch pixels. The gesture layer is touch based and
+/// measured in pixels; the wheel is a PC-only input, so this value is a
+/// hand-feel constant, not a quantity of the game.
 pub const WHEEL_PINCH_PIXELS: f32 = 50.0;
 
 /// 截图用的自由机位：设着时 [`apply_free_camera`] 每帧覆盖场地相机的
@@ -174,14 +185,19 @@ fn photo_drag(model:&mut FieldCameraModel,delta:Vec2) {
 const FPS_ENTER_TWEEN_SECS: f32 = 0.2;
 const FPS_EXIT_TWEEN_SECS_CASE16: f32 = 0.1;
 
-/// 真源场地相机的态（`FieldCamera.CurrentState` 的类型，闭集 21 值，
-/// 判别值照抄；源拼写 FPS / ScreenshotCaptureFPS 在此按 Rust 惯例作
-/// Fps / ScreenshotCaptureFps）。态迁移由各游戏态与演出流程驱动；本仓
-/// 落了其中一条：Normal ↔ FPS 由缩放手势驱动（最小距离上继续捏合进入、
-/// FPS 态反向捏合退出，见 [`apply_input`]），其余态无写者。
+/// Field camera states (the type of `FieldCamera.CurrentState`: a closed set of
+/// 21 values, discriminant values kept as-is; the spellings FPS /
+/// ScreenshotCaptureFPS are written Fps / ScreenshotCaptureFps by Rust
+/// convention). State transitions are driven by the game states and scripted
+/// sequences; this repository implements one of them: Normal ↔ FPS is driven by
+/// the pinch gesture (pinching in further at the minimum distance enters, and
+/// an outward pinch in the FPS state exits, see [`apply_input`]); the other
+/// states have no writer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Default)]
 pub enum CameraStateType {
     None = 0,
+    #[default]
     Normal = 1,
     FloorEdit = 2,
     WallEdit = 3,
@@ -205,18 +221,16 @@ pub enum CameraStateType {
     BulkHarvest = 21,
 }
 
-/// 场地相机当前态（真源 `FieldCamera.CurrentState` 的读写面）。真源构造
-/// 起值是 `None`，入站流程把它切到 `Normal`；本仓起步即 `Normal`（等价于
-/// 「入站完成」的常驻态），写者是缩放手势的 FPS 进出迁移。位移律是它的
-/// 读者：FPS 态下玩家步速减半（`player` 域逐帧取值，走/冲两态同构）。
+/// Current field camera state (the read/write surface of
+/// `FieldCamera.CurrentState`). The constructor starts it at `None` and the
+/// inbound-site flow switches it to `Normal`; this repository starts at
+/// `Normal` (the equivalent of an always-resident "inbound complete" state),
+/// and the writer is the FPS enter/exit transition of the pinch gesture. The
+/// movement rules read it: in the FPS state the player walk speed is halved
+/// (the `player` domain samples it every frame, the same for walk and sprint).
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct FieldCameraState(pub CameraStateType);
 
-impl Default for CameraStateType {
-    fn default() -> Self {
-        CameraStateType::Normal
-    }
-}
 
 /// FPS 态私有模型的旋转镜像（源 `FPSCameraState._model` 的 {Yaw, Pitch} 两
 /// 字段；它的距离三界等常量只在进入时直写共享模型，无需镜像）。
@@ -329,7 +343,7 @@ impl CameraTween {
 #[derive(Resource)]
 pub struct CameraJsonHandle(Handle<JsonAsset>);
 
-/// 真源 `CameraSetting`（序列化字段）的镜像：静态机位参数。
+/// Mirror of `CameraSetting` (serialized fields): static camera placement parameters.
 #[derive(Resource, Debug, Clone, Copy)]
 pub struct CameraSetting {
     pub offset: Vec3,
@@ -344,8 +358,9 @@ pub struct CameraSetting {
     pub fov: f32,
 }
 
-/// 真源 `CameraParam`（七条 AnimationCurve 的 ScriptableObject）的装载镜像。
-/// 每条曲线的键值原样保存；求值见 [`CurveAsset::evaluate`]。
+/// Loaded mirror of `CameraParam` (a ScriptableObject with seven AnimationCurve curves).
+/// Each curve's keys and values are kept unchanged; evaluation is in
+/// [`CurveAsset::evaluate`].
 #[derive(Resource, Debug, Default)]
 pub struct CameraParamAsset {
     pub distance: CurveAsset,
@@ -428,13 +443,15 @@ impl CurveAsset {
     }
 }
 
-/// 真源 `FieldCameraModel` 的逐字段镜像（跟随律的全部状态）。
+/// Field-by-field mirror of `FieldCameraModel` (all state of the follow rules).
 ///
-/// 初值来自 `FieldCameraModel..ctor(CameraSetting, CameraParam)`：偏移/俯仰/
-/// 距离三界/俯仰界/灵敏度/FOV 全部直读序列化值；`LookAt` 初值在源里是
-/// Vector3.zero 静态字段（构造体不写它）——站点装载时由
-/// `SetupLockAtCameraBounds` 一族直写坐标与界，进入 Normal 态后由跟随律
-/// 逐帧推进。
+/// The initial values come from `FieldCameraModel..ctor(CameraSetting, CameraParam)`:
+/// offset / pitch / the distance bounds / the pitch bounds / sensitivity / FOV
+/// are all read straight from the serialized values; in the constructor
+/// `LookAt` starts as the Vector3.zero static field (the constructor does not
+/// write it) — on site load the `SetupLockAtCameraBounds` family writes its
+/// coordinates and bounds directly, and once the Normal state is entered the
+/// follow rules advance it every frame.
 #[derive(Resource, Debug, Clone)]
 pub struct FieldCameraModel {
     /// 跟随目标点（源 `_LookAt`，偏移前的量）。
@@ -505,9 +522,10 @@ impl FieldCameraModel {
     }
 }
 
-/// Startup：请求装载相机 JSON；单相机，fov 是垂直视场（真源同义）。
-/// 站点的颜色是材质程序自己写好的终值：tonemapping 与去色带都关，不叠
-/// 第二层处理。
+/// Startup: requests loading of the camera JSON; a single camera, fov is the
+/// vertical field of view (same meaning).
+/// Site colours are final values written by the material programs: both
+/// tonemapping and debanding are off, no second processing layer is applied.
 pub fn spawn(mut commands: Commands, server: Res<AssetServer>) {
     let camera = commands
         .spawn((
@@ -529,10 +547,12 @@ pub fn spawn(mut commands: Commands, server: Res<AssetServer>) {
             Projection::Perspective(PerspectiveProjection::default()),
             Tonemapping::None,
             DebandDither::Disabled,
-            // 3D 音频收听者：耳朵对在听者局部 X 轴上，位置/朝向每帧随本实体的
-            // 全局变换走（引擎侧语义）。真源相机挂的是无条件常驻的 3D 监听器，
-            // 这里照挂——当前两条音频通道（BGM、区域环境音）按真源走平铺 2D，
-            // 不消费它；它是给未来的 3D 一次性 SE 那一族预留的收听面。
+            // 3D audio listener: the ear pair lies on the listener's local X axis; its
+            // position/orientation follow this entity's global transform every frame
+            // (engine-side semantics). The camera carries an unconditional, always
+            // resident 3D listener here — the current two audio channels (BGM, area
+            // ambience) play flat 2D, do not consume it; it is the listening surface
+            // reserved for the future family of 3D one-shot SEs.
             SpatialListener::new(4.0),
         ))
         .id();
@@ -602,7 +622,7 @@ pub fn parse(
         near > 0. && far > near,
         "invalid field camera projection planes"
     );
-    // 视角锥改写：真源 SetupModel 一族把 FOV 应用到相机。
+    // Frustum update: the SetupModel family applies the FOV to the camera.
     let fov = setting.fov.to_radians();
     for mut projection in &mut cameras {
         if let Projection::Perspective(perspective) = &mut *projection {
@@ -931,7 +951,8 @@ pub fn frame_site(
     // 初始取景点：站点中心（LookAt 起零后第一次跟随会拉向角色，这里给
     // 首帧一个站点内的合法起点）。
     model.look_at = Vec3::new(center.x, surface, center.y);
-    // 真源式：偏航/俯仰转视线方向，目标点上抬 offset，眼位沿方向退 distance。
+    // Placement form: yaw/pitch turn into the view direction, the target point is
+    // raised by offset, and the eye position steps back distance along it.
     let dir = view_dir(model.pitch, model.yaw);
     let pivot = model.look_at + model.offset;
     let eye = pivot + dir * model.distance;
@@ -985,59 +1006,79 @@ fn ratio01(value: f32, from: f32, to: f32) -> f32 {
     }
 }
 
-/// Update：PC 输入接进跟随模型——左键拖 = 触屏单指拖（源 `OnDrag` 语义），
-/// 滚轮 = 触屏捏合（源 `OnPinch` 语义）。拖拽从手势层来（`gesture.rs`：
-/// 位移累计过拖拽阈值才激活 DRAG、激活后逐帧发 Moved——真源手势管理器
-/// 只转发 UPDATE 相，激活前的小幅位移被吞）。两族输入都按当前相机态分派
-/// （源 `FieldCamera.OnDrag/OnPinch` 转发给 `CurrentState` 的同名方法）。
-/// 复位补间播着时两族整表吞掉（源 Normal 态 `OnDrag`/`OnPinch` 入口的
-/// `_isResetAnimation` 门，先于 `UpdateAngle` 与 `CanSwitchToFpsMode`
-/// 检查——复位期间捏合既不缩放也进不了 FPS。门读在飞的 [`CameraTween`]
-/// 是否带复位的完成回调（[`CameraTween::is_normal_reset`]）；复位只从
-/// Normal 态发起（[`CameraReset::reset_camera_setting`]），其余态的
-/// `ResetCameraSetting` 是空方法）。
-/// Normal 态律逐条对源：
+/// Update: PC input feeds the follow model — left-button drag = one-finger touch
+/// drag (`OnDrag` semantics), wheel = touch pinch (`OnPinch` semantics). Drags
+/// come from the gesture layer (`gesture.rs`: DRAG activates only after the
+/// accumulated movement passes the drag threshold, and then emits Moved every
+/// frame — the gesture manager forwards only the UPDATE phase, so small
+/// movements before activation are swallowed). Both input families are
+/// dispatched by the current camera state (`FieldCamera.OnDrag/OnPinch` forward
+/// to the same-named method of `CurrentState`).
+/// While a reset tween is playing both families are swallowed entirely (the
+/// `_isResetAnimation` gate at the entry of `OnDrag`/`OnPinch` in the Normal
+/// state, checked before `UpdateAngle` and `CanSwitchToFpsMode` — during a reset
+/// a pinch neither zooms nor enters FPS. The gate reads whether the in-flight
+/// [`CameraTween`] carries a reset completion callback
+/// ([`CameraTween::is_normal_reset`]); a reset starts only from the Normal state
+/// ([`CameraReset::reset_camera_setting`]), and `ResetCameraSetting` is an empty
+/// method in the other states).
+/// The Normal-state rules, one by one:
 ///
-/// - **旋转**（源 `FieldCamera.UpdateAngle`，原生体与伪码双树互证）：
+/// - **Rotation** (from `FieldCamera.UpdateAngle`):
 ///   ```text
-///   yaw'  = yaw + 灵敏度·dx          // 越出 ±360 才 fmodf 360
-///   pitch'= pitch − 灵敏度·dy
-///   pitch = 先钳上界再抬下界         // 非对称序：min(v, max) 后 max(·, min)
+///   yaw'  = yaw + sensitivity·dx      // fmodf 360 only when leaving ±360
+///   pitch'= pitch − sensitivity·dy
+///   pitch = clamp to upper bound, then raise to lower bound
+///                                     // asymmetric order: min(v, max) then max(·, min)
 ///   ```
-/// - **拖拽俯仰联动**（源 Normal 态 `OnDrag` 尾段）：`t` 取**刚写完的**
-///   pitch，生效距离 = min(4.5 + t·(最大距离−4.5), 手势记忆距离)——低头
-///   （pitch 低）强制拉近，鸟瞰放开；只压生效距离，不碰手势记忆。
-/// - **缩放**（源 Normal 态 `OnPinch`）：先把缩放增量 v13 = 比例·(−捏合)
-///   算好喂 [`can_switch_to_fps`]——**每个捏合事件都查**，距离已在下界
-///   （位精确相等）且方向为拉近即切 FPS 态并**当帧不再缩放**；否则距离 =
-///   clamp(距离 + v13, 距离界)，手势记忆与生效距离**同写**；随后俯仰下限
-///   抬到 `max(8 + t₂·16 − 比例₂, 8, 模型俯仰下界)`，`t₂` 按新距离归一。
+/// - **Drag-pitch coupling** (tail of `OnDrag` in the Normal state): `t` uses the
+///   pitch **just written**, effective distance = min(4.5 + t·(max distance−4.5),
+///   gesture-remembered distance) — a low pitch (looking down) forces a close
+///   pull, a bird's-eye view releases it; only the effective distance is
+///   clamped, the gesture-remembered distance is not touched.
+/// - **Zoom** (`OnPinch` in the Normal state): the zoom delta v13 = ratio·(−pinch)
+///   is computed first and fed to [`can_switch_to_fps`] — **checked on every
+///   pinch event**; if the distance is already at the lower bound (bit-exact
+///   equality) and the direction is zoom-in, switch to the FPS state and **stop
+///   zooming this frame**; otherwise distance = clamp(distance + v13, distance
+///   bounds), with the gesture-remembered distance and the effective distance
+///   **written together**; then the pitch lower bound is raised to
+///   `max(8 + t₂·16 − ratio₂, 8, model pitch lower bound)`, where `t₂` is
+///   normalised by the new distance.
 ///
-/// FPS 态：拖拽走 [`fps_drag`]（偏航 floor-mod 归一 + 俯仰钳界，源
-/// `FPSCameraState.OnDrag`）；捏合**只有退出支**（v13 > 0 = 捏合张开方向
-/// 即回 Normal，源 `FPSCameraState.OnPinch` 没有缩放支——FPS 态下的
-/// 「继续放大」就是进入转场本身：距离 1.7→0.15 的位置前移，FOV 不动）。
-/// Moly 的近距查看扩展允许进入 FPS 后继续滚轮缩小 FOV，先还原 FOV 再退出。
-/// 进出迁移走 [`change_state`]：Normal 的 OnExit + [`fps_on_enter`]，
-/// [`fps_on_exit`] + [`normal_on_enter`]（TransferCameraSettings case 16 或
-/// 继承支）。
+/// FPS state: drags go through [`fps_drag`] (yaw floor-mod normalisation + pitch
+/// clamping, from `FPSCameraState.OnDrag`); a pinch has **only the exit branch**
+/// (v13 > 0 = pinch-out direction, i.e. back to Normal; `FPSCameraState.OnPinch`
+/// has no zoom branch — "zoom in further" in the FPS state is the entry
+/// transition itself: the position moves forward from distance 1.7 to 0.15 while
+/// the FOV stays fixed).
+/// The Moly close-inspection extension allows the wheel to narrow the FOV after
+/// entering FPS; the FOV is restored first, then the exit happens.
+/// Enter/exit transitions go through [`change_state`]: Normal's OnExit +
+/// [`fps_on_enter`], then [`fps_on_exit`] + [`normal_on_enter`]
+/// (TransferCameraSettings case 16 or the inherit branch).
 ///
-/// 不迁（逐条挂账）：双拖手势源两态本身就是空方法；源 FPS OnEnter 的 `SetLock(0)` /
-/// `SetActiveUI(0)` / `SiteObjectManager.ShowAll(0)` / `ResetHouseDither(1)`
-/// 与 OnExit 的 `SetActiveUI(1)`、Normal OnEnter 的
-/// `FadeInPlayerIfNeeded` / `HideObstacleListIfNeeded` / OnExit 的
-/// `SetDitherValue`——本仓没有锁、UI 面、房屋隐藏与 dither 系统，玩家显隐
-/// 用可见性直写替代 dither 淡入淡出；源进入守卫里的玩家行为态
-/// （UseTimelineFixture/Harvest）本仓无对应状态机，恒放行——真源里对话挡
-/// 进入靠的是相机态自身切到 Talk，而对话相机不在本仓的态集里。FPS 态下
-/// 站点切换未定义（源里站点搬运走相机态 6/7 结构性地先退出 FPS；本仓
-/// `frame_site` 会重建模型而态不回退——本单不处理，具名在案）。
-/// FPS 进出迁移的取数面（玩家 · 相机投影 · 玩家行为态——进入守卫的第二条
-/// 读它）打包成一个参数：
-/// `apply_input` 的裸参数已到 `SystemParam` 元组的
-/// 上限（16），逐个展开会让整个系统静默失去 `IntoSystem`（错误只在
-/// schedule 的 `.chain()` 处冒出来）。仅进入/退出支消费；拖拽/缩放的
-/// 常规路径不走它。
+/// Not carried over (each accounted for): the two-finger drag is an empty method
+/// in both states; FPS OnEnter's `SetLock(0)` / `SetActiveUI(0)` /
+/// `SiteObjectManager.ShowAll(0)` / `ResetHouseDither(1)`, OnExit's
+/// `SetActiveUI(1)`, Normal OnEnter's `FadeInPlayerIfNeeded` /
+/// `HideObstacleListIfNeeded` and OnExit's `SetDitherValue` — this repository has
+/// no lock, UI-surface, house-hiding or dither systems, so player visibility is
+/// switched by writing `Visibility` directly instead of a dither fade. The player
+/// behaviour states in the entry guard (UseTimelineFixture/Harvest) have no state
+/// machine here and always pass — a talk blocks entry only by switching the
+/// camera state to Talk, and the talk camera is not part of this repository's
+/// state set. Site switching during the FPS state is undefined (site transport
+/// goes through camera states 6/7, which structurally leave FPS first; here
+/// `frame_site` rebuilds the model without reverting the state — left for a
+/// separate change, named here).
+/// The inputs of the FPS enter/exit transition (player · camera projection ·
+/// player behaviour state — the second item the entry guard reads) are packed
+/// into one parameter:
+/// `apply_input`'s bare parameters have reached the limit of the `SystemParam`
+/// tuple (16), and listing them out would silently make the whole system
+/// lose `IntoSystem` (the error only surfaces at the schedule's `.chain()`).
+/// Only the enter/exit branches consume it; the regular drag/zoom path does not.
 /// The photo presenter owns gestures while capturing or selecting a frame.
 #[derive(Resource, Default)]
 pub struct PhotoGestureHeld(pub bool);
@@ -1072,17 +1113,20 @@ pub fn apply_input(
     mut smoke_exited: Local<bool>,
     mut smoke_pinched: Local<bool>,
 ) {
-    // 摆放编辑面持有输入期间（真源编辑模式下手势层归编辑面），相机
-    // 拖拽/缩放整表让位——编辑模式内的输入分配收口。
+    // While the placement editor owns input (in edit mode the gesture layer belongs
+    // to the editor), camera drag/zoom yields entirely — input routing is settled
+    // inside edit mode.
     if transition.bulk_input.is_some() || transition.photo_input.as_ref().is_some_and(|held| held.0) || edits.is_active() || transition.dialogs.blocks_field_input() || (!transition.layers.on_field()
         && !(state.0 == CameraStateType::PhotoShot && transition.layers.is_active(crate::ui_layers::MenuScreenType::MysekaiPhotoShot)))
     {
         gestures.clear();
         return;
     }
-    // 相机只吃 DRAG 的逐帧 Moved（真源相机域的手势分派只对拖拽族的
-    // UPDATE 态走 OnDrag；tap/drag 的区分阈值在手势层）。增量即事件
-    // 自带的当帧增量。模型未立也把事件读掉，别攒陈账。
+    // The camera consumes only the per-frame Moved of DRAG (the camera domain
+    // dispatches gestures to OnDrag only for the drag family's UPDATE state; the
+    // tap/drag distinction threshold lives in the gesture layer). The increment is
+    // the per-frame delta carried by the event itself. Events are drained even when
+    // no model exists yet, so stale deltas do not accumulate.
     let mut drag = Vec2::ZERO;
     let mut ui_drag = Vec2::ZERO;
     for event in gestures.read() {
@@ -1242,12 +1286,12 @@ pub fn apply_input(
                     );
                 }
             }
-            CameraStateType::Talk => {
+            CameraStateType::Talk
                 if transition
                     .talk_camera
                     .as_deref()
                     .is_some_and(|camera| camera.accepts_input())
-                {
+                => {
                     // Talk.OnPinch calls AddDistance only. Normal's gesture
                     // memory, pitch coupling and FPS entry do not run here.
                     let before = model.distance;
@@ -1258,7 +1302,6 @@ pub fn apply_input(
                         model.distance,
                     );
                 }
-            }
             // 其余态无写者，捏合整表让位（fail-closed，不猜律）。
             _ => {}
         }
@@ -1675,7 +1718,7 @@ pub fn is_inherit_camera_setting(category: &str, prev_site_type: &str) -> bool {
 pub fn normal_on_exit(world: &mut World, site: &str) -> bool {
     let complete = world
         .get_resource::<NormalCameraTweenComplete>()
-        .map_or(true, |flag| flag.0);
+        .is_none_or(|flag| flag.0);
     let Some(mut model) = world.get_resource_mut::<FieldCameraModel>() else {
         return false;
     };
@@ -2231,76 +2274,98 @@ pub fn track_prev_site(
     }
 }
 
-/// PostUpdate：Normal 态跟随律（源 `NormalCameraState.OnUpdate` 逐行迁移），
-/// 每帧推进 [`FieldCameraModel`] 并写相机变换。
+/// PostUpdate: the Normal-state follow rules (matching
+/// `NormalCameraState.OnUpdate` line for line); advances [`FieldCameraModel`]
+/// every frame and writes the camera transform.
 ///
-/// 源式（原生反编译，IFix 补丁门之后的原生体）：
+/// The rule (after the IFix patch gate):
 /// ```text
-/// v13 = deltaTime / 0.016667                 // 帧时长归一（字面量如此）
-/// t   = clamp(v13 * 0.1, 0, 1)               // 跟随插值系数
-/// LookAt += (playerPos - LookAt) * t          // 三轴同插（x/y/z）
+/// v13 = deltaTime / 0.016667                 // frame-duration normalisation (literal as is)
+/// t   = clamp(v13 * 0.1, 0, 1)               // follow interpolation factor
+/// LookAt += (playerPos - LookAt) * t          // all three axes interpolated (x/y/z)
 /// t2  = MinDistance != MaxDistance
 ///       ? clamp((Distance-Min)/(Max-Min), 0, 1) : 0
-/// xRange = InterpRange(近界.min.x, 远界.min.x, 近界.max.x, 远界.max.x, t2)
-///          // 内式：x = (minAtMin - minAtMax)·t2 + minAtMax
-///          //      y = (maxAtMin - maxAtMax)·t2 + maxAtMax
-/// zRange = 同式 z 分量
-/// LookAt.x = clamp(LookAt.x, xRange)          // 先钳 max 再钳 min，Y 不钳
+/// xRange = InterpRange(near.min.x, far.min.x, near.max.x, far.max.x, t2)
+///          // inner formula: x = (minAtMin - minAtMax)·t2 + minAtMax
+///          //                y = (maxAtMin - maxAtMax)·t2 + maxAtMax
+/// zRange = the same formula on the z components
+/// LookAt.x = clamp(LookAt.x, xRange)          // clamp max first, then min; Y is not clamped
 /// LookAt.z = clamp(LookAt.z, zRange)
-/// eye = GetPosition(pitch, yaw, LookAt, Offset, Distance)   // 见 view_dir
-/// 相机朝向 = LookAt + Offset（Transform.LookAt）
+/// eye = GetPosition(pitch, yaw, LookAt, Offset, Distance)   // see view_dir
+/// camera forward = LookAt + Offset (Transform.LookAt)
 /// ```
-/// 跟随目标是玩家 avatar 的视变换位置（源 `GetFollowPlayer` →
-/// `AvatarDataStore` 槽 → `GetViewTransform().position`；我们的等价物是
-/// 名册首行成员的世界变换——同一语义位）。
+/// The follow target is the view-transform position of the player avatar
+/// (`GetFollowPlayer` → `AvatarDataStore` slot → `GetViewTransform().position`;
+/// the equivalent here is the world transform of the first member in the roster —
+/// the same semantic slot).
 ///
-/// 转场补间（源 `DoTweenCameraSetting` 的四条并行 tween）在本函数头部推
-/// 进：四分量一律 OutQuad，LookAt/俯仰/偏航/距离逐帧写模型，FOV 写
-/// **相机投影**（源 setter 直写 `Camera.fieldOfView`），到头撤资源。补间
-/// 在飞 ⇒ 跟随系数 v13 = 1.0（t 恒 0.1/帧）；补间走完且空闲才走 dt 归一
-/// 支（源 OnUpdate 的门：`_isCompleteCameraTween && !CurrentAction.IsPlaying`）。
-/// 跟随律与补间**同帧叠加**而非让位——源同形（tween 写 LookAt 后 OnUpdate
-/// 仍把取景点往玩家拉 10%）。
+/// Transition tweens (the four parallel tweens of `DoTweenCameraSetting`) advance
+/// at the head of this function: all four components use OutQuad, LookAt/pitch/
+/// yaw/distance are written to the model every frame, FOV is written to the
+/// **camera projection** (the setter writes `Camera.fieldOfView` directly), and
+/// the resource is removed at the end. While a tween is in flight the follow
+/// coefficient is v13 = 1.0 (t is the constant 0.1/frame); the dt-normalisation
+/// branch runs only after the tween has finished and the camera is idle (the
+/// OnUpdate gate: `_isCompleteCameraTween && !CurrentAction.IsPlaying`).
+/// The follow rules and the tween **stack within the same frame** rather than
+/// yielding — the tween writes LookAt and OnUpdate still pulls it 10% toward the
+/// player.
 ///
-/// FPS 态律（源 `FPSCameraState.OnUpdate` 逐行）：取景点直写玩家位 + 高度
-/// 偏移（无插值无钳界——跟随是 Normal 态的事）；眼位沿视线退 FPS 距离，
-/// 相机朝向取景点（源 UpdatePosition + UpdateRotation；我们的 `looking_at`
-/// 是精确式，源 FromEulerRad 的字面量 0.017453 截断不迁移）；玩家朝向 =
-/// 相机前向的三维 LookRotation（随俯仰低头抬头；FPS 内玩家隐藏、退出后
-/// 保留残姿态）。
+/// FPS-state rules (`FPSCameraState.OnUpdate`, line for line): the look-at point
+/// is written directly as player position + height offset (no interpolation and
+/// no clamping — following is the Normal state's job); the eye steps back along
+/// the view direction by the FPS distance, and the camera looks at the look-at
+/// point (UpdatePosition + UpdateRotation; `looking_at` here is the exact form,
+/// and the 0.017453 literal truncation of FromEulerRad is not carried over);
+/// player facing = the 3D LookRotation of the camera forward (it pitches with
+/// looking down/up; the player is hidden in FPS and keeps its last orientation
+/// after exit).
 ///
-/// FPS 的 follow 不是另一条链，是两态**共享**的 `FieldCamera.UpdatePosition`
-/// 轨道（方法体无态分支：读 model 的 Pitch/Yaw/LookAt/Offset/Distance →
-/// GetPosition → 写相机位）。两态的差别全在进轨道**之前/之后**：LookAt
-/// 怎么来（Normal：系数 `min(δt/0.016667·0.1, 1)` 平滑拉向玩家 + 视距内
-/// 插界钳 x/z；FPS：玩家位+0.1 硬直写，无平滑无钳界）与相机朝向怎么写
-/// （Normal：`Transform.LookAt(LookAt+Offset)`；FPS：pitch/yaw 四元数）。
-/// Normal 态另有的房屋 dither 与采集站相机碰撞，16 态都没有。
+/// The FPS follow is not another chain but the `FieldCamera.UpdatePosition`
+/// track **shared** by both states (the method body has no state branch: read
+/// model Pitch/Yaw/LookAt/Offset/Distance → GetPosition → write the camera
+/// position). Both states differ only **before/after** entering that track: how
+/// LookAt is obtained (Normal: smoothly pulled toward the player with factor
+/// `min(δt/0.016667·0.1, 1)` + interpolated bounds clamp on x/z within the
+/// distance range; FPS: player position+0.1 written directly, no smoothing and
+/// no clamping) and how the camera forward is written (Normal:
+/// `Transform.LookAt(LookAt+Offset)`; FPS: pitch/yaw quaternion).
+/// Normal state only: house dither and harvest-station camera collision; the
+/// 16 state has neither.
 ///
-/// 相机侧不存在头骨/玩家朝向锚点：取景点读的是玩家视图**根**位置
-/// （`PlayerAvatarPresenter.get_Position` = 视变换 position，非任何骨骼），
-/// 头/脊柱字段全树无相机域写者。玩家→相机方向也无写：相机朝向从不读
-/// 玩家面朝。
+/// There is no head-bone or player-facing anchor on the camera side: the
+/// look-at point reads the player view **root** position
+/// (`PlayerAvatarPresenter.get_Position` = the view transform position, not any
+/// bone), and no camera-domain writer touches the head/spine fields anywhere in
+/// the tree. The player→camera direction is not written either: the camera
+/// forward never reads the player facing.
 ///
-/// 玩家←相机的那支写（上面的面朝 LookRotation）是同帧双写里注定赢的一
-/// 支：源里同一视图变换每帧被两处写——移动态在 Update 相位
-/// （`AvatarDataStore.Update` → `PlayerAvatarPresenter.OnUpdate` →
+/// The player←camera write (the facing LookRotation above) is the one that wins
+/// in the same-frame double write: one view transform is written by two places
+/// every frame — the move state in the Update phase
+/// (`AvatarDataStore.Update` → `PlayerAvatarPresenter.OnUpdate` →
 /// `PlayerAvatarStateMachine.OnUpdate` → `PlayerAvatarMoveState.UpdateState`
-/// 每帧写 `Euler(0, atan2(输入.x, 输入.z), 0)`），相机态尾写在
-/// LateUpdate 相位（`FieldCamera.LateUpdate` → 状态机 → OnUpdate 尾段）。
-/// Unity 帧序 Update 先于 LateUpdate ⇒ 相机写后落：16 态下躯干朝向恒跟
-/// 相机走，行走中也压住输入朝向（对不上前几版记录里「移动时玩家朝向照
-/// 常走自己的」的猜测——那支写在源里存在、但被相位压住，不出现在画面
-/// 上）。本仓同一次序：`player::advance` 在 Update 写移动朝向，本系统在
-/// PostUpdate 写相机前向，同一赢家。
+/// writes `Euler(0, atan2(input.x, input.z), 0)` every frame), and the camera
+/// state's tail write in the LateUpdate phase (`FieldCamera.LateUpdate` → state
+/// machine → OnUpdate tail).
+/// In Unity's frame order, Update runs before LateUpdate ⇒ the camera write lands
+/// later: in the 16 state the torso facing always follows the camera and
+/// overrides the input facing even while walking (this contradicts earlier notes
+/// that guessed the player facing keeps its own direction while moving — that
+/// write exists, but the phase order overrides it, so it never shows on screen).
+/// This repository uses the same order: `player::advance` writes the move
+/// facing in Update and this system writes the camera forward in PostUpdate, so
+/// the same side wins.
 pub fn follow_avatar(
     time: Res<Time>,
     mut commands: Commands,
     state: Res<FieldCameraState>,
     models: Option<ResMut<FieldCameraModel>>,
     mut tween: Option<ResMut<CameraTween>>,
-    // 两查询都持 &mut Transform：互加 Without 声明不相交（相机不是
-    // avatar、avatar 不是相机），否则 Bevy 借用检查按「可能同实体」拒绝。
+    // Both queries hold &mut Transform: the mutually exclusive Without
+    // declarations keep them disjoint (a camera is not an avatar and an avatar is
+    // not a camera), otherwise Bevy's borrow check rejects them as "possibly the
+    // same entity".
     mut avatars: Query<(&GlobalTransform, &mut Transform), (With<AvatarRoot>, Without<Camera3d>)>,
     mut cameras: Query<(&mut Transform, &mut Projection), (With<Camera3d>, Without<AvatarRoot>)>,
     mut announced: Local<bool>,
@@ -2527,7 +2592,7 @@ pub fn follow_avatar(
             // is `_isCompleteCameraTween && !CurrentAction.IsPlaying`: a
             // transfer tween killed before its callback keeps the fixed
             // factor until Normal's next OnEnter.
-            let complete = normal_complete.as_deref().map_or(true, |flag| flag.0);
+            let complete = normal_complete.as_deref().is_none_or(|flag| flag.0);
             let raw = if tween_active || !complete {
                 1.0
             } else {
@@ -2568,11 +2633,13 @@ pub fn follow_avatar(
             let eye = pivot + view_dir(models.pitch, models.yaw) * models.distance;
             if let Ok((mut camera, _)) = cameras.single_mut() {
                 *camera = Transform::from_translation(eye).looking_at(pivot, Vec3::Y);
-                // 一次性状态行：真源跟随律启动的现算证据（此后每帧推进，不再刷屏）。
+                // One-time status line: the follow rules started here, with the live
+                // values of the first step (advances every frame afterwards, no more
+                // logging).
                 if !*announced {
                     *announced = true;
                     info!(
-                        "[camera] 相机改真源跟随律：取景点 {pivot:.2} 眼位 {eye:.2}（目标=avatar 视变换，t 系数 0.1/帧基 {FRAME_BASE}）"
+                        "[camera] follow camera active: pivot {pivot:.2} eye {eye:.2} (target = avatar view transform, t factor 0.1 per frame base {FRAME_BASE})"
                     );
                 }
             }

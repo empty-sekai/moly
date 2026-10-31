@@ -236,8 +236,8 @@ pub(super) fn frame(world: &mut World, screen: &mut ScreenTracks, t: f64, cast: 
                         voice_pause(world, &mut screen.voices, &clip.key, t, &bounds);
                     }
                 }
-                "BGMTrack" => {
-                    if entered {
+                "BGMTrack"
+                    if entered => {
                         match track
                             .clips
                             .iter()
@@ -250,7 +250,6 @@ pub(super) fn frame(world: &mut World, screen: &mut ScreenTracks, t: f64, cast: 
                             None => info!("[cutscene-screen] t={t:.4} BGMBehaviour.OnBehaviourPlay {bounds}: no clip of the track has start < {time:.4} < end: nothing plays"),
                         }
                     }
-                }
                 _ => {}
             }
         }

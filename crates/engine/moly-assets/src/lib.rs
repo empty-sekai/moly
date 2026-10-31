@@ -207,9 +207,11 @@ pub fn audio_corpus() -> AssetPath<'static> {
     AssetPath::from("moly://phenomena/audio/corpus.json".to_owned())
 }
 
-/// partvoice 路由表（提取命令的路由产物）：说话者/家具 → 变体语音包名
-/// 的查表面（真源链里包随说话者变体，不随 cue）。消费侧对它 fail-closed：
-/// 文件缺席时具名跳过，不静默也不推默认包。
+/// Partvoice routing table (the routing output of the extraction command):
+/// the lookup surface from speaker/fixture → variant voice package name
+/// (the game's chain picks the package by the speaker's variant, not by
+/// cue). Consumers fail closed on it: a missing file is a named skip, never
+/// silent and never a default package.
 pub fn partvoice_routes() -> AssetPath<'static> {
     AssetPath::from("moly://phenomena/audio/partvoice.json".to_owned())
 }
@@ -241,20 +243,26 @@ pub fn ui_atlas_page(file: &str) -> AssetPath<'static> {
     AssetPath::from(format!("moly://ui/atlas/textures/{file}"))
 }
 
-/// UI atlas 裁件的资产路径：`sprites/<atlas>/<sprite>.png` 的单件裁图，
-/// 目录布局沿用提取产物；sprite 名即真源序列化的 spriteName（经打包
-/// 身份对齐的那一份账本落名），不是本仓的新约定。
+/// Asset path of a UI atlas cut: the single-piece cut
+/// `sprites/<atlas>/<sprite>.png`; the directory layout follows the
+/// extraction output. The sprite name is the serialized spriteName (the name
+/// recorded in the ledger after package-identity alignment), not a new
+/// convention of this repository.
 pub fn ui_atlas_sprite(atlas: &str, sprite: &str) -> AssetPath<'static> {
     AssetPath::from(format!("moly://ui/atlas/sprites/{atlas}/{sprite}.png"))
 }
 
-/// 动作按钮图标的资产路径（`ui-action-icons` 提取命令的产物）。
+/// Asset path of an action-button icon (the `ui-action-icons` extraction
+/// command's output).
 ///
-/// 这一族**不在任何图集里**：真源把每张图标做成独立包、装到 RawImage
-/// 上，所以按 Sprite 走的图集导出器看不见它们——「图集 51/51 全在盘」
-/// 与「一张动作图标都没有」可以同时成立，本仓为此误判过一次。
-/// `name` 是真源那张按钮类型表里的文件名，也是纹理自己的 m_Name；
-/// ⚠ 与包名并非逐字符相同（有一件差一个大小写），所以按这个名字取。
+/// This family is **in no atlas**: the game ships each icon as its own
+/// package loaded into a RawImage, so an atlas exporter that walks Sprite
+/// references never sees them — "atlas 51/51 complete on disk" and "not one
+/// action icon present" can hold at the same time, and this repository
+/// misjudged it once for that reason.
+/// `name` is the file name in the button-type table and also the texture's
+/// own m_Name; ⚠ it is not character-for-character identical to the package
+/// name (one entry differs by letter case), so lookups use this name.
 pub fn ui_action_icon(name: &str) -> AssetPath<'static> {
     AssetPath::from(format!("moly://ui/action-icon/{name}.png"))
 }

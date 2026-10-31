@@ -384,12 +384,12 @@ impl<'a> MissionScreen<'a> {
 }
 
 /// The completion mission of a sheet (`GetParentMission`).
-pub fn parent_mission<'a>(masters: &'a MissionMasters, sheet_id: i32) -> Option<&'a Mission> {
+pub fn parent_mission(masters: &MissionMasters, sheet_id: i32) -> Option<&Mission> {
     masters.parent_mission(sheet_id)
 }
 
 /// The normal missions of a sheet in `seq` order (`GetChildMissions`).
-pub fn child_missions<'a>(masters: &'a MissionMasters, sheet_id: i32) -> Vec<&'a Mission> {
+pub fn child_missions(masters: &MissionMasters, sheet_id: i32) -> Vec<&Mission> {
     masters.child_missions(sheet_id)
 }
 

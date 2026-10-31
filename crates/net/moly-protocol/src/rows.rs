@@ -348,7 +348,7 @@ impl ConvertSlot {
         self.obtain_resources
             .iter()
             .filter(|row| row.progress == progress)
-            .map(|row| ConvertObtainResource::to_resource(row))
+            .map(ConvertObtainResource::to_resource)
             .collect()
     }
 }

@@ -236,7 +236,7 @@ fn drop_shadow_tint(colour: vec3<f32>) -> vec3<f32> {
     return env.drop_shadow_color.w * (colour * env.drop_shadow_color.rgb - colour) + colour;
 }
 
-// ---- main-light shadow (URP soft 9-tap, as transcribed in site_material.wesl) ----
+// ---- main-light shadow (URP soft 9-tap, the same as site_material.wesl) ----
 
 fn tent_weights(f: f32) -> array<f32, 6> {
     let below = min(f, 0.0);

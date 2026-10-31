@@ -298,7 +298,7 @@ pub fn on_pointer_down(
 }
 
 /// `CustomButton.OnPointerUp`. When control finishes, the stored finish
-/// callback runs (see [`finish_control`]); then this button waits for the
+/// callback runs (see `finish_control`); then this button waits for the
 /// click. Every release clears the long-press flag, cancels the long-press
 /// check and stops hold-repeat.
 pub fn on_pointer_up(

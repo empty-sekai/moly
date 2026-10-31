@@ -41,7 +41,7 @@ pub struct EmitReplay {
 /// every replay's alive time grows by the slice.
 pub fn age(replays: &mut [EmitReplay], dt: f32) {
     for replay in replays {
-        replay.alive_time = dt + replay.alive_time;
+        replay.alive_time += dt;
     }
 }
 
@@ -332,7 +332,7 @@ pub fn motion(storage: &mut Storage, normalized: &[f32], ages: &[f32], emitter: 
         for axis in 0..3 {
             let ga = g[axis] * age;
             let sv = s * slot.velocity[axis];
-            slot.position[axis] = (ga * half + age * sv) + slot.position[axis];
+            slot.position[axis] += ga * half + age * sv;
             slot.velocity[axis] = ga + sv;
         }
     }
@@ -407,7 +407,7 @@ pub fn rotate(storage: &mut Storage, rotation: &Rotation) -> Result<(), Refused>
                 }
             };
             let signed = if ParticleRandom::sample(slot.seed, 0xff2b_b1a4) > rotation.randomize_direction { rate } else { -rate };
-            slot.rotation[axis] = slot.rotation[axis] + lifetime * signed;
+            slot.rotation[axis] += lifetime * signed;
         }
     }
     Ok(())

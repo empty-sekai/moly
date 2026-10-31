@@ -1,56 +1,89 @@
-//! 音频域第一批：BGM 换曲、区域环境音、A 套邻近环境音管理器、一次性
-//! SE、九类音量面板。
+//! Audio domain, first batch: BGM switching, area ambience, the Set A
+//! proximity ambience manager, one-shot SE, and the nine-category volume
+//! panel.
 //!
-//! 两条常驻通道按真源各自的管理器拆开，不复合：
+//! The two persistent channels follow the managers of the original game and
+//! are kept separate, not merged:
 //!
-//! - **BGM**（BGM 管理器 `MysekaiBGMManager` 的选曲）：按「当前站点 × 当前
-//!   现象」现算。真源 `PlayBGMAsync(site, phenomenon)` 先问用户唱片设定（只在
-//!   住宅类站点查；设定是服务端用户态，由服务端模型的响应写进客户端副本
-//!   [`crate::audio_inputs::ClientMusicPlaySettings`]，默认为空），再走默认选曲
-//!   `PlayDefaultBGMAsync`：现象 id 等于客户端配置的配送现象 id → 站点
-//!   normal 档；现象主表亮度档非 none →
-//!   站点×亮度档行；none → 现象自己的 BGM 行（主数据缓存按 mysekaiPhenomenaId
-//!   建这张字典，重复键后者覆盖前者）。配送类站点（祭会场）的站点控制器恒以
-//!   配送现象 id 起 BGM，与画面上是哪个现象无关。某支查不到行时真源不起播、
-//!   现声照响。切曲时旧声淡出、新声淡入（CRI 淡入淡出器的线性律，见
-//!   [`CROSS_FADE_SECONDS`]），同 cue 不重启；BGM 播放器以强制循环起播，没有
-//!   循环点的 BGM 波形整轨循环。真源的选曲时机是进站（各站点控制器的
-//!   SetupBGM）、换站动作（传送炮与家园/房间互移的动作状态）与摆设编辑回包；
-//!   站内的环境交叉淡化（多人摆设更新走的 UpdateSite）不重新选曲。本仓的
-//!   现象切换钮在真源里没有对应物，这边把它当成「以该现象进站」：站点或现象
-//!   一变就按新的「站点 × 现象」重选。
-//! - **区域环境音**（现象 SE 管理器 `MysekaiPhenomenaSEManager`）：平铺 2D——
-//!   每帧的位置与朝向都不进这条链，音量是 SE 播放器 × cue 的类别与音量命令。真源在环境建成
-//!   （进站）与交叉淡化收尾两处各调一次：站点类型先过门（草原、海岸、花园、
-//!   纪念地四类放，家园、三层房间、祭会场只停），过门则取该站本现象的行、
-//!   否则该站「其它」条件的行；每次调用都先停旧声再放（同 cue 也从头放）；
-//!   现象没有主表行时记错误并停。这边的触发点是天气链的每次真实提交
-//!   （提交序号前进一次＝真源一次调用）。cue 是按它的**序列结构**放的：
-//!   提取侧在 loop.json 的包条目里导出结构（`sequenceExport` 计数 +
-//!   `sequences` 块）。列了、没有块的 cue 是 plain（一轨一条波形、从 cue
-//!   起点放）。带块的按序列类型 0-4 的律放（[`cue_law`]：全轨、顺序、洗牌、
-//!   随机、不重复随机），每起一次选出的轨各等自己的起播延迟、把波形放完，
-//!   一轮的轨都放完且带重放标志就起下一轮（[`cue`]）。位置与顺序表挂在
-//!   cue 表的工作区上，停了再放接着走。一次性 SE 与时间线 SE 走同一个
-//!   引擎。其余结构（类型 5-8、动作轨、未解码事件……），以及条目没被读
-//!   过、却带多条波形的键，都具名拒绝，不拿其中一条波形顶替。
+//! - **BGM** (track selection of the BGM manager `MysekaiBGMManager`):
+//!   computed from the current site x current phenomenon. `PlayBGMAsync(site,
+//!   phenomenon)` first asks the user's record setting (checked only at
+//!   housing-type sites; the setting is server-side user state, written into
+//!   the client-side copy [`crate::audio_inputs::ClientMusicPlaySettings`] by
+//!   the server model's response, empty by default), then falls back to the
+//!   default selection `PlayDefaultBGMAsync`: phenomenon id equal to the
+//!   client configuration's delivery phenomenon id -> the site's normal
+//!   variant; the phenomenon master table's brightness variant not none ->
+//!   the site x brightness-variant row; none -> the phenomenon's own BGM row
+//!   (the master data cache builds this dictionary by mysekaiPhenomenaId; a
+//!   duplicate key is overridden by the later entry). A delivery-type site
+//!   (the festival venue) has a site controller that always starts BGM with
+//!   the delivery phenomenon id, regardless of the phenomenon shown on
+//!   screen. When a branch finds no row, nothing starts and the current sound
+//!   keeps playing. On a track switch the old sound fades out and the new one
+//!   fades in (the linear curve of the CRI fader, see
+//!   [`CROSS_FADE_SECONDS`]); the same cue does not restart. The BGM player
+//!   starts with forced looping, so a BGM waveform without a loop point loops
+//!   as a whole. Selection happens on site entry (each site controller's
+//!   SetupBGM), on site changes (the teleport cannon and the home/room
+//!   move-action states) and on the furniture-edit response; the in-site
+//!   ambience crossfade (UpdateSite in multi-player furniture updates) does
+//!   not re-select. The phenomenon switch button has no counterpart in the
+//!   original game; this crate treats it as entering the site with that
+//!   phenomenon: any change of site or phenomenon re-selects for the new
+//!   "site x phenomenon".
+//! - **Area ambience** (the phenomenon SE manager
+//!   `MysekaiPhenomenaSEManager`): flat 2D — neither position nor orientation
+//!   enters this chain; the volume is the SE player x the cue's categories and
+//!   volume commands. The original game calls it once when the environment is
+//!   built (site entry) and once when the crossfade ends: the site type first
+//!   passes a gate (the four types grassland, shore, flower garden and
+//!   memorial place play; home, the three room floors and the festival venue
+//!   only stop), and a passing site takes the rows for this phenomenon, else
+//!   the rows with the "other" condition. Every call stops the old sound
+//!   before playing (the same cue also restarts from the top); a phenomenon
+//!   without a master-table row logs an error and stops. Here the trigger is
+//!   every real commit of the weather chain (the commit sequence advancing
+//!   once equals one call in the original game). Cues are played by their
+//!   **sequence structure**: the asset export writes the structure into the
+//!   loop.json package entries (`sequenceExport` count + `sequences` blocks).
+//!   A cue that is listed without a block is plain (one waveform per track,
+//!   played from the cue start). Cues with a block are played by the rules of
+//!   sequence types 0-4 ([`cue_law`]: all tracks, sequential, shuffle,
+//!   random, no-repeat random); each chosen track waits for its own start
+//!   delay and plays its waveform to the end, and once every track of a round
+//!   has finished and the repeat flag is set the next round starts ([`cue`]).
+//!   Positions and the order table live in the cue engine's work area, so a
+//!   stop and restart continues where it left off. One-shot SE and timeline
+//!   SE share the same engine. Every other structure (types 5-8, action
+//!   tracks, undecoded events, ...), and keys that were never read yet carry
+//!   several waveforms, are refused by name; one of their waveforms is not
+//!   used as a substitute.
 //!
-//! **A 套邻近环境音管理器**（声源对象管理器）是第三个消费者：声源组件 +
-//! 距离调音 `clamp(1 - d/max, 0, 1)` + 单通道就近选择。声源由站点场景
-//! 侧车的组件表喂（`site_sound` 模块挂上展开后的场景实体）——声源对象
-//! 不挂在家具 prefab 上，它是站点场景侧的一等条目。
+//! **The Set A proximity ambience manager** (the sound source object manager)
+//! is the third consumer: source components + distance tuning
+//! `clamp(1 - d/max, 0, 1)` + nearest selection on a single channel. Sources
+//! are fed by the site scene's sidecar component table (the `site_sound`
+//! module attaches them to the expanded scene entities) — a sound source
+//! object is not attached to a furniture prefab; it is a first-class entry on
+//! the site scene side.
 //!
-//! **talk voice**（MySekaiTalkEngine 的 PlayVoice）是第四个消费者：对话
-//! 域在行推进处投递行请求，本域同帧起播——真源逐行命令序里 voice 先于
-//! text，voice 与文本行是行内同拍，不是窗体开拍。通道单声道：真源每次
-//! 起播前 `StopVoiceAll`（在 ExistsCueName 判定之前，缺 cue 也先停旧声）；
-//! 缺 cue 真源是「不播、对话照走」，这边照做并按本仓纪律把跳过记响。
-//! 音量 = voice 播放器 × cue 的类别（talk voice 的 cue 属 VOX_SCENARIO）与
-//! 音量命令。
+//! **talk voice** (PlayVoice of MySekaiTalkEngine) is the fourth consumer: the
+//! dialogue domain delivers a line request when a line advances and this
+//! domain starts it in the same frame — in the per-line command order voice
+//! precedes text, so voice and the text line are one beat, not the window
+//! open. The channel is monophonic: every start first runs `StopVoiceAll`
+//! (before the ExistsCueName check, so a missing cue also stops the old
+//! sound); a missing cue means "no playback, the dialogue continues", which
+//! this crate does and logs as a named skip. Volume = the voice player x the
+//! cue's categories (talk voice cues belong to VOX_SCENARIO) and volume
+//! commands.
 //!
-//! **一次性 SE 通道**（`SoundManager.PlaySEOneShot` 的事件族）是第五个：
-//! 事件侧入队（采集受击、对话窗点跳/步进、摆放编辑动作），通道侧起播——
-//! 平铺 2D（真源 PlaySEOneShot 走不挂 3d 源的播放器，位置不进这条链）、
+//! **The one-shot SE channel** (`SoundManager.PlaySEOneShot`'s event family)
+//! is the fifth: the event side enqueues (gather hits, dialogue-window
+//! skip/step, furniture-edit actions) and the channel side starts — flat 2D
+//! (PlaySEOneShot uses a player without a 3D source, so position never enters
+//! this chain).
 //! Requests start individually after the scene's cue-name substitutions. The
 //! ambient AudioSourceRepeater interval does not apply to button/one-shot sounds.
 //! Every request starts its cue on the cue engine (plain or sequence types
@@ -58,11 +91,14 @@
 //! volume commands. The request's class (`se_ingame`/`se_ui`) only stands in
 //! for a cue whose facts the export does not carry.
 //!
-//! cue 到音频文件的绑定是 **(cue, 路由行的 package)**，不是 cue 名单义：
-//! 同一 cue 名可以同时活在「多曲共装的包」与「自成一包的下载件」里
-//! （同一首歌两份不同的循环区间），路由行自带的 package 字段才是选择面。
-//! talk voice 的路由行是提取侧的映射语义：cue = `voice_<script>_<行>_<变体>`，
-//! 包随 script（`mysekai__talk__voice__<script>`），cue 不必问包名。
+//! A cue binds to an audio file by **(cue, the routing row's package)**, not
+//! by the bare cue name: the same cue name can live both in a "multi-track
+//! bundle" package and in a single-cue download (the same song with two
+//! different loop ranges), and the routing row's package field is what picks
+//! one. A talk voice routing row follows the mapping: cue =
+//! `voice_<script>_<line>_<variant>` and the package follows the script
+//! (`mysekai__talk__voice__<script>`), so the cue itself does not need the
+//! package name.
 //!
 //! Volume has two layers, multiplied per sounding track (see
 //! [`cue::CueVolume`]). The **player layer** is the user's system volume on
@@ -111,8 +147,9 @@ use moly_assets::json::JsonAsset;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
-/// 真源站点类型枚举 `MysekaiSiteType` 的序（站点主表 siteType 名按序对号）。
-/// 现象环境音门按这个序做移位。
+/// The order of the site type enum `MysekaiSiteType` (the site master table's
+/// siteType names map onto it in order). The phenomenon ambience gate shifts
+/// by this order.
 const SITE_TYPE_ORDER: [&str; 9] = [
     "home_site",
     "first_floor",
@@ -134,7 +171,9 @@ const CATEGORY_HOUSING_HOME: &str = "housing_home";
 const CATEGORY_HOUSING_ROOM: &str = "housing_room";
 const CATEGORY_DELIVERY: &str = "delivery";
 
-/// 现象环境音门。类型序越界时真源抛参数越界异常；这里同样响亮拒绝。
+/// The phenomenon ambience gate. An out-of-range type order raises the
+/// argument-out-of-range exception in the original game; this crate refuses
+/// loudly in the same way.
 fn plays_site_phenomena_sound(site_type: &str) -> bool {
     let order = SITE_TYPE_ORDER
         .iter()
@@ -143,24 +182,33 @@ fn plays_site_phenomena_sound(site_type: &str) -> bool {
     (SITE_PHENOMENA_SOUND_MASK >> order) & 1 != 0
 }
 
-/// BGM 音量因子（真源声明级常量；乘在总线音量上）。
+/// BGM volume factor (a declaration-level constant of the original game;
+/// multiplied onto the bus volume).
 const BGM_VOLUME_FACTOR: f32 = 0.7;
 
-/// BGM 切曲的淡入淡出时长（秒）：BGM 控制器构造时的默认淡化时长 0.25。BGM
-/// 选曲界面 Resume 时改成 0.3、Dispose 时改成 1.0（经
-/// [`RecordChoice::set_fade_time`]），改后对之后每次换曲都生效，直到管理器
-/// 重建——本产品不离开 MySekai，不重建。每路淡化按起跑时的值走完。真源把它按毫秒交给
-/// CRI 播放器的淡入淡出器：旧声从它当时已到的电平线性降到 0、新声从 0 线性
-/// 升到 1，两条同时起跑、各走完同一个淡化时长（淡化曲线取默认的线性档，无起点偏移）。
-/// CRI 的推进节拍是音频服务线程，每拍增量封顶 67ms；这边按渲染帧推进，帧长
-/// 不是那个量，封顶不移植。旧声在电平归零后再保留 500ms 才停（静音段），
-/// 这边归零即拆。
+/// Fade duration of a BGM track switch (seconds): the default fade time 0.25
+/// set when the BGM controller is constructed. The BGM selection screen sets
+/// 0.3 on Resume and 1.0 on Dispose (through
+/// [`RecordChoice::set_fade_time`]); the new value applies to every later
+/// switch until the manager is rebuilt — this product never leaves MySekai
+/// and never rebuilds. Every fade runs to the end with the value it started
+/// with. The original game hands the duration in milliseconds to the CRI
+/// player's fader: the old sound falls linearly from its current level to 0
+/// and the new sound rises linearly from 0 to 1; both start together and each
+/// covers the same fade duration (the default linear curve, no start offset).
+/// CRI advances on the audio service thread with each step capped at 67ms;
+/// this crate advances per render frame, whose length is not that quantity, so
+/// the cap is not implemented. The original game keeps the silent old sound
+/// for 500ms after its level reaches 0 before stopping it; this crate stops
+/// it at zero.
 const CROSS_FADE_SECONDS: f32 = 0.25;
 
-/// BGM intro 段交给 loop 段的提前量（秒）：一次性 intro 段播到「循环起点 -
-/// 提前量」时把驻停的 loop 段放行，交接处的重叠被提前量封顶。真源的循环
-/// 在 cue 播放器里逐样本无缝；vorbis 解码器没有 seek，两段式交接是近似，
-/// 用「短重叠」换「不出现静默缺口」。
+/// Lead (seconds) with which the BGM intro part hands over to the loop part:
+/// once the one-shot intro plays up to "loop start - lead", the parked loop
+/// part is released, and the overlap at the handover is capped by the lead.
+/// The original game loops seamlessly sample by sample inside the cue player;
+/// the vorbis decoder has no seek, so the two-part handover is approximate and
+/// trades a short overlap for no silent gap.
 const BGM_HANDOFF_LEAD_SECONDS: f32 = 0.05;
 
 /// Unity `Mathf.Epsilon`：最小非规格化正数（Rust 的 `f32::EPSILON` 是机器
@@ -169,9 +217,11 @@ const UNITY_MIN_FLOAT: f32 = 1.4e-45;
 
 // ---- 用户音量档（本地档）与九类总线 ----------------------------------------
 
-/// 用户音量一组三旋钮（真源 `VolumeSettingData`：字段 Bgm/Se/Voice，序列化
-/// 键同名；值域 0..=1 步 0.01——UI 侧是整数 0..100，读写两端各乘除 0.01）。
-/// 默认 1.0（真源 `ApplicationLocalSettings` 构造时两组建档三字段全 1.0）。
+/// The user's volume as one set of three knobs (`VolumeSettingData`: fields
+/// Bgm/Se/Voice, serialized under the same keys; range 0..=1 in steps of 0.01
+/// — the UI side is an integer 0..100, and both ends multiply/divide by 0.01).
+/// Default 1.0 (`ApplicationLocalSettings` constructs all three fields of both
+/// groups as 1.0).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VolumeSettingData {
     pub bgm: f32,
@@ -189,26 +239,21 @@ impl Default for VolumeSettingData {
     }
 }
 
-/// 本地档的音量半（真源 `ApplicationLocalSettings.LiveVolume` /
-/// `SystemVolume` 两组各一）：Live/System × Bgm/Se/Voice 六浮点。**只有
-/// System 组进 mysekai 的施加链**（进场 `SetupVolume(1.0, Bgm×0.7, Se,
-/// Voice)` 只读 SystemVolume；0.7 落在 BGM 消费侧的
-/// [`BGM_VOLUME_FACTOR`]）；Live 组是节奏域的档——mysekai 不应用，但持久
-/// 化与选项页读写照做（忠实）。装载在 [`init_settings`]。
+/// The volume half of the local settings (`ApplicationLocalSettings` has one
+/// each for `LiveVolume` and `SystemVolume`): six floats, Live/System x
+/// Bgm/Se/Voice. **Only the System group enters the MySekai application
+/// chain** (the on-entry `SetupVolume(1.0, Bgm×0.7, Se, Voice)` reads only
+/// SystemVolume; the 0.7 lands on the BGM consumer side as
+/// [`BGM_VOLUME_FACTOR`]); the Live group belongs to the rhythm game — MySekai
+/// does not apply it, but still persists it and reads/writes it on the option
+/// page. Loaded in [`init_settings`].
 #[derive(Resource, Debug, Clone, Copy, PartialEq)]
+#[derive(Default)]
 pub struct LocalVolumeSettings {
     pub live: VolumeSettingData,
     pub system: VolumeSettingData,
 }
 
-impl Default for LocalVolumeSettings {
-    fn default() -> Self {
-        LocalVolumeSettings {
-            live: VolumeSettingData::default(),
-            system: VolumeSettingData::default(),
-        }
-    }
-}
 
 /// Both volume layers. The nine named fields are the **category layer**, in
 /// the order of the client's category enum (`SeCategoryType`): each holds
@@ -500,11 +545,14 @@ fn clear_pending_voice_lines(world: &mut World) {
 
 // ---- 本地档的存取（ApplicationLocalSettings 音量半的持久化） ---------------
 
-/// 真源走 `PersistentDataUtility`（Unity persistentDataPath 本地档）⇒ 照存
-/// 本地。序列化器细节未提取 ⇒ **文件形是我方选值**：容器键照字段名
-/// （LiveVolume/SystemVolume），字段键照真源序列化键（Bgm/Se/Voice）。
-/// native 落用户数据目录（persistentDataPath 的对应位），`MOLY_SETTINGS_FILE`
-/// 可覆写（验证用）；wasm 落 localStorage（浏览器端的「本地」）。
+/// The original game goes through `PersistentDataUtility` (a local file under
+/// Unity's persistentDataPath) and this crate stores locally as well. The
+/// serializer details are not fixed, so **the file shape is this crate's
+/// choice**: container keys follow the field names (LiveVolume/SystemVolume)
+/// and field keys follow the serialization keys (Bgm/Se/Voice). On native the
+/// file goes to the user data directory (the counterpart of
+/// persistentDataPath) and `MOLY_SETTINGS_FILE` can override it (for
+/// verification); on wasm it goes to localStorage.
 pub fn settings_sections(
     settings: &LocalVolumeSettings,
 ) -> [(&'static str, serde_json::Value); 2] {
@@ -515,9 +563,12 @@ pub fn settings_sections(
     ]
 }
 
-/// JSON 文本 → 档。整体不是 JSON 对象 ⇒ `None`（调用方响亮回默认——真源
-/// 档读不出整档走构造默认的同律）；组或字段缺席 ⇒ 该位回默认（档是六
-/// 浮点的并集，半档也算档）；数值越界（手改档）⇒ 钳回 0..=1。
+/// JSON text -> settings. A document that is not a JSON object at all =>
+/// `None` (the caller falls back to the defaults loudly — the same rule as the
+/// original game, which uses the constructed defaults when the settings file
+/// cannot be read); an absent group or field => that slot takes the default
+/// (the settings are the union of six floats, so a partial file is still a
+/// file); an out-of-range value (hand-edited file) => clamped back to 0..=1.
 fn parse_volume_settings(text: &str) -> Option<LocalVolumeSettings> {
     let doc: serde_json::Value = serde_json::from_str(text).ok()?;
     if !doc.is_object() {
@@ -557,7 +608,7 @@ pub fn init_settings(mut commands: Commands, mut bus: ResMut<VolumeBus>) {
             match parse_volume_settings(&text) {
                 Some(settings) => (settings, "本地档"),
                 None => {
-                    warn!("[option] 本地档文本不是 JSON 对象，整档回默认（真源档读不出走构造默认的同律）");
+                    warn!("[option] settings text is not a JSON object; the whole settings fall back to the defaults (an unreadable settings file uses the constructed defaults)");
                     (LocalVolumeSettings::default(), "默认（档损坏）")
                 }
             }
@@ -692,8 +743,10 @@ fn stored_location() -> String {
 
 // ---- 流表与路由表 ----------------------------------------------------------
 
-/// 日志与拒绝信息里的资产名标签：非 ASCII 字符转码点写法。cue/包/档名空间
-/// 来自游戏资产，将来某次重提取可能带入表外字符；进日志的只有这份转写。
+/// Asset name label for logs and refusal messages: non-ASCII characters are
+/// written as code points. The cue/package/phenomenon name spaces come from
+/// game assets and a future re-extraction may bring in characters outside the
+/// expected set; only this encoded form goes into the logs.
 fn label(name: &str) -> String {
     name.chars()
         .map(|c| {
@@ -791,17 +844,22 @@ struct PhenomenonAudio {
 /// 环境音选行的结果。
 enum AmbientRoute<'a> {
     Play(&'a RouteCue),
-    /// 现象没有主表行：真源记错误并停。
+    /// The phenomenon has no master table row: the original game logs an
+    /// error and stops.
     NoMaster,
-    /// 该站既没有本现象的行也没有「其它」行：真源取到空名，只停不放。
-    /// `site_has_rows` = 该站在表里有别的行（真源这时不记错误）。
+    /// The site has neither a row for this phenomenon nor an "other" row: the
+    /// original game gets an empty name and only stops, without playing.
+    /// `site_has_rows` = the site has other rows in the table (the original
+    /// game logs no error in that case).
     NoRow {
         site_has_rows: bool,
     },
 }
 
-/// 选曲路由：BGM 与区域环境音各自独立（真源两个管理器各查各的表），都按
-/// 「站点 × 现象」现算，不在装载期折成单站的表。
+/// Track routing: BGM and area ambience are independent (the two managers of
+/// the original game each query their own table) and both are computed from
+/// "site x phenomenon" at run time, not folded into a single-site table at
+/// load.
 #[derive(Resource)]
 pub struct Routing {
     /// (siteId, 亮度档) → BGM 路由（站点 BGM 表）。换曲判定按 cue 名：
@@ -809,8 +867,10 @@ pub struct Routing {
     site_bgms: HashMap<(i64, Brightness), RouteCue>,
     /// siteId → 「其它」条件的环境音行（同站取第一行）。
     site_sound_fallbacks: HashMap<i64, RouteCue>,
-    /// 现象环境音表里有任何一行的站（真源对「该站一行都没有」记错误，对
-    /// 「有行但本现象与其它条件都不中」只取到空名、不记错误）。
+    /// Sites with any row in the phenomenon ambience table (the original game
+    /// logs an error when "the site has no row at all" and only gets an empty
+    /// name, without an error, when rows exist but neither this phenomenon nor
+    /// the "other" condition matches).
     sites_with_sounds: HashSet<i64>,
     /// 档名 → 该档的音频面。
     phenomena: HashMap<String, PhenomenonAudio>,
@@ -834,9 +894,10 @@ impl Routing {
             .unwrap_or_else(|| panic!("音频路由表里没有档 {}", label(name)))
     }
 
-    /// 默认 BGM 选曲（真源 `PlayDefaultBGMAsync`，入参现象 id 由站点控制器给：
-    /// 配送类站点给配送现象 id，其余站点给该站当前现象）。`Err` = 真源这一支
-    /// 查不到行、不起播。
+    /// The default BGM selection (`PlayDefaultBGMAsync`; the site controller
+    /// supplies the input phenomenon id: delivery-type sites pass the delivery
+    /// phenomenon id, other sites the site's current phenomenon). `Err` = this
+    /// branch finds no row and nothing starts.
     fn bgm_route(
         &self,
         site: &SiteActive,
@@ -871,8 +932,9 @@ impl Routing {
         })
     }
 
-    /// 现象环境音选行（真源 `GetSiteSEName`）：该站有本现象的行取第一行，
-    /// 否则取该站「其它」条件的第一行。站点类型门在调用方。
+    /// Phenomenon ambience row selection (`GetSiteSEName`): if the site has
+    /// rows for this phenomenon, take the first; otherwise take the first row
+    /// with the site's "other" condition. The site-type gate is at the caller.
     fn ambient_route(&self, site_id: i64, phenomenon: &str) -> AmbientRoute<'_> {
         let entry = self.phenomenon(phenomenon);
         if entry.master_brightness.is_none() {
@@ -1151,7 +1213,8 @@ fn parse_routing(index: &serde_json::Value, loops: &serde_json::Value) -> Routin
             }
         }
     }
-    // 站点「其它」条件的环境音行（同站取第一行，与真源 FirstOrDefault 同）。
+    // The site's "other" condition ambience rows (first row per site, the
+    // same as FirstOrDefault in the original game).
     let mut site_sound_fallbacks: HashMap<i64, RouteCue> = HashMap::new();
     for row in index["siteSoundFallbacks"]
         .as_array()
@@ -1167,8 +1230,9 @@ fn parse_routing(index: &serde_json::Value, loops: &serde_json::Value) -> Routin
         .unwrap_or_else(|| panic!("phenomena 不是对象表"));
     let mut phenomena: HashMap<String, PhenomenonAudio> = HashMap::new();
     for (name, entry) in entries {
-        // master 为 null 是配送祭会场那档（配送判据在客户端配置里，提取侧
-        // 「无主表行」就是它的形）。
+        // A null master is the delivery phenomenon of the festival venue (the
+        // delivery id lives in the client configuration; in this table "no
+        // master row" is its form).
         let master_brightness = entry["master"].as_object().map(|master| {
             let value = master["brightnessType"]
                 .as_str()
@@ -1333,9 +1397,9 @@ fn parse_streams(loops: &serde_json::Value, base: &str) -> Streams {
             }
         }
     }
-    let streams = Streams(streams.into_iter().map(|(k, (_, v))| (k, v)).collect());
+    
 
-    streams
+    Streams(streams.into_iter().map(|(k, (_, v))| (k, v)).collect())
 }
 
 /// 提取侧序列导出的版本（`sequenceExport.version`）。别的版本号响亮拒绝：
@@ -1355,24 +1419,29 @@ struct SubStream {
     loop_end: f64,
 }
 
-/// 一轨的 noteOn 指向（只区分消费侧移植了的那一种形状）。
+/// The noteOn target of one track (only the one shape the playback side
+/// supports is distinguished).
 #[derive(Clone, Debug)]
 enum NoteOn {
-    /// noteOn → synth → 恰一条波形引用；`subsong` 是解码器的流号（外存
-    /// 波形没有流号）。
+    /// noteOn -> synth -> exactly one waveform reference; `subsong` is the
+    /// decoder's stream number (stored waveforms have no stream number).
     Waveform { subsong: Option<i64> },
-    /// 其余形状（synth 引用多条、嵌套 synth、noteOn 指向序列……）：未移植。
+    /// Every other shape (a synth referencing several waveforms, a nested
+    /// synth, a noteOn pointing at a sequence, ...): not supported.
     Other(String),
 }
 
-/// 序列的一轨。
+/// One track of a sequence.
 #[derive(Clone, Debug)]
 struct SequenceTrack {
-    /// 轨号（cue 表的轨行号）：顺序表里存的就是它。
+    /// Track number (the cue sheet's track row index): this is what the order
+    /// table stores.
     track_index: u16,
-    /// 起播延迟，微秒（毫秒项 ×1000 + 微秒项，提取侧已合算）。
+    /// Start delay in microseconds (millisecond term ×1000 + microsecond term,
+    /// already combined by the asset export).
     start_delay_us: i64,
-    /// 事件程序里提取侧没解码的事件码。非空 = 这一轨还有别的事，未移植。
+    /// Event codes the asset export did not decode from the event program.
+    /// Non-empty = this track does more than is supported.
     events_not_decoded: Vec<i64>,
     note_ons: Vec<NoteOn>,
 }
@@ -1718,7 +1787,7 @@ pub struct CuePlan {
 }
 
 /// The plan of a structured cue; `Err` names what of its structure is not
-/// ported.
+/// supported.
 fn structured_plan(
     index: &SequenceIndex,
     cue: &str,
@@ -1727,7 +1796,7 @@ fn structured_plan(
 ) -> Result<CuePlan, String> {
     let kind = SequenceKind::from_code(block.kind).ok_or_else(|| {
         format!(
-            "序列类型 {}（{}）的律本仓没有移植（移植了 0-4）",
+            "sequence type {} ({}) is not supported by this crate (types 0-4 are supported)",
             block.kind, block.type_name
         )
     })?;
@@ -1737,7 +1806,7 @@ fn structured_plan(
             .is_some_and(|version| version >= NO_REPEAT_HISTORY_FORMAT)
     {
         return Err(format!(
-            "不重复随机序列所在的 cue 表格式 {:#x} 用历史表选轨（本仓移植的是位置那一支）",
+            "a no-repeat random sequence in cue sheet format {:#x} selects tracks from a history table, which is not supported (this crate supports position-based selection)",
             block.acb_version.unwrap_or_default()
         ));
     }
@@ -1749,7 +1818,7 @@ fn structured_plan(
     }
     if block.action_tracks != 0 || block.plugin_tracks != 0 {
         return Err(format!(
-            "序列带动作轨 {} 条、插件轨 {} 条（未移植）",
+            "sequence has {} action track(s) and {} plugin track(s) (not supported)",
             block.action_tracks, block.plugin_tracks
         ));
     }
@@ -1964,14 +2033,19 @@ fn contextual_voice_package(cue: &str, tutorial: bool, birthday: bool) -> Option
     Some(format!("{prefix}{stem}"))
 }
 
-/// partvoice 路由表（partvoice.json 的消费切片）：说话者变体 → 变体语音
-/// 包、家具角色 → 单参包。真源链里包随说话者：主链参与者过变体门后
-/// **双载**（scenario 侧 + mysekai 侧各一份），蛋链家具角色无门单载——
-/// 这里只存包名，cue 在不在包里由流表判（真源 ExistsCueName 的对应物）。
+/// The partvoice routing table (the slice of partvoice.json consumed here):
+/// speaker variant -> variant voice package, furniture character -> a
+/// single-input package. In the original game's chain the package follows the
+/// speaker: a main-chain participant that passes the variant gate **loads
+/// both** (one on the scenario side and one on the MySekai side), while a
+/// fixture character of the egg chain has no gate and loads one — only package
+/// names are stored here, and whether a cue is in the package is decided by
+/// the stream table (the counterpart of ExistsCueName).
 #[derive(Resource)]
 pub struct PartVoiceMap {
-    /// characterUnitId → 主链路由（门过=双包，门拒=具名理由——真源对
-    /// 门拒者不载任何包）。
+    /// characterUnitId -> main-chain route (gate passed = two packages; gate
+    /// refused = a named reason — the original game loads no package for a
+    /// refused participant).
     participants: HashMap<i32, ParticipantRoute>,
     /// mysekaiFixtureId → 蛋链单参包名。
     fixtures: HashMap<i32, String>,
@@ -1982,7 +2056,8 @@ enum ParticipantRoute {
     /// 门过：两份包名（扁平形，与流表键同构；scenario 侧包在流表里可以
     /// 还没解出——提取侧族在途时 cue 查不到，走缺 cue 具名）。
     Packages { scenario: String, mysekai: String },
-    /// 门拒：理由具名（真源静默不载包；此处把理由带到跳过日志）。
+    /// Gate refused: the reason is named (the original game silently loads no
+    /// package; here the reason goes into the skip log).
     Gated(String),
 }
 
@@ -2043,9 +2118,11 @@ fn field_f64(row: &serde_json::Value, key: &str) -> f64 {
 
 // ---- BGM 通道 ---------------------------------------------------------------
 
-/// BGM 一路在响的声音。两段式：intro 一次性段（循环起点之前）+ loop 常驻段
-/// （生成即驻停，intro 到点放行）——真源 cue 的循环区间由播放器逐样本接，
-/// 这边用两个 sink 交近似（见 [`BGM_HANDOFF_LEAD_SECONDS`]）。
+/// A sounding BGM voice. Two-part: a one-shot intro part (before the loop
+/// start) + a resident loop part (created parked, released when the intro
+/// reaches its point) — the cue player splices the cue's loop range
+/// sample by sample, while this crate approximates the handover with two sinks
+/// (see [`BGM_HANDOFF_LEAD_SECONDS`]).
 struct BgmVoice {
     cue: String,
     intro: Option<Entity>,
@@ -2348,7 +2425,8 @@ pub fn advance_bgm(
         return;
     }
     let key = (site.site_id, phenomenon.0.clone());
-    // 唱片设定只在住宅类站点查（真源 TryPlayUserSettingBGM 的类别门）。
+    // The record setting is checked only at housing-type sites (the category
+    // gate of TryPlayUserSettingBGM).
     let music_setting = matches!(
         site.category.as_str(),
         CATEGORY_HOUSING_HOME | CATEGORY_HOUSING_ROOM
@@ -2394,7 +2472,7 @@ pub fn advance_bgm(
         Err(reason) => {
             if channel.refused_for.as_ref() != Some(&key) {
                 error!(
-                    "[audio] BGM 不换：站点 {} · 档 {}：{reason}（真源这一支不起播，现声照响）",
+                    "[audio] BGM unchanged: site {} · phenomenon {}: {reason} (no playback on this branch; the current sound keeps playing)",
                     site.site_id,
                     label(&phenomenon.0)
                 );
@@ -2403,7 +2481,8 @@ pub fn advance_bgm(
             return;
         }
     };
-    // 换曲判定：按 cue 名（真源同名 cue 不重放）。
+    // Switch decision: by cue name (a cue with the same name does not
+    // restart).
     if channel
         .voice
         .as_ref()
@@ -2538,15 +2617,18 @@ pub fn advance_bgm(
 
 // ---- 区域环境音通道 ----------------------------------------------------------
 
-/// 环境音通道运行态：一路 cue 播放（真源现象 SE 管理器记着的那一个播放
-/// id），每次调用先停再放（同 cue 也从头放——真源无差别 Stop+Play）。
+/// Ambience channel state: one cue playback (the playback id the original
+/// game's phenomenon SE manager keeps), stopped before every call and then
+/// started again (the same cue also restarts from the top — Stop+Play without
+/// distinction).
 #[derive(Resource, Default)]
 pub struct AmbientChannel {
     /// The cue playback entity (its sounding tracks are its children).
     playback: Option<Entity>,
-    /// 已处理到的天气提交序号（每次真实提交＝真源一次现象 SE 调用）。
+    /// The weather commit sequence number processed so far (every real
+    /// commit equals one phenomenon SE call in the original game).
     handled_commit: Option<u64>,
-    /// 在响的 cue（账目用）。
+    /// The cue that is sounding (for accounting).
     playing: Option<String>,
 }
 
@@ -2590,7 +2672,8 @@ pub fn advance_ambient(
     }
     channel.handled_commit = Some(serial);
     let now = time.elapsed_secs_f64();
-    // 真源每一支都先停旧声（在跑的序列连同延迟里的轨一起停）。
+    // Every branch stops the old sound first (a running sequence together
+    // with the tracks still in their delay).
     if let Some(playback) = channel.playback.take() {
         if let Ok(mut entity_commands) = commands.get_entity(playback) {
             entity_commands.despawn();
@@ -2604,7 +2687,7 @@ pub fn advance_ambient(
     let site_id = i64::from(site.site_id);
     if !plays_site_phenomena_sound(&site.site_type) {
         info!(
-            "环境音停：站点 {}（{}）不在现象环境音门内（真源只在草原、海岸、花园、纪念地四类站点放）",
+            "ambience stop: site {} ({}) is outside the phenomenon ambience gate (only the grassland, shore, flower garden and memorial place site types play)",
             site.site_id, site.site_type
         );
         return;
@@ -2613,7 +2696,7 @@ pub fn advance_ambient(
         AmbientRoute::Play(route) => route,
         AmbientRoute::NoMaster => {
             error!(
-                "[audio] 环境音停：站点 {site_id} · 档 {} 没有现象主表行（真源记错误并停）",
+                "[audio] ambience stop: site {site_id} · phenomenon {} has no phenomenon master table row (the original game logs an error and stops)",
                 label(&committed.name)
             );
             return;
@@ -2622,7 +2705,7 @@ pub fn advance_ambient(
             site_has_rows: false,
         } => {
             error!(
-                "[audio] 环境音停：站点 {site_id} 既没有档 {} 的行也没有「其它」行，该站在现象环境音表里一行都没有（真源记错误、取到空名，只停不放）",
+                "[audio] ambience stop: site {site_id} has neither a row for phenomenon {} nor an \"other\" row, and has no row at all in the phenomenon ambience table (the original game logs an error, gets an empty name and only stops, without playing)",
                 label(&committed.name)
             );
             return;
@@ -2631,7 +2714,7 @@ pub fn advance_ambient(
             site_has_rows: true,
         } => {
             info!(
-                "环境音停：站点 {site_id} 既没有档 {} 的行也没有「其它」行（真源取到空名，只停不放，不记错误）",
+                "ambience stop: site {site_id} has neither a row for phenomenon {} nor an \"other\" row (the original game gets an empty name, only stops without playing, and logs no error)",
                 label(&committed.name)
             );
             return;
@@ -2641,7 +2724,7 @@ pub fn advance_ambient(
         Ok(plan) => plan,
         Err(reason) => {
             error!(
-                "[audio] 环境音拒绝：站点 {site_id} · 档 {} 的 cue {} @ {}：{reason}；不拿其中一条波形顶替",
+                "[audio] ambience refused: site {site_id} · phenomenon {} cue {} @ {}: {reason}; one of its waveforms is not used as a substitute",
                 label(&committed.name),
                 label(&route.cue),
                 label(&route.package),
@@ -2666,7 +2749,7 @@ pub fn advance_ambient(
     );
     if let Some(parameters) = &plan.not_consumed {
         info!(
-            "环境音 cue {} 不进声音的参数：{parameters}",
+            "ambience cue {} parameters that do not reach the sound: {parameters}",
             label(&route.cue)
         );
     }
@@ -2693,7 +2776,6 @@ pub fn advance_ambient(
 }
 
 /// Timeline SE clips start their cue through this.
-#[allow(dead_code)]
 /// Start a timeline's SE clip as the middleware plays the cue (plain or a
 /// sequence of type 0-4), with the waveforms the timeline prepared from
 /// [`Routing::cue_asset_paths`] (track order). Returns the playback entity:
@@ -2747,15 +2829,20 @@ pub struct SourcePositionOffset(pub Vec3);
 
 // ---- A 套邻近环境音管理器 -----------------------------------------------------
 
-/// 站点场景侧的声源（真源声源对象的等价物）：cue + 包名 + 最大距离。
-/// 位置取实体的全局变换。游戏内容里声源不挂在家具 prefab 上（全部站点
-/// 合计恰一处，草原站瀑布），由 `site_sound` 模块从站点侧车的组件表挂
-/// 上展开后的场景实体；包名侧车里没有，挂组件时补共享 SE 包。
+/// A sound source on the site scene side (the counterpart of the original
+/// game's sound source object): cue + package name + max distance. The
+/// position is the entity's global transform. In the game content a sound
+/// source is not attached to a furniture prefab (exactly one site in total,
+/// the waterfall at the grassland site); the `site_sound` module attaches it
+/// to the expanded scene entity from the site sidecar's component table. The
+/// sidecar has no package name, so the shared SE package is filled in when
+/// the component is attached.
 #[derive(Component)]
 pub struct SoundObject {
     pub cue: String,
     pub package: String,
-    /// 距离调音的截断距离；真源构造默认 10.0。
+    /// Cutoff distance of the distance tuning; the constructor default is
+    /// 10.0.
     pub max_distance: f32,
 }
 
@@ -2769,13 +2856,19 @@ impl Default for SoundObject {
     }
 }
 
-/// A 套运行态：单通道 + 前后名两字段 + 当前音量 + 就绪行是否已报。
+/// Set A state: a single channel + the two name fields + the current volume +
+/// whether the ready line has been reported.
 ///
-/// 名字两字段的语义（真源逐字段对齐）：`pre`/`current` 都空 = 未起播；
-/// 相等 = 同一声源持续（音量按 epsilon 门更新）；不等 = 换声源（停旧放新）。
-/// 出厂本体里换源支不回写 `current`（名字从此不再变，第二次换源按构造
-/// 不会再触发——该管理器整方法被热修补丁替换，本仓按可读体实现：换源
-/// 支补上 `current` 的回写，不补则换源支一次后永久失效）。
+/// Meaning of the two name fields: `pre`/`current` both empty = not started;
+/// equal = the same sound source continues (the volume updates when it passes
+/// the epsilon check); different = the source changes (stop the old, play the
+/// new). The built-in update does not write `current` back in its
+/// source-change branch (the name then never changes again and, by
+/// construction, a second source change never triggers — that manager's
+/// method is replaced by a hotfix at runtime). This crate implements it in
+/// readable form: the source-change branch writes `current` back; without
+/// that write the source-change branch would fail permanently after its first
+/// run.
 #[derive(Resource, Default)]
 pub struct ProximityState {
     pre: String,
@@ -2785,9 +2878,12 @@ pub struct ProximityState {
     announced: bool,
 }
 
-/// Update：A 套就近声源管理——每帧取「距离调音音量最大」的声源单通道
-/// 播放；起播音量为 0，次帧起由 epsilon 门拉到真值（真源起播即把 0 传给
-/// 播放器，音量走次帧更新那条路，一帧静默是源行为，照搬）。
+/// Update: the Set A nearest-source manager — every frame the source with the
+/// largest distance-tuned volume plays on the single channel; the start
+/// volume is 0 and from the next frame the epsilon check raises it to the real
+/// value (the original game passes 0 to the player at start, so the volume
+/// only arrives through the next frame's update; one frame of silence is the
+/// original behaviour and is reproduced).
 pub fn advance_proximity(
     mut commands: Commands,
     server: Res<AssetServer>,
@@ -2815,14 +2911,17 @@ pub fn advance_proximity(
     if sources.is_empty() {
         return;
     }
-    // 玩家视点位置：真源取 avatar 视变换的位置，这边是相机跟随的同一变换。
+    // Player viewpoint: the avatar's view transform, the same transform the
+    // camera follows.
     let Ok(avatar) = avatars.single() else {
         return;
     };
     let position = avatar.translation();
 
-    // 就近选择：音量严格大于才换（音量为 0 的声源在只有它时也选得上——
-    // 真源初值是 int 最小值重释为 float，即 f32::MIN）。
+    // Nearest selection: a source is taken only if its volume is strictly
+    // larger (a source with volume 0 is still selected when it is the only
+    // one — the initial value is the int minimum reinterpreted as a float,
+    // i.e. f32::MIN).
     let mut best: Option<(&SoundObject, f32)> = None;
     let mut best_volume = f32::MIN;
     for (source, transform, offset) in &sources {
@@ -2838,8 +2937,10 @@ pub fn advance_proximity(
     let audible_volume = volume * gate.factor();
 
     if state.pre.is_empty() || state.current.is_empty() {
-        // 起播支：起播音量 0（真源把 0 传给播放器，音量参数被丢弃），
-        // `current_volume` 不动（次帧的 epsilon 门负责拉到真值）。
+        // Start branch: start volume 0 (the original game passes 0 to the
+        // player and the volume argument is dropped); `current_volume` is not
+        // touched (the next frame's epsilon check raises it to the real
+        // value).
         state.playback = play_proximity(
             &mut commands,
             &server,
@@ -2855,9 +2956,10 @@ pub fn advance_proximity(
             volume
         );
     } else if state.pre == state.current {
-        // 同声源支：epsilon 门更新音量（门宽 = max(ε×8, 大者×1e-6)，
-        // 逐位对齐真源：绝对差过门才写，并按「用户音量 × 距离音量」更新
-        // 播放器）。
+        // Same-source branch: the epsilon check updates the volume (width =
+        // max(ε×8, larger×1e-6); the absolute difference is written only when
+        // it passes the check, and the player is updated with "user volume ×
+        // distance volume").
         let epsilon = (UNITY_MIN_FLOAT * 8.0)
             .max(state.current_volume.abs().max(audible_volume.abs()) * 1e-6);
         if (audible_volume - state.current_volume).abs() >= epsilon {
@@ -2875,7 +2977,8 @@ pub fn advance_proximity(
             }
         }
     } else {
-        // 换声源支：停旧放新（可读体补 `current` 回写，见类型注释）。
+        // Source-change branch: stop the old, play the new (this
+        // implementation writes `current` back; see the type comment).
         if let Some(old) = state.playback {
             if let Ok(mut entity_commands) = commands.get_entity(old) {
                 entity_commands.despawn();
@@ -2904,9 +3007,11 @@ fn proximity_volume(listener: Vec3, source: Vec3, max_distance: f32) -> f32 {
     (1.0 - distance / max_distance).clamp(0.0, 1.0)
 }
 
-/// A 套放一路 cue：起播音量 0（真源起播把 0 传给播放器）；cue 对不上流表
-/// 静默跳过（真源播放器同款——A 套的声源由站点场景喂，喂进来的 cue 不在
-/// 流表不拦运行）。
+/// Set A plays one cue: start volume 0 (the original game passes 0 to the
+/// player at start); a cue missing from the stream table is skipped silently
+/// (the same as the original player — Set A's sources are fed by the site
+/// scene, so a fed cue that is not in the stream table does not stop the
+/// run).
 fn play_proximity(
     commands: &mut Commands,
     server: &Res<AssetServer>,
@@ -2951,8 +3056,10 @@ pub enum VoiceSpeaker {
     Fixture(Entity),
 }
 
-/// 行推进处投递的 voice 行请求：对话域 spawn、本域同帧消费后拆除（真源
-/// 行内命令序 voice 先于 text——起播与文本行同拍，不隔帧）。
+/// A voice line request delivered where the line advances: the dialogue domain
+/// spawns it and this domain consumes and despawns it in the same frame (in
+/// the in-line command order voice precedes text, so playback and the text
+/// line are one beat, not separated by a frame).
 #[derive(Component)]
 pub struct VoiceLine {
     pub talk_id: i32,
@@ -3034,25 +3141,34 @@ impl VoiceChannel {
     }
 }
 
-/// 一条 voice 行的路由裁决：voice_ 族按 cue 定包（既有域，行为不变）；
-/// partvoice 族按说话者查路由表——真源链是「说话者变体 → 双载的包，cue
-/// 在包里才响」，此处同构：包名查表、cue 查流表，miss 与门拒分类具名。
+/// The routing decision for one voice line: the voice_ family fixes the
+/// package from the cue (existing domain, behaviour unchanged); the partvoice
+/// family looks up the routing table by speaker — the original game's chain is
+/// "speaker variant -> both loaded packages, sounding only if the cue is in
+/// one of them", mirrored here: the package is looked up in the table and the
+/// cue in the stream table, with misses and gate refusals named by class.
 enum VoiceRoute {
-    /// 流表命中：cue 在这个包里，起播。`partvoice` 标记走 partvoice 日志
-    /// 面（voice_ 族的日志面原样保留，账目不混）。
+    /// Stream table hit: the cue is in this package, play it. `partvoice`
+    /// marks the partvoice log face (the voice_ family's log face is kept
+    /// as is; the accounting is not mixed).
     Play { package: String, partvoice: bool },
-    /// voice_ 族的流表 miss：按语料账本分类具名（上游无包/未提取面）。
+    /// Stream table miss of the voice_ family: named by corpus class (no
+    /// package upstream / not extracted yet).
     TalkMiss { package: String },
-    /// partvoice 结构性不播：路由表缺席 / 指称缺失 / 说话者不在表 / 门拒
-    /// ——真源这几条都不载包（对话照走），此处具名记 info。
+    /// partvoice does not play by structure: routing table absent / speaker
+    /// reference missing / speaker not in the table / gate refused — the
+    /// original game loads no package in any of these cases (the dialogue
+    /// continues); each is logged at info with its reason.
     Refuse { reason: String },
-    /// partvoice cue 不在说话者的包里：真源 ExistsCueName miss 静默跳过，
-    /// 此处记 warn 并带上试过的包（缺 cue 账目的分类依据）。
+    /// The partvoice cue is not in the speaker's package: the original game's
+    /// ExistsCueName miss is skipped silently; here a warn names the packages
+    /// tried (the class of a missing cue for accounting).
     Miss { who: String, packages: Vec<String> },
 }
 
-/// 行 → 裁决。voice_ 族先判（前缀直出包名）；其余 cue 若非 partvoice
-/// 前缀也具名拒绝（词表外的 cue 不进任何族）。
+/// Line -> decision. The voice_ family is decided first (the prefix yields the
+/// package name directly); any other cue without the partvoice prefix is also
+/// refused by name (a cue outside the vocabulary belongs to no family).
 fn route_voice(
     line: &VoiceLine,
     partvoice: Option<&PartVoiceMap>,
@@ -3080,8 +3196,10 @@ fn route_voice(
             reason: "partvoice 路由表缺席，fail-closed".to_owned(),
         };
     };
-    // 说话者 → 试探包集：主链双包并试（真源双载，cue 落在哪份就播哪份），
-    // 蛋链单包；门拒/不在表=真源不载包，直接拒绝。
+    // Speaker -> candidate package set: the main chain tries both packages
+    // (both are loaded and the cue sounds from whichever holds it), the egg
+    // chain has one; a gate refusal or an absent entry means no package is
+    // loaded, so the line is refused.
     let (who, packages): (String, Vec<String>) = match line.who {
         Some(VoiceWho::Participant(id)) => match map.participants.get(&id) {
             None => {
@@ -3091,7 +3209,7 @@ fn route_voice(
             }
             Some(ParticipantRoute::Gated(reason)) => {
                 return VoiceRoute::Refuse {
-                    reason: format!("说话者 {id} 门拒（{reason}），真源不载包"),
+                    reason: format!("speaker {id} refused by the gate ({reason}); no package is loaded"),
                 }
             }
             Some(ParticipantRoute::Packages { scenario, mysekai }) => (
@@ -3168,10 +3286,13 @@ pub fn prefetch_voice(
     }
 }
 
-/// Update（对话链内、步进之后）：吃掉行请求——停旧声、查流表、起播或
-/// 具名跳过。缺 cue 真源同款是跳过且对话照走（ExistsCueName 无 else 无
-/// 日志），这里照做并按本仓纪律把跳过记响：上游无包的走语料账本具名，
-/// 其余不在表里的点名为未提取消费面，不静默不 panic。
+/// Update (inside the dialogue chain, after a step): consume line requests —
+/// stop the old sound, check the stream table, play or skip by name. A missing
+/// cue is skipped and the dialogue continues (ExistsCueName has no else and
+/// logs nothing); this crate does the same and logs every skip: a cue with no
+/// package upstream is named through the corpus ledger, and any other cue
+/// missing from the table is named as a not-yet-extracted consumption surface,
+/// without silence and without panicking.
 pub fn serve_voice(
     mut commands: Commands,
     time: Res<Time>,
@@ -3212,13 +3333,14 @@ pub fn serve_voice(
         return; // 流表未就绪：行请求留池等（对话能走到 voice 步时表早已就绪）
     };
     for (entity, line) in &lines {
-        // 单声道：先停旧声再查表（真源顺序——StopVoiceAll 在存在性判定前）。
+        // Monophonic: stop the old sound before the table check (the order
+        // is StopVoiceAll before the existence test).
         if let Some(old) = channel.sink.take() {
             if let Ok(mut entity_commands) = commands.get_entity(old) {
                 entity_commands.despawn();
             }
         }
-        match route_voice(&line, partvoice.as_deref(), &routing.streams, birthday.0.is_some(), birthday.1.is_some()) {
+        match route_voice(line, partvoice.as_deref(), &routing.streams, birthday.0.is_some(), birthday.1.is_some()) {
             VoiceRoute::Play { package, partvoice } => {
                 let Some(stream) = routing.streams.0.get(&(line.cue.clone(), package.clone()))
                 else {
@@ -3294,7 +3416,7 @@ pub fn serve_voice(
                     .is_some_and(|corpus| corpus.uncovered.iter().any(|cue| cue == &line.cue));
                 if named {
                     warn!(
-                        "talk voice 缺 cue：段 {} 步 {} cue {}——上游无包（语料账本具名，真源跳过同款）",
+                        "talk voice missing cue: talk {} step {} cue {} — no package upstream (named in the corpus ledger; skipped, the dialogue continues)",
                         line.talk_id,
                         line.step,
                         label(&line.cue),
@@ -3321,7 +3443,7 @@ pub fn serve_voice(
             VoiceRoute::Miss { who, packages } => {
                 let tried: Vec<String> = packages.iter().map(|p| label(p)).collect();
                 warn!(
-                    "partvoice 缺 cue：段 {} 步 {} cue {} 不在 {} 的包 [{}]（真源 ExistsCueName miss 静默跳过同款），对话照走",
+                    "partvoice missing cue: talk {} step {} cue {} is not in the package of {} [{}] (ExistsCueName miss, skipped); the dialogue continues",
                     line.talk_id,
                     line.step,
                     label(&line.cue),
@@ -3350,10 +3472,12 @@ fn themed_se_cue(cue: &str) -> &str {
     }
 }
 
-/// 公共 mysekai SE 包（loop.json 的包键形）：真源常量
-/// `MYSEKAI_COMMON_SE_NAME = "mysekai/sound/se/se_mysekai"`——一次性事件
-/// SE 的 cue 全部活在共享包 `se_mysekai` 里（A 套声源侧也用同一份：站点
-/// 场景喂入的声源 cue 不带包名，挂组件时由此补上）。
+/// The common MySekai SE package (the package key form in loop.json), from
+/// the constant `MYSEKAI_COMMON_SE_NAME = "mysekai/sound/se/se_mysekai"`: all
+/// one-shot event SE cues live in the shared package `se_mysekai` (Set A sound
+/// sources use the same one: a source cue fed by the site scene carries no
+/// package name, and this package is filled in when the component is
+/// attached).
 pub const SE_PACKAGE: &str = "mysekai__sound__se__se_mysekai";
 
 /// The family a one-shot request names (scene action -> Ingame, interface
@@ -3472,9 +3596,11 @@ fn plain_se_stream<'a>(streams: &'a Streams, cue: &str) -> Option<&'a StreamRow>
         .and_then(|package| streams.0.get(&(cue.to_owned(), package.to_owned())))
 }
 
-/// 一次性 SE 排空的排序锚：写者系统在各自插件里 `.before(Drain)` 自证
-/// 先于读者（写者签名不必出模块——有的写者参数里有私有类型，排序走集
-/// 不走系统名）。
+/// Ordering anchor for draining one-shot SE: every writer system orders
+/// itself `.before(Drain)` in its own plugin, which declares that it runs before
+/// the reader (a writer's signature need not leave its module — some writers take
+/// private types in their parameters, so ordering goes through the set, not
+/// the system name).
 #[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
 pub enum SeDrainSet {
     Drain,
@@ -3519,7 +3645,7 @@ pub fn advance_se(
         voice.preview = None;
     }
     let Some(routing) = routing else {
-        return; // 路由表未就绪：请求留队（就绪后排空，窗口照样去重）
+        return; // routing not ready: requests stay queued (drained once ready; the window still dedups)
     };
     // PlaySE: a table cue plays; Other plays its serialized name only when
     // that cue exists in a loaded bank (else the source logs an error and
@@ -3628,7 +3754,7 @@ pub fn advance_se(
         }) else {
             if channel.warned_missing.insert(request.cue.to_string()) {
                 warn!(
-                    "SE 跳过：cue {} 不在本快照的流表（fail-closed 跳过；除非真源的包里也没有这个 cue，这是提取/流表缺口；每 cue 只告警一次）",
+                    "SE skipped: cue {} is not in this snapshot's stream table (fail-closed skip; unless the package does not contain this cue either, this is an extraction/stream-table gap; warned once per cue)",
                     label(&request.cue)
                 );
             }
@@ -3639,7 +3765,7 @@ pub fn advance_se(
             Err(reason) => {
                 if channel.warned_missing.insert(request.cue.to_string()) {
                     error!(
-                        "SE 拒绝：cue {} @ {}：{reason}（不拿其中一条波形顶替；每 cue 只报一次）",
+                        "SE refused: cue {} @ {}: {reason} (one of its waveforms is not used as a substitute; reported once per cue)",
                         label(cue),
                         label(&package)
                     );
@@ -3674,15 +3800,15 @@ pub fn advance_se(
         channel.live.push(entity);
         channel.played += 1;
         debug!(
-            "SE 起播：{}（{} · {} {} 轨 · {} · 平铺 2D）",
+            "SE started: {} ({} · {} {} tracks · {} · flat 2D)",
             label(cue),
             request.source,
             plan.kind.label(),
             plan.voices.len(),
             if facts {
-                "音量＝SE 播放器 × cue 的类别 × 音量命令"
+                "volume = SE player × cue categories × volume commands"
             } else {
-                "cue 的类别与音量命令未导出：按请求的类"
+                "no cue categories or volume commands in the asset data: the request class applies"
             },
         );
     }
@@ -3772,11 +3898,11 @@ fn one_shot_finished_or_failed(
     false
 }
 
-// ---- 周期账目 ---------------------------------------------------------------
+// ---- periodic accounting ----------------------------------------------------
 
-/// Update（2s）：四条通道各一行——档→曲（BGM）、档→cue→音量（环境音，
-/// 平铺）、声源数→当前通道与音量（A 套）、请求/起播计数（一次性
-/// SE）。
+/// Update (every 2s): one line per channel — phenomenon -> track (BGM),
+/// phenomenon -> cue -> volume (ambience, flat), source count -> current
+/// channel and volume (Set A), request/start counts (one-shot SE).
 pub fn report(
     phenomenon: Res<CurrentPhenomenon>,
     site: Option<Res<SiteActive>>,
@@ -3791,7 +3917,7 @@ pub fn report(
     children: Query<&Children>,
 ) {
     if routing.is_none() {
-        return; // 路由表未就绪：parse 的就绪行是首条账目
+        return; // routing not ready: the parse's ready line is the first accounting line
     }
     let site_id = site.map_or_else(|| "未定".to_string(), |site| site.site_id.to_string());
     match &bgm.voice {
@@ -3863,9 +3989,11 @@ pub fn report(
     );
 }
 
-/// 音频域资源初始化。当前档资源在这里兜底建（天气插件两侧同挂后此兜底
-/// 照旧——`init_resource` 幂等，谁先谁建、值同为默认档）；通道运行态也在
-/// 此落位。
+/// Audio domain resource setup. The current-phenomenon resource gets a
+/// fallback here (after both sides attach the weather plugin this fallback
+/// stays: `init_resource` is idempotent, whichever runs first creates it, and
+/// the value is the same default); the channel state is placed here as
+/// well.
 pub fn install(app: &mut App) {
     app.init_resource::<VolumeBus>()
         .init_resource::<AudioGate>()

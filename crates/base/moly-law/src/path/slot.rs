@@ -1,15 +1,20 @@
-//! 一个行走 NPC 的路径，按行携带。
+//! The path of one walking NPC, carried as a row.
 //!
-//! 行走律每次收一行：该 NPC 的拐点表，按行走顺序。用行而不是「拐点池 +
-//! 偏移列」，是因为池形状带着一条类型层无法强制的不变式——偏移列必须恰比
-//! 行数长一、且从零开始——对不齐的池会用别的 NPC 的拐点应答而不是报错；
-//! 行不会错位，拐点随行走者走。
+//! The walking rule takes one row at a time: that NPC's corner table, in
+//! walking order. A row is used instead of "a corner pool + an offset column"
+//! because the pool shape carries an invariant the type layer cannot enforce —
+//! the offset column must be exactly one longer than the row count and start
+//! at zero — and a misaligned pool answers with another NPC's corners instead
+//! of failing; a row cannot shift, and its corners travel with the walker.
 //!
-//! 拐点刻意**不含**行走者自身位置。真源暴露的路径在下标 0 带着行走者的
-//! 位置（它的朝向代码于是读下标 1 当「前方拐点」），但那个位置是行走律
-//! 自己的跨帧状态，不是路径生产者该供给的东西——把状态抄进输出，只能抄到
-//! 一份滞留副本。行走律从持久位置出发按序穿过这些拐点，行的第 k 个拐点
-//! 对应源路径的第 k+1 个。
+//! The corners deliberately **exclude** the walker's own position. A path
+//! carrying the walker's position at index 0 (whose heading code therefore
+//! reads index 1 as the "forward corner") would embed the walking rule's own
+//! cross-frame state, which a path producer should not supply — copying state
+//! into the output only reproduces a stale copy. The walking rule starts from
+//! the persistent position and passes the corners in order: corner k of the
+//! row corresponds to corner k+1 of the path with the walker's position
+//! removed.
 
 /// 一个行走 NPC 的有序拐点表，不含行走者自身位置（理由见模块注释）。
 ///

@@ -61,7 +61,7 @@ pub struct Effects {
 impl Effects {
     /// Decodes from the file's bytes.
     pub fn from_json_str(bytes: &[u8]) -> Result<Self, EffectsError> {
-        let v = json::parse(bytes).map_err(|e| EffectsError(e))?;
+        let v = json::parse(bytes).map_err(EffectsError)?;
         Self::from_value(&v)
     }
 

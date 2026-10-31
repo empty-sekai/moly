@@ -187,9 +187,8 @@ pub fn parse(
     for (id, handle) in icons.environment_handles.clone() {
         match server.load_state(&handle) {
             LoadState::Loaded => { icons.environment_ready.insert(id); }
-            LoadState::Failed(error) => {
-                if icons.environment_failures.insert(id) { warn!("editor weather thumbnail {id} failed: {error:?}"); }
-            }
+            LoadState::Failed(error)
+                if icons.environment_failures.insert(id) => { warn!("editor weather thumbnail {id} failed: {error:?}"); }
             _ => {}
         }
     }

@@ -1,50 +1,69 @@
-//! SD角色上屏：名册成员的角色包/骨架装配，共享动作库。玩家的身体不走
-//! 这里（见 [`crate::player_avatar::body`]）。
+//! SD character on screen: character bundle/skeleton assembly for roster members
+//! and the shared motion library. The player's body does not go through here (see
+//! [`crate::player_avatar::body`]).
 //!
-//! 装载门形状与站点一致：请求 → 依赖到齐 → 展开 → 装配。名册成员
-//! （npc 域的实体）各自挂自己的角色包场景为子实体——成员实体持位置与
-//! 朝向，模型场景是它的孩子，位置的唯一写点因此不破：推进律仍是 npc
-//! 实体 Transform 的唯一写者，这里不碰成员的变换。
+//! The load gate has the same shape as sites: request → dependencies ready →
+//! expand → assemble. Each roster member (an entity of the npc domain) carries its
+//! own character bundle scene as a child entity — the member entity holds position
+//! and facing and the model scene is its child, so the single write point for
+//! position is preserved: the step rules remain the only writer of the npc entity
+//! Transform, and this module does not touch member transforms.
 //!
-//! 动画的绑定基础：剪辑按「骨名链」哈希（[`AnimationTargetId`]）寻的。
-//! 共享动作库的参考骨架与各角色包骨架在**参考根以下**的名链逐一相等
-//! （被库驱动的每一个骨都如此），但参考根自己的名字是建库那份基准
-//! 模型的，别的包各有各的根名。装配时把链首替换成库的参考根名，剪辑
-//! 即直接驱动各包，无需重定向——根名在运行时从库的 [`GltfNode`]
-//! （`is_animation_root`，恰一个）读出，不硬编码。glTF 装载器只给
-//! 「文件内含动画」的场景装目标组件，角色包不含动画，这里按装载器的
-//! 装配约定补齐：播放器落在动画根节点上，每个骨的目标指回播放器。
+//! Animation binding basis: clips are looked up by the bone-name chain
+//! ([`AnimationTargetId`]). Below the **reference root**, the shared motion
+//! library's reference skeleton and every character bundle skeleton have
+//! identical name chains (for every bone the library drives), but the reference
+//! root's own name comes from the base model the library was built on, and other
+//! bundles have their own root names. Assembly replaces the first link of the
+//! chain with the library's reference root name, so clips drive each bundle
+//! directly with no retargeting — the root name is read at runtime from the
+//! library's [`GltfNode`] (`is_animation_root`, exactly one) and not hard-coded.
+//! The glTF loader adds the target components only to scenes that contain an
+//! animation; character bundles contain none, so this module adds them following
+//! the loader's assembly convention: the player sits on the animation root node,
+//! and every bone's target points back to the player.
 //!
-//! 段的选择：移动相位（npc 域推进律的输出）在走播走姿族、驻留播待机
-//! 族、转体播转身族。族名：位移族取名册 locomotion 的两列；转身族取
-//! 转身律选出的基名（恒 `mov_cw_normal` 族——选段常量如此，与角色自身
-//! 的位移族无关）。
+//! Segment choice: the move phase (the npc domain step rules' output) plays the
+//! walk family while moving, the idle family while dwelling and the turn family
+//! while turning. Family names: the walk family uses the roster's locomotion
+//! columns; the turn family uses the base name chosen by the turn rules (always
+//! the `mov_cw_normal` family — the segment constants are fixed that way and do
+//! not depend on the character's own walk family).
 //!
-//! 换段照源的换段调用（`ChangeAnimationAsync(族名, hasExitTime, …,
-//! playEndMotion, 0.5)`）的段链：
-//! - 同族（段名去掉 `_S`/`_L`/`_E`/`_O` 后缀后相同）直接返回——在播的段
-//!   不重起；
-//! - 否则先播起始段 `族_S`，等 `UniTask.Delay(段长 / 速度)`（毫秒取整、
-//!   DeltaTime、Update 时点：创建帧不计，此后逐帧累加帧间隔，累计达到段
-//!   长的那一帧接段），再播循环段 `族_L`；起始段不在控制器里时两步都不
-//!   做（换段不发、等待立即返回），直接到 `_L`；
-//! - 每一步都是 `Animator.CrossFadeInFixedTime(段名, 0.5)`：固定秒数的
-//!   过渡、目标段从 0 起播；与上一次播的段同名即不发。
-//! - 新的换段调用取消上一条段链：还在等起始段的旧链不再接它的 `_L`。
+//! Segment switching follows the engine's switch call
+//! (`ChangeAnimationAsync(family, hasExitTime, …, playEndMotion, 0.5)`) chain:
+//! - Same family (equal after stripping the `_S`/`_L`/`_E`/`_O` suffixes) returns
+//!   immediately — the playing segment is not restarted;
+//! - otherwise it first plays the start segment `family_S`, waits
+//!   `UniTask.Delay(segment length / speed)` (rounded to milliseconds, DeltaTime,
+//!   at the Update timing: the creation frame does not count, afterwards frame
+//!   deltas accumulate and the segment is joined on the frame the sum reaches the
+//!   segment length), then plays the loop segment `family_L`; when the start
+//!   segment is not in the controller neither step happens (no switch is sent and
+//!   the wait returns immediately), going straight to `_L`;
+//! - every step is `Animator.CrossFadeInFixedTime(segment name, 0.5)`: a
+//!   fixed-duration transition, with the target segment starting from 0; a segment
+//!   equal to the previous one is not sent.
+//! - a new switch call cancels the previous segment chain: an old chain still
+//!   waiting for its start segment no longer receives its `_L`.
 //!
-//! `hasExitTime` 是这个换段调用的实参，不是控制器配置：它为假且
-//! `playEndMotion` 为真时，先播上一族的结束段 `_E` 并等它播完；为真则
-//! 跳过。位移的换段调用全部不播结束段——走姿与待机换段不是
-//! `hasExitTime` 为真、就是 `playEndMotion` 为假，转身同样——所以这里没有
-//! `_E`。SD 角色的控制器没有资产侧过渡：31 个控制器每个一层、1179 个
-//! 状态，状态过渡与 AnyState 过渡全为 0、状态速度全为 1，exit time、过渡
-//! 时长、offset、打断设置无处可读，也无处可用——源的过渡只有上面这条
-//! 代码发起的动态过渡。
+//! `hasExitTime` is an argument of this switch call, not a controller setting: when
+//! it is false and `playEndMotion` is true, the previous family's end segment `_E`
+//! plays first and the switch waits for it to finish; when true it is skipped. All
+//! movement switch calls play no end segment — walk/idle switches have either
+//! `hasExitTime` true or `playEndMotion` false, and the same holds for turns — so
+//! there is no `_E` here. SD controllers have no asset-side transitions: each of
+//! the 31 controllers has one layer and 1179 states, state transitions and AnyState
+//! transitions are all 0, state speeds are all 1, and exit time, transition
+//! duration, offset and interruption settings are neither readable nor usable —
+//! the only transitions are the dynamic ones started by the code above.
 //!
-//! 过渡的权重：引擎的 [`AnimationTransitions`] 把旧段权重从 1 线性降到
-//! 0、新段拿余量，与 CrossFade 的线性权重同形，这里沿用它。未移植的是
-//! 过渡中途再次 CrossFade 时引擎的打断语义（引擎本体行为）：本仓按
-//! [`AnimationTransitions`] 把在淡出的段逐层叠放。
+//! Transition weights: the engine's [`AnimationTransitions`] linearly lowers the
+//! old segment's weight from 1 to 0 and the new segment takes the remainder, the
+//! same shape as CrossFade's linear weights, and that is used here. Not supported:
+//! the engine's interruption semantics for a second CrossFade in the middle of a
+//! transition (engine behaviour): here, following [`AnimationTransitions`], segments
+//! that are fading out are stacked layer by layer.
 
 use crate::ui_inputs::UniTaskDelay;
 use crate::npc::{CharacterUnitId, MotionClips, MotionPhase};
@@ -63,8 +82,9 @@ use moly_law::path::TurnMotion;
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// 段间过渡时长：真源换段调用逐字面量传的过渡参数（0.5 秒），所有换段
-/// 共用——待机/走姿/转身之间的每一次切换都是它。
+/// Segment transition duration: the transition argument the switch call passes as a
+/// literal (0.5 s), shared by every switch — every change between idle, walk and
+/// turn.
 pub const SEGMENT_BLEND: Duration = Duration::from_millis(500);
 
 /// 位移换段调用传的播放速度：走姿、待机、转身的调用点都传 1。起始段的
@@ -775,7 +795,7 @@ pub fn drive(
             MotionKind::TurnL(motion) => format!("turn_l({})", motion.label()),
         };
         let from = old
-            .map(|kind| word(kind))
+            .map(&word)
             .unwrap_or_else(|| "未起播".to_owned());
         debug!(
             "[npc unit={}] 动画段 {from} -> {}（{}）",

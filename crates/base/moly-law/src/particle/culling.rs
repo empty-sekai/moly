@@ -221,10 +221,10 @@ fn min_max(range: (f32, f32), value: f32) -> (f32, f32) {
 /// The vector Horner evaluation of `CalculateCurveRangesValue`.
 fn horner(c: [f32; 4], t: f32) -> f32 {
     let mut v = c[0] * t;
-    v = c[1] + v;
-    v = t * v;
-    v = c[2] + v;
-    v = t * v;
+    v += c[1];
+    v *= t;
+    v += c[2];
+    v *= t;
     c[3] + v
 }
 
@@ -333,7 +333,7 @@ fn set_trs(position: [f32; 3], q: [f32; 4], scale: [f32; 3]) -> [f32; 16] {
     let mut m = quaternion_to_matrix(q);
     for c in 0..3 {
         for r in 0..3 {
-            m[c * 4 + r] = scale[c] * m[c * 4 + r];
+            m[c * 4 + r] *= scale[c];
         }
     }
     m[12] = position[0];
@@ -793,7 +793,7 @@ pub fn update_bounds(config: &BoundsConfig, state: &BoundsState<'_>) -> Result<B
             if !le_cc(smax, SPEED_FLOOR) {
                 let t = config.length_scale.abs() * size.1;
                 let t = t / smax;
-                vs = vs + t;
+                vs += t;
             }
             let k = smax * vs;
             mn = [mn[0] - k, mn[1] - k, mn[2] - k];
@@ -834,7 +834,7 @@ pub fn update_bounds(config: &BoundsConfig, state: &BoundsState<'_>) -> Result<B
             return Err(BoundsRefused::SizeBySpeedModule);
         }
         if render_mode == BoundsRenderMode::Mesh {
-            s10 = s10 * mesh[axis];
+            s10 *= mesh[axis];
         }
         if lt(s8, s10) { s8 = s10; }
     }
@@ -847,12 +847,12 @@ pub fn update_bounds(config: &BoundsConfig, state: &BoundsState<'_>) -> Result<B
         mn = [mn[0] - k, mn[1] - k, mn[2] - k];
         mx = [mx[0] + k, k + mx[1], k + mx[2]];
     }
-    pad = pad * PAD_FACTOR;
+    pad *= PAD_FACTOR;
     if matches!(config.space, BoundsSpace::World | BoundsSpace::Custom) {
         let sc = state.scale.map(fabs_sel);
         let s2 = if lt(sc[1], sc[2]) { sc[2] } else { sc[1] };
         let s1 = if lt(sc[0], s2) { s2 } else { sc[0] };
-        pad = pad * s1;
+        pad *= s1;
     }
     if config.uv_sprites {
         return Err(BoundsRefused::SpriteSheet);
@@ -966,9 +966,9 @@ pub fn frustum_planes(culling: &[f32; 16], camera: &FrustumCamera) -> ([Plane; 6
     let (px, py, pz) = (inv[12], inv[13], inv[14]);
     let ln = ((fx * fx + fy * fy) + fz * fz).sqrt();
     if !le_cc(ln, EPSILON) {
-        fx = fx / ln;
-        fy = fy / ln;
-        fz = fz / ln;
+        fx /= ln;
+        fy /= ln;
+        fz /= ln;
     } else {
         // The translation unit's default axis is all zero.
         (fx, fy, fz) = (0.0, 0.0, 0.0);

@@ -457,7 +457,7 @@ impl<'a> Prefab<'a> {
                 found.len()
             ));
         };
-        let instance: &'a Value = *instance;
+        let instance: &'a Value = instance;
         let fields = &instance["fields"];
         if fields
             .get("m_Enabled")

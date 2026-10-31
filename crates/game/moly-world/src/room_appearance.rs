@@ -373,7 +373,7 @@ fn format_pattern(pattern: &str, bundle: &str, color_id: u32) -> Result<String, 
         .replace("{0}", bundle)
         .replace("{1}", &color_id.to_string());
     if formatted.contains('{') || formatted.contains('}') {
-        return Err(format!("房间外观贴图名模式 {pattern} 含未移植的占位符"));
+        return Err(format!("room appearance texture name pattern {pattern} contains an unsupported placeholder"));
     }
     Ok(formatted)
 }
@@ -389,7 +389,7 @@ fn match_single_group<'a>(name: &'a str, pattern: &str) -> Result<Option<&'a str
     // inline options) fails here and is refused by name: the caller logs the
     // error and the room keeps its module materials.
     let regex = regex::Regex::new(pattern)
-        .map_err(|error| format!("房间外观贴图名模式 {pattern} 不是可移植的正则：{error}"))?;
+        .map_err(|error| format!("room appearance texture name pattern {pattern} is not a supported regular expression: {error}"))?;
     Ok(regex
         .captures(name)
         .map(|captures| captures.get(1).map_or("", |group| group.as_str())))

@@ -647,10 +647,10 @@ pub fn setup(
         ScrollPosition::default(),
     ));
 
-    // Source-shaped FixtureDescriptionDialog.  The source is a Common1ButtonDialog
-    // with two pages (FixtureDescription / FixtureReactionDescription), not
+    // FixtureDescriptionDialog.  It is a Common1ButtonDialog with two pages
+    // (FixtureDescription / FixtureReactionDescription), not
     // ScreenLayerMysekaiInfo.  Geometry here is responsive Bevy chrome; page
-    // ownership, data and CharacterBand structure follow the decompiled source.
+    // ownership, data and CharacterBand structure match their contracts.
     let fixture_dialog = c
         .spawn((
             Node {
@@ -1535,13 +1535,12 @@ pub fn refresh(
                     }
                 }
             }
-            Region::DetailScroll => {
-                if cache.detail != Some((state.selected, catalog.revision)) {
+            Region::DetailScroll
+                if cache.detail != Some((state.selected, catalog.revision)) => {
                     if let Some(mut scroll) = scroll {
                         scroll.y = 0.;
                     }
                 }
-            }
             _ => {}
         }
     }

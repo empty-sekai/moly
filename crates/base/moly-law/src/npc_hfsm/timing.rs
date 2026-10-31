@@ -10,13 +10,13 @@
 //!   `Rest` upper state (the controller's own rest is `PauseTime`).
 //! - [`IDLE_DURATION_MIN`] / [`IDLE_DURATION_MAX`]: the fallback idle's
 //!   pause range; the fallback draws its pause when it is built.
-//! - [`TWEET_SECONDS`], [`NO_TALK_WAIT_SECONDS`], [`GREETING_*`],
-//!   [`ENTRY_STANDBY_SECONDS`], [`GATHERING_*`], [`RECRUIT_RETRY_*`],
+//! - [`TWEET_SECONDS`], [`NO_TALK_WAIT_SECONDS`], `GREETING_*`,
+//!   [`ENTRY_STANDBY_SECONDS`], `GATHERING_*`, `RECRUIT_RETRY_*`,
 //!   [`COMMUNICATION_WHILE_DOING_WAIT_TIME_KEY`] and
 //!   [`SUB_COMMUNICATION_CARRY_GRACE_SECONDS`]: the lower states' own
 //!   durations and the one config key among them.
 //! - [`ACTION_POINT_ARRIVAL_STOPPING_DISTANCE`], [`ALREADY_ARRIVED_DISTANCE`],
-//!   [`NAVMESH_WAIT_TIMEOUT_SECONDS`], [`RANDOM_WALK_*`] and [`AVOID_*`]: the
+//!   [`NAVMESH_WAIT_TIMEOUT_SECONDS`], `RANDOM_WALK_*` and `AVOID_*`: the
 //!   upper states' mover constants.
 
 /// The upper transitions one frame may make before the character parks.

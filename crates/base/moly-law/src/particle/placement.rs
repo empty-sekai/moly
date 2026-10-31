@@ -20,7 +20,7 @@
 //! words by one unit in the last place (0x3f3504f3 becomes 0x3f3504f4), which is
 //! why the stored rotation is not the Euler conversion's output.
 //!
-//! The device `sincosf` is bionic's ([`super::device_libm::sincosf`]).
+//! The device `sincosf` is bionic's (`super::device_libm::sincosf`).
 use super::device_libm::sincosf;
 use super::owner::SourceTrs;
 

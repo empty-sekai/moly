@@ -224,11 +224,11 @@ fn advance_frame_entry(system: &mut Runtime, dt: f32, emitting: bool, ctx: &Cont
 }
 
 /// Native update route the source selects for a system. Ordinary systems
-/// advance through the incremental Update1 path this runtime transcribes.
+/// advance through the incremental Update1 path this runtime implements.
 /// Procedural systems (DetermineSupportsProcedural true) take the same
 /// incremental update every frame; only their warm (Play's, Update flags 3,
 /// and a script Simulate restart's, flags 2) evaluates them from time, which
-/// is not transcribed, so a system that warms that way stays on the legacy
+/// is not implemented, so a system that warms that way stays on the legacy
 /// step. `Undecided` names the control the exported block cannot settle.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SourceRoute {
@@ -558,7 +558,7 @@ pub fn set_random_seed(system: &mut Runtime, value: u32) {
 /// stopped system: with prewarm on it writes nothing (the word keeps its
 /// construction zero), otherwise the start delay curve evaluated at time zero
 /// with a random factor from the system seed's hash, which for a constant is
-/// its scalar. `None` for a random delay (the seed hash is not transcribed).
+/// its scalar. `None` for a random delay (the seed hash is not implemented).
 pub fn play_start_delay(emitter: &EmitterParams) -> Option<f32> {
     if emitter.prewarm {
         return Some(0.0);
@@ -705,8 +705,8 @@ fn first_play_lifetime(emitter: &EmitterParams) -> Result<Lifetime, &'static str
     match emitter.start.lifetime {
         moly_law::particle::MinMaxCurve::Constant(v) => Ok(Lifetime::Constant(v)),
         moly_law::particle::MinMaxCurve::TwoConstants { min, max } => Ok(Lifetime::TwoConstants { min, max }),
-        // Curve lifetimes go through CalculateCurveRangesValue, not transcribed.
-        _ => Err("curve start lifetime: prewarm range not transcribed"),
+        // Curve lifetimes go through CalculateCurveRangesValue, not implemented.
+        _ => Err("curve start lifetime: prewarm range not implemented"),
     }
 }
 
@@ -825,16 +825,16 @@ pub fn uses_rotation_3d(emitter: &EmitterParams, initial_enabled: bool) -> Optio
 /// Without 3D rotation the source mesh renderer turns each particle by its Z
 /// rotation about the particle's axis of rotation, composed with an angle the
 /// draw call passes for its render space (ParticleSystemRenderer's
-/// CalculateMeshParticleTransform). The transcribed kernel body is the one
+/// CalculateMeshParticleTransform). The implemented kernel body is the one
 /// View, World and Local share (`particle_geometry::AxisBody`); the render
 /// spaces below are the ones it does not cover.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MeshRotationRefused {
-    /// View without roll passes a camera-derived angle, not transcribed.
+    /// View without roll passes a camera-derived angle, not implemented.
     ViewWithoutRoll,
-    /// Facing has its own kernel body, not transcribed.
+    /// Facing has its own kernel body, not implemented.
     FacingKernel,
-    /// Velocity has its own kernel body, not transcribed.
+    /// Velocity has its own kernel body, not implemented.
     VelocityKernel,
     /// The export does not decide the 3D-rotation rule.
     RotationRuleUndecided,
@@ -844,11 +844,11 @@ impl MeshRotationRefused {
     pub fn reason(self) -> &'static str {
         match self {
             Self::ViewWithoutRoll =>
-                "source Mesh particle rotation about the axis of rotation (no 3D rotation): the View angle without roll is not transcribed",
+                "source Mesh particle rotation about the axis of rotation (no 3D rotation): the View angle without roll is not supported",
             Self::FacingKernel =>
-                "source Mesh particle rotation about the axis of rotation (no 3D rotation): the Facing kernel is not transcribed",
+                "source Mesh particle rotation about the axis of rotation (no 3D rotation): the Facing kernel is not supported",
             Self::VelocityKernel =>
-                "source Mesh particle rotation about the axis of rotation (no 3D rotation): the Velocity kernel is not transcribed",
+                "source Mesh particle rotation about the axis of rotation (no 3D rotation): the Velocity kernel is not supported",
             Self::RotationRuleUndecided =>
                 "source Mesh particle 3D rotation is not decided by the export (Shape enabled state or align flag missing)",
         }
@@ -857,7 +857,7 @@ impl MeshRotationRefused {
 
 /// A Mesh render-mode system is admitted with 3D rotation (the Euler mesh
 /// transform, `None`), or without it in a render space whose kernel about
-/// the axis of rotation is transcribed (that body). The legacy step and the
+/// the axis of rotation is implemented (that body). The legacy step and the
 /// native birth both carry the axis into the particle side data.
 pub fn mesh_rotation_admission(
     emitter: &EmitterParams, initial_enabled: bool,
@@ -1150,7 +1150,7 @@ pub fn simulate_stopped(system: &mut Runtime, dt: f32, ctx: &Context) {
 /// One frame of an installed system (emitting, or stopped when `emitting` is
 /// false), for a host that retires the system when the step is refused. The
 /// native step refuses only what this port does not reproduce: a
-/// configuration it does not transcribe, or a non-finite birth value. The
+/// configuration it does not implement, or a non-finite birth value. The
 /// source has no such outcome. Each frame its incremental update runs the
 /// emission (EmissionModule::EmitOverTime writes the emission state and
 /// returns the counts), then StartParticles births them, as many as the
@@ -1494,9 +1494,9 @@ fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
         if rotates && !(dt < 0.0 && child::arms::on("rotationSkipsNegativeElapsed")) {
             let rot = &mut system.side[index].rot;
             if rotation_3d {
-                for axis in 0..3 { rot[axis] = angular[axis] * dt + rot[axis]; }
+                for axis in 0..3 { rot[axis] += angular[axis] * dt; }
             } else {
-                rot[2] = angular[2] * dt + rot[2];
+                rot[2] += angular[2] * dt;
             }
         }
     }
@@ -1602,16 +1602,16 @@ pub fn script_simulate_fixed(system: &mut Runtime, t: f32, emitting: bool, ctx: 
 
 /// What `ParticleSystem.Simulate`'s restart needs besides the birth decision.
 /// A prewarm system warms at every restart, looping or not: through the
-/// procedural update when its route is procedural (flag 2, not transcribed),
+/// procedural update when its route is procedural (flag 2, not implemented),
 /// with the ring laws when it keeps a ring buffer (that warm has not been
 /// executed against the engine), and over the start lifetime range, which a
-/// curve lifetime takes through a range evaluation that is not transcribed.
+/// curve lifetime takes through a range evaluation that is not implemented.
 pub fn director_restart_eligible(emitter: &EmitterParams, route: &SourceRoute) -> Result<(), String> {
     if !emitter.prewarm {
         return Ok(());
     }
     if *route != SourceRoute::Ordinary {
-        return Err("Simulate restart warm of a prewarm system off the ordinary route: the procedural update is not transcribed".into());
+        return Err("Simulate restart warm of a prewarm system off the ordinary route: the procedural update is not supported".into());
     }
     if emitter.ring_buffer_mode != RingBufferMode::Disabled {
         return Err("ring buffer Simulate restart warm over the ordinary slices has not been executed".into());
@@ -1837,7 +1837,7 @@ pub fn install_native_birth(system: &mut Runtime, seeds: &mut seed::SystemSeedMa
     // The first Play writes the start delay word after the seed reset.
     let Some(start_delay) = play_start_delay(&system.emitter) else {
         system.rng = Rng(u64::from(owner.seed) | (u64::from(owner.seed) << 32));
-        return Ok(BirthPath::Legacy("random start delay: Play's seed-hash evaluation is not transcribed".to_owned()));
+        return Ok(BirthPath::Legacy("random start delay: Play's seed-hash evaluation is not supported".to_owned()));
     };
     system.native_birth = Some(birth::NativeBirthState {
         owner: Some(owner), initial: streams.initial, shape: streams.shape,
@@ -1915,7 +1915,7 @@ fn cycle_curve(curve: &moly_law::particle::MinMaxCurve, t: f32, random: f32) -> 
 
 /// Every MinMaxCurve a runtime evaluates goes through the engine's curve
 /// dispatch (`moly_law::particle::curve::CurveSampler`). Each consumer is built
-/// once here, so a lane outside the transcribed evaluator refuses the system
+/// once here, so a lane outside the implemented evaluator refuses the system
 /// before any law is installed; the installation sites rely on it. Force,
 /// rotation, limit velocity and Noise are built by the judge itself.
 pub fn curve_admission(emitter: &EmitterParams) -> Result<(), String> {
@@ -1979,7 +1979,7 @@ pub fn curve_admission_with(emitter: &EmitterParams, storage: Option<&dyn Fn() -
             .map_err(|reason| format!("emission.rateOverTime: {reason}"))?;
         if emission.bursts.iter().any(|burst| matches!(burst.count,
             MinMaxCurve::Curve { .. } | MinMaxCurve::TwoCurves { .. })) {
-            return Err("emission burst count curve: the time the engine evaluates it at is not transcribed".into());
+            return Err("emission burst count curve: the time the engine evaluates it at is not supported".into());
         }
     }
     Ok(())

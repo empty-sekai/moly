@@ -424,7 +424,7 @@ fn node_path(doc: &UiPrefab, id: i64, what: &str) -> Result<(usize, String), Str
     Ok((index, format!("@{}", doc.nodes[index].game_object_id)))
 }
 
-fn list_component<'a>(doc: &'a UiPrefab, id: i64) -> Result<&'a UiComponent, String> {
+fn list_component(doc: &UiPrefab, id: i64) -> Result<&UiComponent, String> {
     doc.nodes
         .iter()
         .flat_map(|node| &node.components)

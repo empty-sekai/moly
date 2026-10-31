@@ -1,119 +1,163 @@
-//! 情报层视图（真源 `ScreenLayerMysekaiInfo`，屏幕号 622）——本仓第一个
-//! 带内容物的屏幕层视图：压层即有画面，层栈槽位驱动显隐。
+//! Info screen layer view (matches `ScreenLayerMysekaiInfo`, screen number
+//! 622) — the first screen layer view in this repository that carries
+//! content: pushing the layer shows it at once, and the layer stack slot
+//! drives its visibility.
 //!
-//! ## 层身份与入口
+//! ## Layer identity and entry
 //!
-//! 入口是既有动作按钮派发表的 `OpenMysekaiInfo` 槽（写
-//! `LayerCommand::Push(MysekaiInfo)`——本模块不动派发表）。真源压层助手
-//! 先问 `IsActiveScreen(622)`，已开不重复压——层栈的「同层重复压丢弃」
-//! 同形。启动参数（bootData）真源是排名页模型，服务端用户态 ⇒ 面板下发
-//! mock（见下）。
+//! The entry is the existing action button dispatch table's `OpenMysekaiInfo`
+//! slot (it writes `LayerCommand::Push(MysekaiInfo)`; this module does not
+//! change the dispatch table). The push helper first checks
+//! `IsActiveScreen(622)` and does not push again when the layer is already
+//! open, matching the layer stack's rule that a repeated push of the same
+//! layer is dropped. The boot parameter (bootData) is the rank page model,
+//! which is server user state here, so the panel supplies a mock (see below).
 //!
-//! ## 两页结构（页数 = 2，SetupPage 九步装配序定谳）
+//! ## Two-page structure (page count = 2, the SetupPage nine-step assembly
+//! order)
 //!
-//! - **页 0 排名页**（`MysekaiInfoRankPage.Setup`）：rank text, rank gauge,
+//! - **Page 0, the rank page** (`MysekaiInfoRankPage.Setup`): rank text, rank gauge,
 //!   and on the JP client the home and my-room put-cost limits
 //!   (`FixtureHomePutLimitPutCost` as the number, `FixtureMyRoomPutLimitPutCost`
 //!   through `MSG_MYSEKAI_FIXTURE_MYROOM_LAYOUT_COST`), then the photo button
 //!   and `SetupPhotoAsync`. See the rank page section below.
-//! - **页 1 设置页**（`MysekaiInfoOption1Page.Setup`）：四组单选档 +
-//!   语音下载钮。
-//! - 页、页签与各单选组的次序直接读预制体 PPtr 数组：页 0=排名页、
-//!   页 1=设置页。页态跨开合保留（真源层实例常驻，序列化字段
-//!   在 SetActive(false) 后仍在，重开淡入的是上次页）。
-//! - 页签两枚（`CustomIndexToggleGroup` 单选组，回调
-//!   `OnNoteTabSelectedIndexChanged` → `ChangePage`）；左右箭头钮（可见
-//!   性 = `IsAbleToMovePrev/NextPage`，边界钳 0 / Length-1）。
+//! - **Page 1, the option page** (`MysekaiInfoOption1Page.Setup`): four radio
+//!   toggle groups plus the voice download button.
+//! - The order of the pages, the tabs and each toggle group is read from the
+//!   prefab's PPtr arrays: page 0 = rank page, page 1 = option page. The page
+//!   state persists across open and close (the layer instance stays alive, its
+//!   serialized fields survive `SetActive(false)`, so reopening fades in the
+//!   last page).
+//! - Two tabs (a `CustomIndexToggleGroup` radio group whose callback
+//!   `OnNoteTabSelectedIndexChanged` calls `ChangePage`); left and right arrow
+//!   buttons (visible when `IsAbleToMovePrev/NextPage`, bounds clamped to
+//!   0 / Length-1).
 //!
-//! ## 四组档位（选项下标由序列化组定义，不由节点名称推测）
+//! ## The four toggle groups (option indices come from the serialized group,
+//! not from node names)
 //!
-//! | 组 | 枚举 | 值域 | 默认 |
+//! | Group | Enum | Values | Default |
 //! |---|---|---|---|
-//! | 访问许可 | `MysekaiRoomAcceptUserType` | all=0 · friend_only=1 · reject=2 · review=3 | 无客户端默认（服务端现值，null → 0）|
-//! | 画质 | `MysekaiImageQualityType` | high=0 · normal=1 · low=2 | **normal** |
-//! | 刷新率 | `MysekaiFpsQualityType` | high=0 · normal=1 | **high** |
-//! | 变换通知 | `MysekaiConvertFxitureNotificationType` | on=0 · off=1 | **on** |
+//! | Access permission | `MysekaiRoomAcceptUserType` | all=0 · friend_only=1 · reject=2 · review=3 | no client default (server value, null → 0) |
+//! | Image quality | `MysekaiImageQualityType` | high=0 · normal=1 · low=2 | **normal** |
+//! | Frame rate | `MysekaiFpsQualityType` | high=0 · normal=1 | **high** |
+//! | Convert notification | `MysekaiConvertFxitureNotificationType` | on=0 · off=1 | **on** |
 //!
-//! 访问许可仅有三枚单选钮。review=3 是审核中的服务端状态：显示提示、
-//! 选中 reject 的下标 2，并禁用整组三钮、显示源禁用遮罩；不是第四档。
+//! The access permission group has only three radio buttons. review=3 is a
+//! server state meaning under review: the tip is shown, the index of reject
+//! (2) is selected, all three buttons are disabled and the source disable
+//! cover is shown; it is not a fourth option.
 //!
-//! 默认值的承重句：`MysekaiOptionSettingData` 构造只写画质一格 = 1 ⇒
-//! 默认画质 normal；刷新率与变换通知两格未写 ⇒ CLR 零初始化 = 0（high
-//! / on）。访问许可现值真源读 `UserMysekaiVisitSetting`（服务端）。
+//! Where the defaults come from: the `MysekaiOptionSettingData` constructor
+//! writes only the image quality member = 1, so the default image quality is
+//! normal; the frame rate and convert notification members are not written,
+//! so zero initialization gives 0 (high / on). The current access permission
+//! is read from `UserMysekaiVisitSetting` (server side).
 //!
-//! ## 切换律（CustomIndexToggleGroup）
+//! ## Switching rules (CustomIndexToggleGroup)
 //!
-//! 单选；**转亮才回调**（点已选中的档无回调）；初值双写不带通知
-//! （set_SelectedIndex + WithoutNotify 后才挂回调 ⇒ 初值不触发）；界外
-//! 下标 LogError 拒绝——本仓档位枚举闭集，界外分支由构造消掉。
+//! Single selection; the callback fires **only when the selection
+//! changes** (tapping the selected option gives no callback); the initial
+//! value is written twice without notification (set_SelectedIndex + WithoutNotify
+//! before the callbacks are attached, so the initial value fires none); an
+//! index out of range is rejected with LogError — the toggle enums here are
+//! closed sets, so construction rules out the out-of-range branch.
 //!
-//! ## 切换即施加律
+//! ## Applying a switch at once
 //!
-//! - **画质**（`OnChangeImageQualityToggle`）：写档位**并立即**
-//!   `SetImageQuality`——high → `SetTargetDpi(299)` + FXAA 开 · normal →
-//!   200 + 开 · low → 180 + 关；`SetTargetDpi` 把
-//!   `clamp(目标DPI / 屏DPI, 0, 1)` 写进 RenderScale。FXAA 与目标 DPI 写入现
-//!   GameSettings；场景相机按窗口缩放因子推得的屏 DPI 施加渲染比例（见
-//!   `game_settings::source_render_scale`）。
-//! - **刷新率**（`OnChangeFpsToggle`）：写档位并立即 `SetFpsQuality`——
-//!   high → `Application.targetFrameRate = 60` · normal → 30；越界
-//!   LogError；同值且非强制早退（幂等门）。**本仓对应物 = `WinitSettings`
-//!   的 Reactive 档**：等待 = 1/60 · 1/30，三个反应位全关（只按节拍 tick，
-//!   事件缓冲到下一拍）——运行时改档当帧生效。这是本层接线的真行为。浏览器
-//!   改为动画帧节拍：到点的动画帧里更新，未到点的帧跳过（`game_settings`）。
-//! - **变换通知**（`OnChangeConvertFixtureNotificationTypeToggle`）：只写
-//!   档位，无即时副作用。
-//! - **访问许可**（`OnChangeVisitSettingToggle`）：非审核状态下只写档位；上报在出场链
-//!   （`OnExited` 里 `ChangeVisitType`，服务端域 ⇒ 面板下发 mock）。
+//! - **Image quality** (`OnChangeImageQualityToggle`): writes the quality **and
+//!   immediately** calls `SetImageQuality` — high → `SetTargetDpi(299)` + FXAA on ·
+//!   normal → 200 + on · low → 180 + off; `SetTargetDpi` writes
+//!   `clamp(target DPI / screen DPI, 0, 1)` into RenderScale. FXAA and the
+//!   target DPI are written into the current GameSettings; the scene camera
+//!   applies the render scale from the screen DPI derived from the window scale
+//!   factor (see `game_settings::source_render_scale`).
+//! - **Frame rate** (`OnChangeFpsToggle`): writes the quality and immediately calls
+//!   `SetFpsQuality` — high → `Application.targetFrameRate = 60` · normal → 30;
+//!   out of range → LogError; the same value without a forced update returns
+//!   early (an idempotence gate). **The equivalent here is `WinitSettings`'
+//!   Reactive mode**: the wait is 1/60 · 1/30 and all three reactive bits are
+//!   off (tick on the beat only, buffer events to the next tick) — a quality
+//!   change at run time takes effect in the same frame. This is what this
+//!   layer's wiring actually does. The browser uses an animation-frame beat
+//!   instead: it updates on the frame when due and skips frames that are not due
+//!   (`game_settings`).
+//! - **Convert notification** (`OnChangeConvertFixtureNotificationTypeToggle`):
+//!   only writes the quality; no immediate side effect.
+//! - **Access permission** (`OnChangeVisitSettingToggle`): outside the review
+//!   state it only writes the quality; the report goes through the exit chain
+//!   (`ChangeVisitType` in `OnExited`, server domain, so the panel supplies a
+//!   mock).
 //!
-//! **启动施加律**：真源场地进场（`SceneMysekai.Start`）即按存量档全量施加
-//! （forceUpdate=true 两档合施）。存量档 = 本地设置档的
-//! `MysekaiOptionSettingData`（`ApplicationLocalSettings` 同名成员，三键
+//! **Startup application**: when the field scene starts (`SceneMysekai.Start`)
+//! it applies the stored qualities in full (forceUpdate=true applies both
+//! qualities). The stored qualities are the local settings'
+//! `MysekaiOptionSettingData` (the member of the same name in
+//! `ApplicationLocalSettings`, with the three keys
 //! `MysekaiImageQualityType` / `MysekaiFpsQualityType` /
-//! `MysekaiConvertFxitureNotificationType`，枚举存整数值）；无档取构造默认
-//! （画质 normal · 刷新率 high ⇒ 60）。`init` 在 Startup 施加，首个场景帧
-//! 再施加一次刷新率（产品面板的启动装载在 `init` 之后，会写入它自己存的帧率）。
+//! `MysekaiConvertFxitureNotificationType`, enums stored as integers); without
+//! a stored document the constructor defaults apply (image quality normal ·
+//! frame rate high ⇒ 60). `init` applies them at Startup, and the first scene
+//! frame applies the frame rate once more (the product panel's startup load
+//! runs after `init` and writes its own saved frame rate).
 //!
-//! ## 页切换律（ChangePage / MoveXxxPage）
+//! ## Page switching rules (ChangePage / MoveXxxPage)
 //!
-//! 点页签或箭头：先写 `_currentPageIndex` → `RefreshTab`（页签组不带通知
-//! 写 + 逐页签 `Setup`）→ `RefreshArrowButton` → 重建取消令牌 → 按新旧
-//! 差选方向。页过渡 = 旧页方向性淡出 + 两枚页签粒子 + 新页方向性淡入，
-//! 唯一等待 = `Delay(interval * 2)`（interval = 粒子时长 / 10）。**粒子
-//! 绘制路径未并、两段串行淡变与节拍未提取** ⇒ 本仓当帧落位（与层视图
-//! 无动画的既有简化同款），具名挂账。翻页手势（`OnFlick` 左=下一页 ·
-//! 右=上一页）挂账：手势层没有 flick 分类器，本模块不自建第二套分类。
+//! Tapping a tab or an arrow: first writes `_currentPageIndex` → `RefreshTab`
+//! (writes the tab group without notification + `Setup` on each tab) →
+//! `RefreshArrowButton` → rebuilds the cancellation token → picks the direction
+//! from the difference between old and new page. The page transition is a
+//! directional fade-out of the old page + the two tab particles + a directional
+//! fade-in of the new page, with a single wait of `Delay(interval * 2)`
+//! (interval = particle duration / 10). **The particle draw path is not
+//! integrated and the two serial fades and their timing are not extracted**,
+//! so a page change lands in the same frame here (the same simplification as
+//! the layer view's existing lack of animation), a named gap. The page-swipe
+//! gesture (`OnFlick` left = next page · right = previous page) is a named gap:
+//! the gesture layer has no flick classifier and this module does not build a
+//! second one.
 //!
-//! ## 生命周期（钩子次序照层栈梯，层侧内容在这里）
+//! ## Lifecycle (hook order follows the layer stack ladder; the layer's own
+//! content is here)
 //!
-//! `OnBoot`（bootData=排名模型 mock · 访问许可现值 mock 重读）→
-//! `OnInitComponent`（三档读入 + 七 Setup：页签/排名详情钮/箭头钮/页四件
-//! 已接，贴图/粒子/翻页手势三件挂账）→ `OnFinishStartAnimation`（全部页
-//! Hide 后当前页 FadeIn）→ … → `OnExitStart`（当前页 FadeOut）→
-//! `OnExited`（三档写回 SaveToStorage：只并入 `MysekaiOptionSettingData`
-//! 一节，写后读回核对；访问许可 `ChangeVisitType` 上报——服务端域 ⇒ mock）。
+//! `OnBoot` (bootData = rank model mock · access permission current value
+//! re-read from the mock) → `OnInitComponent` (three qualities read + seven
+//! Setup calls: tabs / rank info button / arrow buttons / page, four of which
+//! are wired, textures / particles / page-swipe gesture are named gaps) →
+//! `OnFinishStartAnimation` (all pages Hide, then the current page FadeIn) → …
+//! → `OnExitStart` (current page FadeOut) → `OnExited` (the three qualities are
+//! written back through SaveToStorage, merging only the
+//! `MysekaiOptionSettingData` section and reading it back to check; the access
+//! permission `ChangeVisitType` report is server domain ⇒ mock).
 //!
-//! ## 服务端域与 mock 面板（照音频域音量面板的形：具名资源 + 默认 +
-//! 环境变量覆写，非法值响亮告警回默认）
+//! ## Server domain and the mock panel (shaped like the audio domain's volume
+//! panel: a named resource + defaults + environment variable overrides, an
+//! invalid value warns loudly and falls back to the default)
 //!
-//! - **排名页显示件**：`MysekaiRankModel` 读用户态（服务端）⇒ mock：
-//!   等级 · 量表比率；the CN client's put-limit count and joint count are
+//! - **Rank page display items**: `MysekaiRankModel` reads user state (server
+//!   side) ⇒ mock: rank · gauge ratio; the put-limit count and joint count are
 //!   mock values too.
-//! - **排名详情对话框**（`Show1ButtonDialog<MysekaiRankListDialog>`,
+//! - **Rank info dialog** (`Show1ButtonDialog<MysekaiRankListDialog>`,
 //!   dialog type `DialogType::MysekaiRankListDialog`, shown through the
 //!   screen manager with the back key
-//!   closing it; 允许框外关）：对话框体 = 主表 `MasterMysekaiRanks` 的逐等级
-//!   解锁条件清单 + 用户态排名 ⇒ 连同走 mock，框内文案具名「面板下发」。
-//! - **访问许可现值**：面板下发 mock（档名用真源枚举名）。
-//! - **排名页的等级与等级量表**：`TryMoveScreenLayerMysekaiInfo` 以
-//!   `new MysekaiRankModel()`（用户总经验，与菜单共读的同一份 mock，见
-//!   [`crate::mysekai_rank::UserTotalExp`]）建 `MysekaiRankGaugeViewDataModel`
-//!   作排名页模型；量表走菜单同一条 `UIPartsMysekaiRankGauge.Setup`。量表按
-//!   文档里唯一的 `UIPartsMysekaiRankGauge` 组件取（区域布局上它的引用都已解码）。
+//!   closing it; a tap outside closes it): the dialog body = the per-rank
+//!   unlock condition list of the master table `MasterMysekaiRanks` + user
+//!   rank ⇒ also served by the mock, with the body texts named as supplied by
+//!   the panel.
+//! - **Current access permission**: supplied by the panel as a mock (option
+//!   names use the enum names).
+//! - **Rank and rank gauge on the rank page**: `TryMoveScreenLayerMysekaiInfo`
+//!   builds the rank page model with `new MysekaiRankModel()` (user total
+//!   experience, the same mock the menu reads, see
+//!   [`crate::mysekai_rank::UserTotalExp`]) wrapped in
+//!   `MysekaiRankGaugeViewDataModel`; the gauge uses the menu's same
+//!   `UIPartsMysekaiRankGauge.Setup`. The gauge is taken as the document's only
+//!   `UIPartsMysekaiRankGauge` component (on a region layout its references are
+//!   all decoded).
 //!
-//! 环境变量：`MOLY_INFO_MOCK_ACCESS_PERMISSION`（all/friend_only/reject/
-//! review）· `MOLY_INFO_MOCK_FIXTURE_PUT_LIMIT` ·
-//! `MOLY_INFO_MOCK_FIXTURE_JOINT_PUT_LIMIT`。
+//! Environment variables: `MOLY_INFO_MOCK_ACCESS_PERMISSION` (all/friend_only/reject/
+//! review) · `MOLY_INFO_MOCK_FIXTURE_PUT_LIMIT` ·
+//! `MOLY_INFO_MOCK_FIXTURE_JOINT_PUT_LIMIT`.
 //!
 //! ## Rank page costs, photo and voice download
 //!
@@ -142,14 +186,16 @@
 //!   `WORD_DOWNLOADED`, the button disabled (its cover shown), and the
 //!   download dialog is never reached.
 //!
-//! ## 我方选值与具名缺口（改这里之前先读）
+//! ## Chosen values and named gaps (read this before changing them)
 //!
-//! - 视图和点击共用源预制体布局：Info 主层、Common1 排名详情。动态档位和
-//!   用户数据显示写入各自的 UiPrefabView。
+//! - The view and the hit testing share the source prefab layouts: Info for
+//!   the main layer, Common1 for the rank info dialog. Dynamic option and user
+//!   data displays are written into their own UiPrefabView.
 //! - The back key: the screen manager gives it to the rank list dialog when
 //!   it is open, else to the header back button (the screen pops there).
-//! - 层开着时**本层吃掉全部点按**（全屏层阻断世界射线，真源
-//!   blockRaycasts 同形）；世界输入让位由共享层态与指针归属处理。
+//! - While the layer is open **this layer consumes every tap** (a full-screen
+//!   layer blocks world rays, as its `blockRaycasts` does); world input yields
+//!   through the shared layer state and pointer ownership.
 
 use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
@@ -165,7 +211,7 @@ use crate::ui_layers::{
 };
 
 
-/// 页数（真源 SetupPage 装配序定谳：排名页 + 设置页）。
+/// Page count (the SetupPage assembly order: rank page + option page).
 const PAGE_COUNT: usize = 2;
 
 /// 情报层全部渲染文案的字符闭包（静态标签 + 数字位）——并入外壳字符集
@@ -202,12 +248,14 @@ pub const FIXED_TEXTS: &[&str] = &[
 ];
 
 // ---------------------------------------------------------------------------
-// 四组档位（真源枚举逐值核过；下标恒等映射）
+// The four toggle groups (the enum values are checked one by one; the index
+// maps to the value identically)
 // ---------------------------------------------------------------------------
 
-/// 访问许可档（真源 `MysekaiRoomAcceptUserType`）。值是服务端持久化
-/// （真源读 `UserMysekaiVisitSetting`，null → 0）⇒ 面板下发 mock。review
-/// 是锁定前三枚选项的状态，不是可选的第四枚按钮。
+/// Access permission option (`MysekaiRoomAcceptUserType`). The value is
+/// persisted on the server (read from `UserMysekaiVisitSetting`, null → 0), so
+/// the panel supplies a mock. review is a state that locks the first three
+/// options, not a selectable fourth button.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AccessPermission {
@@ -238,7 +286,7 @@ impl AccessPermission {
             Self::Review => "审核",
         }
     }
-    /// mock 面板档名（真源枚举名）。
+    /// The mock panel's option name (the enum name).
     fn true_name(self) -> &'static str {
         match self {
             Self::All => "all",
@@ -258,8 +306,8 @@ impl AccessPermission {
     }
 }
 
-/// 画质档（真源 `MysekaiImageQualityType`）。默认 normal（构造点写真源
-/// 证据见模块头）。
+/// Image quality option (`MysekaiImageQualityType`). The default is normal
+/// (the constructor writes it; see the module header).
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ImageQuality {
@@ -287,7 +335,8 @@ impl ImageQuality {
             Self::Low => "低",
         }
     }
-    /// 真源 `SetImageQuality` 的两件真值：目标 DPI 与 FXAA 开关。
+    /// The two values `SetImageQuality` applies: the target DPI and the FXAA
+    /// switch.
     fn target_dpi_and_fxaa(self) -> (u32, bool) {
         match self {
             Self::High => (299, true),
@@ -297,8 +346,9 @@ impl ImageQuality {
     }
 }
 
-/// 刷新率档（真源 `MysekaiFpsQualityType`）。默认 high（零初始化）。
-/// 真值：high → 60 · normal → 30（`Application.targetFrameRate`）。
+/// Frame rate option (`MysekaiFpsQualityType`). The default is high (zero
+/// initialization). Values: high → 60 · normal → 30
+/// (`Application.targetFrameRate`).
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FpsQuality {
@@ -331,8 +381,9 @@ impl FpsQuality {
     }
 }
 
-/// 变换通知档（真源 `MysekaiConvertFxitureNotificationType`，源侧类名即
-/// 带这个拼写）。默认 on（零初始化）。
+/// Convert notification option (`MysekaiConvertFxitureNotificationType`; the
+/// class name carries this misspelling). The default is on (zero
+/// initialization).
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConvertNotification {
@@ -363,9 +414,11 @@ impl ConvertNotification {
 // 资源
 // ---------------------------------------------------------------------------
 
-/// 情报层会话档位（真源 `MysekaiOptionSettingData` 的本仓对应物：会话内
-/// 常驻，重开层读到的就是改过的值；出场链 OnExited 写回本地设置档）。访问
-/// 许可一格在每次进层时从 mock 面板重读（真源 OnBoot 读服务端现值）。
+/// The info screen's session option state (this repository's counterpart of
+/// `MysekaiOptionSettingData`: it lives for the session, so reopening the
+/// layer reads the changed values; the exit chain's OnExited writes it back to
+/// the local settings). The access permission member is re-read from the mock
+/// panel each time the layer opens (OnBoot reads the server's current value).
 #[derive(Resource)]
 pub struct InfoSettings {
     access: AccessPermission,
@@ -525,18 +578,14 @@ impl Default for InfoMock {
 
 /// 页态（跨开合保留，见模块头）。
 #[derive(Resource)]
+#[derive(Default)]
 pub struct InfoPageState {
     current: usize,
 }
 
-impl Default for InfoPageState {
-    fn default() -> Self {
-        InfoPageState { current: 0 }
-    }
-}
 
-/// 层内对话框态（Dialog 槽：真源对话框不入屏幕层栈，开着时模态阻断
-/// 层内点按）。
+/// In-layer dialog state (the Dialog slot: the dialog does not enter the
+/// screen layer stack, and while open it blocks taps in the layer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InfoDialog {
     /// The rank list (`MysekaiRankListDialog`, a one-button dialog, closes on
@@ -997,18 +1046,21 @@ fn page_label(page: usize) -> &'static str {
     }
 }
 
-/// 进层钩子串（层栈的挂载梯日志之外，层侧内容在这里；无动画 ⇒ 等待点
-/// 当帧通过）。`rank` is `None` when the rank model was refused (named at
+/// The open-hook sequence (beyond the layer stack's mount ladder log, the
+/// layer's own content runs here; with no animation every wait point passes in
+/// the same frame). `rank` is `None` when the rank model was refused (named at
 /// the open edge): the rank page's model texts are hidden.
 fn on_open(settings: &mut InfoSettings, mock: &InfoMock, page_state: &InfoPageState,
     rank: Option<&moly_law::ui::mysekai_rank::MysekaiRankModel>) {
-    // OnBoot：bootData = 排名页模型（服务端用户态 ⇒ 面板下发）；访问许可
-    // 现值重读（真源 OnBoot 读 UserDataManager）。
+    // OnBoot: bootData = the rank page model (server user state, so the panel
+    // supplies it); the access permission's
+    // current value is re-read (OnBoot reads it from the user data
+    // manager on the server side, so the mock stands in).
     settings.access = mock.access_permission;
     if let Some(rank) = rank {
         info!(
-            "[info] OnBoot：bootData=排名页模型（总经验 {}（mock）查 master 等级表：rank {} / max {} · \
-             本级累计 {} · 下级累计 {}；面板下发：家具摆放上限 {} · 连接家具上限 {}）；访问许可现值={}（面板下发）",
+            "[info] OnBoot: bootData = the rank page model (total exp {} (mock) looked up in the master rank table: rank {} / max {} · \
+             cumulative to this rank {} · to the next rank {}; supplied by the panel: fixture put limit {} · joint put limit {}); access permission current value = {} (supplied by the panel)",
             rank.total_exp,
             rank.mysekai_rank,
             rank.max_mysekai_rank,
@@ -1020,23 +1072,23 @@ fn on_open(settings: &mut InfoSettings, mock: &InfoMock, page_state: &InfoPageSt
         );
     }
     info!(
-        "[info] OnInitComponent：三档读入（画质 {} · 刷新率 {} · 变换通知 {}）；七 Setup——\
-         SetupTab · SetupRankInfoButton · SetupArrowButton · SetupPage 已接；视图读源预制体；\
-         SetupParticle 挂账（粒子绘制路径未并）· SetupPageFlick 挂账\
-         （手势层无 flick 分类器）",
+        "[info] OnInitComponent: three qualities read (image quality {} · frame rate {} · convert notification {}); seven Setup calls -- \
+         SetupTab · SetupRankInfoButton · SetupArrowButton · SetupPage wired; the view reads the source prefab; \
+         SetupParticle is a named gap (particle draw path not integrated) · SetupPageFlick is a named gap \
+         (the gesture layer has no flick classifier)",
         settings.image_quality.label(),
         settings.fps.label(),
         settings.convert.label()
     );
     info!(
-        "[info] OnFinishStartAnimation：两页 Hide 后当前页「{}」FadeIn——层视图无动画，\
-         当帧收尾（真源两段串行淡变未接）",
+        "[info] OnFinishStartAnimation: both pages Hide, then the current page '{}' FadeIn -- the layer view has no animation, \
+         and finishes in this frame (the two serial fades are not wired)",
         page_label(page_state.current)
     );
-    // 当前四组档值与默认位。
+    // The current values of the four groups and their defaults.
     info!(
-        "[info] Info 铺装：页 {}/{} · 访问许可={}（面板下发，真源无客户端默认）· 画质={}\
-         （默认位 {}）· 刷新率={}（默认位 {}）· 变换通知={}（默认位 {}）",
+        "[info] Info placed: page {}/{} · access permission = {} (supplied by the panel, no client default) · image quality = {}\
+         (default {}) · frame rate = {} (default {}) · convert notification = {} (default {})",
         page_state.current,
         PAGE_COUNT - 1,
         settings.access.true_name(),
@@ -1049,15 +1101,15 @@ fn on_open(settings: &mut InfoSettings, mock: &InfoMock, page_state: &InfoPageSt
     );
 }
 
-/// 退层钩子串（出场链的层侧内容）。
+/// The close-hook sequence (the layer's own content of the exit chain).
 fn on_close(settings: &InfoSettings, page_state: &InfoPageState) {
     info!(
-        "[info] OnExitStart：当前页「{}」FadeOut——层视图无动画，当帧收尾",
+        "[info] OnExitStart: the current page '{}' fades out -- the layer view has no animation and finishes in this frame",
         page_label(page_state.current)
     );
     info!(
-        "[info] OnExited：三档写回 SaveToStorage（画质 {} · 刷新率 {} · 变换通知 {}）；访问许可上报 \
-         ChangeVisitType={}（服务端域 ⇒ 面板下发 mock，上报沿到此）",
+        "[info] OnExited: three qualities written back through SaveToStorage (image quality {} · frame rate {} · convert notification {}); access permission reported as \
+         ChangeVisitType={} (server domain, so the report stops at the mock supplied by the panel)",
         settings.image_quality.label(),
         settings.fps.label(),
         settings.convert.label(),
@@ -1280,30 +1332,32 @@ fn hit_item(canvas:Vec2,page:usize,layouts:&crate::ui_layout::UiLayouts,view:&cr
     items.into_iter().find(|item|hit_test(canvas,*item,layouts,view,size,bindings))
 }
 
-/// 页切换（真源 `ChangePage`：写页下标 → RefreshTab（页签组不带通知写 +
-/// 逐页签 Setup）→ 箭头刷新 → 方向按新旧差）。页过渡当帧落位（粒子与
-/// 淡变挂账，见模块头）。
+/// Page change (matches `ChangePage`: write the page index → RefreshTab (the
+/// tab group written without notification + `Setup` on each tab) → refresh the
+/// arrows → direction from the old/new difference). The page transition lands
+/// in the same frame (particles and fades are named gaps; see the module
+/// header).
 fn change_page(page_state: &mut InfoPageState, next: usize, via: &str) {
     if next == page_state.current {
         info!(
-            "[info] 页点按未变页（{via}）——转亮才回调，同值无回调（真源单选组同形）"
+            "[info] page tap did not change the page ({via}) -- the callback fires only on a new selection, so the same value gives none (the same as the radio group)"
         );
         return;
     }
     let old = page_state.current;
     page_state.current = next;
-    let direction = if next > old { "前进" } else { "后退" };
-    let prev_able = if next > 0 { "可动" } else { "到界" };
+    let direction = if next > old { "forward" } else { "back" };
+    let prev_able = if next > 0 { "enabled" } else { "at bound" };
     let next_able = if next + 1 < PAGE_COUNT {
-        "可动"
+        "enabled"
     } else {
-        "到界"
+        "at bound"
     };
     info!(
-        "[info] 页签切换 {old}→{next}（{via}）：RefreshTab 不带通知写页签组并逐页签 Setup → \
-         箭头刷新（上一页 {prev_able} · 下一页 {next_able}）→ 方向={direction}；页过渡=旧页方向性\
-         淡出 + 两枚页签粒子 + 新页方向性淡入（粒子绘制路径未并 · 淡变与节拍未提取 ⇒ 当帧落位，\
-         具名挂账）"
+        "[info] tab change {old} -> {next} ({via}): RefreshTab writes the tab group without notification and calls Setup on each tab -> \
+         refresh the arrows (previous {prev_able} · next {next_able}) -> direction = {direction}; page transition = directional \
+         fade-out of the old page + the two tab particles + directional fade-in of the new page (particle draw path not integrated · fades and timing not extracted => lands in the same frame, \
+         a named gap)"
     );
 }
 
@@ -1317,7 +1371,8 @@ fn close_dialog(dialog: &mut InfoDialogState, screens: &mut UiLayerStack) {
     }
 }
 
-/// 档位切换（切换律见模块头：两组立即施加、两组只写档位）。
+/// Option switch (the switching rules are in the module header: two groups
+/// apply at once, two only write the option).
 fn select_option(
     group: ToggleGroup,
     index: usize,
@@ -1330,13 +1385,13 @@ fn select_option(
                 return;
             };
             if next == settings.access {
-                info!("[info] 访问许可档点按未变（{}）——转亮才回调（真源同形）", next.label());
+                info!("[info] access permission option tap did not change it ({}) -- the callback fires only on a new selection", next.label());
                 return;
             }
             settings.access = next;
             info!(
-                "[info] 访问许可 → {}（OnChangeVisitSettingToggle 只写档位，无即时副作用；\
-                 上报在出场链——服务端域 ⇒ 面板下发 mock）",
+                "[info] access permission -> {} (OnChangeVisitSettingToggle only writes the option, no immediate side effect; \
+                 the report is in the exit chain -- server domain, so the mock supplied by the panel)",
                 next.true_name()
             );
         }
@@ -1345,12 +1400,12 @@ fn select_option(
                 return;
             };
             if next == settings.image_quality && graphics.graphics.fxaa == next.target_dpi_and_fxaa().1 {
-                info!("[info] 画质档点按未变（{}）——转亮才回调（真源同形）", next.label());
+                info!("[info] image quality option tap did not change it ({}) -- the callback fires only on a new selection", next.label());
                 return;
             }
             settings.image_quality = next;
             info!(
-                "[info] 画质 → {}（OnChangeImageQualityToggle 写档位并立即施加）",
+                "[info] image quality -> {} (OnChangeImageQualityToggle writes the option and applies at once)",
                 next.label()
             );
             apply_image_quality(graphics, next);
@@ -1361,14 +1416,14 @@ fn select_option(
             };
             if next == settings.fps && graphics.graphics.frame_rate == next.target_frame_rate() as u16 {
                 info!(
-                    "[info] 刷新率档点按未变（{}）——转亮才回调（真源同形）",
+                    "[info] frame rate option tap did not change it ({}) -- the callback fires only on a new selection",
                     next.label()
                 );
                 return;
             }
             settings.fps = next;
             info!(
-                "[info] 刷新率 → {}（OnChangeFpsToggle 写档位并立即施加）",
+                "[info] frame rate -> {} (OnChangeFpsToggle writes the option and applies at once)",
                 next.label()
             );
             apply_fps(graphics, next);
@@ -1379,24 +1434,25 @@ fn select_option(
             };
             if next == settings.convert {
                 info!(
-                    "[info] 变换通知档点按未变（{}）——转亮才回调（真源同形）",
+                    "[info] convert notification option tap did not change it ({}) -- the callback fires only on a new selection",
                     next.label()
                 );
                 return;
             }
             settings.convert = next;
             info!(
-                "[info] 变换通知 → {}（OnChangeConvertFixtureNotificationTypeToggle 只写档位，\
-                 无即时副作用）",
+                "[info] convert notification -> {} (OnChangeConvertFixtureNotificationTypeToggle only writes the option, \
+                 no immediate side effect)",
                 next.label()
             );
         }
     }
 }
 
-/// 点按分派：对话框开着 ⇒ 模态（先过它，框外点按收框）；然后层件命中。
-/// 层开着时**全部点按被本层吃掉**（全屏层阻断世界射线，真源
-/// blockRaycasts 同形）。
+/// Tap dispatch: an open dialog comes first (modal; it gets every tap, and a
+/// tap outside closes it); then hits on the layer's items. While the layer is
+/// open **this layer consumes every tap** (a full-screen layer blocks world
+/// rays, as its `blockRaycasts` does).
 pub fn click(
     layouts: Res<crate::ui_layout::UiLayouts>,
     presentation: Option<Res<InfoPresentation>>,
@@ -1442,7 +1498,8 @@ pub fn click(
     let size = root_canvas.size(window);
     let Some((view,_))=views.iter().find(|(v,_)|v.key=="Info") else {return;};
     for position in &taps {
-        // 全屏层吃掉这一下（世界射线拿不到——真源 blockRaycasts 同形）。
+        // The full-screen layer consumes this tap (no world ray is cast,
+        // as with its `blockRaycasts`).
         consumed.0 = true;
         let canvas = to_canvas(*position, width, height, scale);
         // ---- 对话框模态先手 ----
@@ -1453,10 +1510,10 @@ pub fn click(
             };
             match buttons.iter().copied().find(|item| hit_test(canvas, *item,&layouts,dialog_view,size,bindings)) {
                 Some(InfoItem::RankDialogClose) => {
-                    info!("[info] 排名清单·关闭按下 → 关框")
+                    info!("[info] rank list close pressed -> dialog closed")
                 }
                 _ => info!(
-                    "[info] 对话框开着，框外点按收框（模态；排名清单框真源允许框外关，同形）"
+                    "[info] a dialog is open; a tap outside closes it (modal; the rank list dialog closes on a tap outside, as here)"
                 ),
             }
             close_dialog(&mut dialog, &mut stack);
@@ -1499,8 +1556,8 @@ pub fn click(
                 ),
                 InfoItem::RankInfo => {
                     info!(
-                        "[info] 排名详情钮按下 → Show1ButtonDialog(排名清单 342)——Dialog 槽，\
-                         不入层栈；清单体 = 主表清单 + 用户态 ⇒ 面板下发 mock"
+                        "[info] rank info button pressed -> Show1ButtonDialog(rank list 342) -- Dialog slot, \
+                         not entering the layer stack; list body = master table list + user state, so a mock supplied by the panel"
                     );
                     match stack.show_dialog(RANK_LIST_DIALOG, DisplayLayerType::LayerDialog, DialogBackKey::Close, "ScreenLayerMysekaiInfo (rank info)") {
                         Ok(id) => {
@@ -1519,7 +1576,7 @@ pub fn click(
                 _ => {}
             }
         } else {
-            info!("[info] 层内点按未命中件（面板背景）——吃掉，不下传");
+            info!("[info] tap inside the layer hit no item (panel background) -- consumed, not passed on");
         }
     }
 }

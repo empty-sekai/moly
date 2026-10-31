@@ -1,36 +1,44 @@
-//! 公告板批次：粒子呈现层的**几何**半，材质无关。
+//! Billboard batches: the **geometry** half of the particle presentation
+//! layer, independent of materials.
 //!
-//! # 谁能调它
+//! # Who may call it
 //!
-//! 任何有「一批世界空间中心点 + 尺寸 + 颜色」要画成四边形的域——站点
-//! 粒子、掉落特效、天气 effect 都是同一形状。本模块**不认识任何材质
-//! 类型**，也不认识任何着色程序：它只把一批 [`Quad`] 写成一张 bevy
-//! `Mesh` 的属性池。材质句柄、着色程序、混合档全归调用方。
+//! Any domain that has a batch of world-space centres, sizes and colours to
+//! draw as quads: site particles, drop effects and weather effects all have
+//! the same shape. This module knows **no material types** and no shaders: it
+//! only writes a batch of [`Quad`]s into the attribute pool of one bevy
+//! `Mesh`. Material handles, shaders and blend modes all belong to the
+//! caller.
 //!
-//! # 要传什么
+//! # What to pass
 //!
-//! [`write_quads`] 吃：一张 `&mut Mesh`、一批 [`Quad`]、一个
-//! [`Alignment`]、一个 [`CameraBasis`]（对齐与视口钳制要它）、一个
-//! [`SizeClamp`]。回一份 [`BatchTally`]，里面是「这批里有多少颗被
-//! 视口占比钳制过」一类的现算数——调用方把它印进自己的状态行。
+//! [`write_quads`] takes a `&mut Mesh`, a batch of [`Quad`]s, an
+//! [`Alignment`], a [`CameraBasis`] (alignment and the viewport clamp need
+//! it) and a [`SizeClamp`]. It returns a [`BatchTally`] with freshly computed
+//! numbers such as "how many quads in this batch the viewport fraction
+//! clamped"; the caller prints it into its own status line.
 //!
-//! # 属性槽语义（着色程序必须照它读）
+//! # Attribute slot semantics (a shader must read them this way)
 //!
-//! | 槽 | 含义 |
+//! | Slot | Meaning |
 //! |---|---|
-//! | `POSITION` | **四边形那个角的世界坐标**（四角展开已在 CPU 完成） |
-//! | `UV_0` | 纹理坐标，**Unity 粒子 UV 约定**：v 向上，(0,0) 在四边形左下角 |
-//! | `COLOR` | 逐粒子颜色（四个顶点同值） |
+//! | `POSITION` | **world position of that quad corner** (corner expansion already happened on the CPU) |
+//! | `UV_0` | texture coordinates, **Unity particle UV convention**: v points up, (0,0) is the lower-left corner of the quad |
+//! | `COLOR` | per-particle colour (same value on all four vertices) |
 //!
-//! 索引：每颗 4 顶点、6 索引。双面由管线 CullOff 决定，不能额外写
-//! 反向三角形；否则透明粒子的同一片面会被重复混合。
+//! Indices: 4 vertices and 6 indices per quad. Two-sidedness is decided by
+//! the pipeline's CullOff, so no additional reversed triangles may be
+//! written; otherwise the same surface of a transparent particle would be
+//! blended twice.
 //!
-//! # 为什么四角展开在 CPU
+//! # Why corners are expanded on the CPU
 //!
-//! 真源的顶点程序是一次朴素的 object→world→clip 变换（`ObjectToWorld`
-//! 三乘一加、再 `MatrixVP`）——**四边形是引擎在 CPU 侧装配好再喂进去
-//! 的**，顶点阶段不做任何展开。照这个分工，对齐档、轴心、旋转、视口
-//! 占比钳制全部留在本模块（可复算、可印数），着色程序只剩变换与采样。
+//! The vertex stage is one plain object→world→clip transform: `ObjectToWorld`
+//! as three multiply-adds, then `MatrixVP`. The quads arrive already
+//! assembled, so the vertex stage performs no expansion. Following that
+//! split, alignment mode, pivot, rotation and the viewport-fraction clamp all
+//! stay in this module (reproducible, printable as numbers), and the shader
+//! only transforms and samples.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::math::{Mat3, Vec2, Vec3};

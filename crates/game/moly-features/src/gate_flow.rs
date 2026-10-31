@@ -2160,7 +2160,7 @@ pub fn cut_scene_end_callback(world: &mut World, cast: &Cast) {
         }
         // These callers own separate callbacks in cutscene.rs. Return here
         // as well so this gate entry cannot publish duplicate side effects.
-        CastCaller::Birthday | CastCaller::Tutorial => return,
+        CastCaller::Birthday | CastCaller::Tutorial => (),
     }
 }
 

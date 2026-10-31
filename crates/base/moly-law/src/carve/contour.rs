@@ -1,41 +1,49 @@
-//! 轮廓追踪与简化（`rcBuildContours` 的 2D 转录）。
+//! Contour tracing and simplification (implements `rcBuildContours` in 2D).
 //!
-//! 分区之后，每个区的边界被追成一条闭合折线，再按最大偏差简化。简化后的
-//! 折线是多边形网那一步的输入。
+//! After region building, the boundary of every region is traced into a closed
+//! polyline and then simplified by maximum deviation. The simplified polylines
+//! are the input of the polygon mesh stage.
 //!
-//! # 锚点
+//! # Algorithm
 //!
-//! 逐条对着 CN `libunity.so` 的 `FUN_0090b68c` 写。原生把 `walkContour` /
-//! `simplifyContour` 等全部内联进了一个函数体，所以下面按算法阶段分节，
-//! 不按被调函数分。
+//! Uses the public Recast contour algorithm (`rcBuildContours`): bit-mask
+//! boundary marking, the edge walk with its iteration cap, and region-change
+//! seeding followed by maximum-deviation tessellation. This module is
+//! organized by algorithm stage.
 //!
-//! # 我方 2D 形下塌缩掉的两位标志
+//! # Two flag bits that collapse in this 2D form
 //!
-//! 原生给每个轮廓顶点存一个「区域 + 标志」字：低 16 位邻区号、bit 16
-//! 「特殊边界顶点」、bit 17「area 分界」。我方两位恒不置位，第四分量因此
-//! 塌缩成纯邻区号：
+//! Each contour vertex carries a "region + flags" word: the low 16 bits are
+//! the neighbour region id, bit 16 marks a special edge vertex and bit 17 an
+//! area boundary. Neither bit is ever set here, so the fourth component
+//! collapses to the plain neighbour region id:
 //!
-//! * **bit 16** 标的是「这个角碰到了带 `0x8000` 的边界区」。边界区是分瓦的
-//!   产物（每瓦 padding 27 体素），我方单张整场格不刷边界区 ⇒ 恒不触发。
-//! * **bit 17** 标的是「这条边两侧的 area 类不同」。我方的面只有「可走」
-//!   一个 area 类 ⇒ 恒不触发。
+//! * **bit 16** marks "this corner touches a border region carrying `0x8000`".
+//!   Border regions come from tiled baking (27-voxel padding per tile); this
+//!   baker uses one whole-field grid and emits no border regions, so the bit
+//!   is never triggered.
+//! * **bit 17** marks "the area class differs across this edge". Every face
+//!   here has a single "walkable" area class, so the bit is never triggered.
 //!
-//! ⇒ 原生用掩码 `0x2ffff`（低 16 位 + bit 17）判「要不要插初始点」，在我方
-//! 等价于「邻区号变了」；用「邻区号为 0 **或** bit 17 置位」判「要不要细分」，
-//! 在我方等价于「这是一条外墙边」。两处都按塌缩后的形态写，差异记在这里。
+//! ⇒ The mask `0x2ffff` (low 16 bits + bit 17) decides "insert an initial
+//! point", which here is equivalent to "the neighbour region id changed"; and
+//! "neighbour region id is 0 **or** bit 17 is set" decides "subdivide", which
+//! here is equivalent to "this is an outer-wall edge". Both are written in the
+//! collapsed form; the difference is recorded here.
 //!
-//! # 一处读不出来的量
+//! # Turning rule
 //!
-//! ⚠ 方向偏移表 `dirOffsetX/Y` 的四个具体数值**在本次导出的证据里读不到**
-//! （它们是两张全局数据表，不在那 27 个导出函数体内）。能从反编译确定的只有
-//! 转向规则本身：**产出顶点后 `dir+1`、走到邻格后 `dir+3`（即 -1）**。
-//! 这里用的是 upstream 的表（档次「知识库」，低于本文件其余部分的「反编译」）；
-//! 它决定的是绕行手性，而手性只影响轮廓的环绕方向，不影响顶点集合。
+//! The walk turns by **`dir+1` after emitting a vertex and `dir+3` (that is,
+//! -1) after stepping to the neighbour cell**. The direction offsets
+//! `dirOffsetX` / `dirOffsetZ` are `[-1, 0, 1, 0]` and `[0, 1, 0, -1]`, the
+//! public Recast tables. The turn decides the walk handedness, and handedness
+//! only affects the winding direction of the contour, not the vertex set.
 
 use super::grid::Grid;
 use super::region::Regions;
 
-/// 方向偏移。⚠ 见模块注释：数值锚的是 upstream，不是反编译。
+/// Direction offsets: the public Recast `dirOffsetX` / `dirOffsetZ` tables.
+/// See the module comment for the turning rule.
 const DIR_X: [isize; 4] = [-1, 0, 1, 0];
 const DIR_Z: [isize; 4] = [0, 1, 0, -1];
 
@@ -176,7 +184,8 @@ fn walk_contour(
         };
         iterations += 1;
         dir = (dir + delta) & 3;
-        // 终止判据在循环底部 ⇒ 起点那条边会被产出一次。
+        // The termination test sits at the bottom of the loop, so the edge at
+        // the start is emitted once.
         if index == start_index && dir == start_dir {
             break;
         }

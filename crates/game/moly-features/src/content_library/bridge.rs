@@ -1034,10 +1034,11 @@ mod tests {
         world.init_resource::<Messages<crate::game_settings::SettingsPanelRequest>>();
         world.init_resource::<Messages<crate::server_panel::PhenomenaScheduleEdit>>();
         world.init_resource::<input::PasteInbox>();
-        // 声音闸是 `LibraryInput` 的一个 `ResMut`，缺席时取参会 panic。
-        // 它随声音开关那条改动进入 `LibraryInput`，而这个最小 World 没跟着
-        // 补——四条 bridge 判据因此红，且红的话说的是「资源不存在」，
-        // 与被测的命令语义无关。
+        // The audio gate is a `ResMut` of `LibraryInput`; a missing resource
+        // makes the system parameters panic. It became part of `LibraryInput`
+        // with the sound switch, and this minimal World must install it too,
+        // otherwise four bridge tests fail with "resource does not exist",
+        // which says nothing about the command semantics under test.
         world.init_resource::<crate::audio::AudioGate>();
         let mut system = SystemState::<input::LibraryInput>::new(&mut world);
         {

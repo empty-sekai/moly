@@ -14,7 +14,7 @@
 //! Everything the draw depends on is read from the extracted prefab: the
 //! material's six floats and its colour, the pass blend state, the image's
 //! material and uvRect, the canvas render mode and the image's rect. The
-//! program itself is transcribed in `shaders/concentration_line.wesl`. A
+//! program itself is implemented in `shaders/concentration_line.wesl`. A
 //! missing or different prefab refuses the overlay with one WARN; the move
 //! continues without it.
 //!

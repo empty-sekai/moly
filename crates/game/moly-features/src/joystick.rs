@@ -1,58 +1,89 @@
-//! 摇杆域：虚拟摇杆——真源 CustomJoyStick（浮动摇杆）的触摸面移植。
+//! Joystick domain: the virtual touch joystick, the touch surface of the
+//! game's floating `CustomJoyStick`.
 //!
-//! 输入模型（方法体直读，非推断；序列化值 APK player data 三实例一致）：
-//! * **触摸区**：窗口左下 35% 宽 × 50% 高（触摸层 RectTransform 的
-//!   layerSize 序列化值）。区内起手的**触摸**归摇杆；区外起手的归
-//!   手势层（`gesture`）。真源里这层分派由 UI 射线完成（摇杆区的
-//!   CanvasGroup blocksRaycasts 挡住射线），此处用同一谓词在两层各
-//!   自复现。**鼠标不进摇杆**——真源是纯触屏产品，宿主桌面鼠标的
-//!   手势面保持全屏（相机拖拽的既有分配不因本域改变）。
-//! * **方向**：首指按下捕获该指、底盘生于触点（浮动式）；方向 =
-//!   (触点 − 底盘心) 翻成真源屏坐标（y 向上）后 / 底盘半径，半径 =
-//!   128 canvas 单位 × canvas 缩放（底盘 RectTransform 256×256 的
-//!   半边）。死区 0（只捕精确 0）、上限 1.0（超限归一 × 1）、中段
-//!   原始比例 ⇒ 实效 = 把比值夹到单位长。handleRange 1.0、轴双向、
-//!   snap 关。
-//! * **事件流**：按下 → 基类 OnPointerDown 先虚调一次 OnDrag，发
-//!   UPDATE（底盘生于触点，差值恰为零 ⇒ 方向零），再发 BEGAN（presenter
-//!   不理 BEGAN）⇒ **按下即活跃、移动向量为零**：玩家进 Move 态、朝向
-//!   atan2(0,0)=0、走姿以速率下限 0.55 原地播；此后引擎输入模块只在
-//!   拖动开始后才派 OnDrag——拖动开始 = 距按下点的平方距离 ≥ 事件系统
-//!   `m_DragThreshold`²（序列化 10，设备像素；预制体与场景两处同值，
-//!   无运行时改写者）；开始后每次移动 → UPDATE（方向 + 相机基烘移动
-//!   向量）；松开/系统取消 → END（清活跃）。按下那一下真源经画布相机
-//!   往返一次浮点，得零或微小噪声；本层没有那次往返，取精确零（具名：
-//!   噪声不复现）。真源 presenter 的 UPDATE 式
-//!   （OnTouchJoyStick）：移动向量 = 相机前（去 y 归一，水平模长
-//!   近零时**该项**回零、右项保留）× 方向.y + 相机右 × 方向.x，
-//!   和向量不归一。烘基取 UPDATE 时刻的相机——按住不动时相机转
-//!   动，移动向量不随动（真源如此，照抄）。
-//! * **让位门**（真源 OnChangeGameState 的 GameStateType 分派，枚举
-//!   直读）：Edit=2 与 Talk=3 → 禁用并 ResetState（正在拖的指以 END
-//!   收场）；LearnSiteEnvironment=6 同禁（harvest 的学习现象态）；
-//!   CutScene=5/SiteMove=10/LevelUpMyRoomSite=11/Delivery=12 同禁但本仓
-//!   无对应态（挂账）；
-//!   **SomeCharacterTalk=7 不在摇杆的分派表里**——环境配对对话
-//!   （NPC×NPC / NPC×家具）不改游戏态，摇杆照常可用；Harvest=4 与
-//!   PhotoShot=8 反而保持可用（PhotoShot 隐 UI）。本仓对应：摆放编辑
-//!   （EditSessionActive）与玩家自己的对话会话（PlayerTalkSession）
-//!   → 禁用；环境配对对话（talk 域的会话资源）**不算**。禁用期间
-//!   触摸区归手势层（真源禁用时摇杆件整个下线，射线穿到全屏手势层）。
-//! * **呈现**：捕获中底盘（256 canvas 单位）显于触点、手柄（128）
-//!   随方向偏移 = 方向 × 128 × 缩放；松开隐藏。两件贴图按 UI atlas
-//!   的 sprite rect 从整页裁（rect 是底原点坐标，消费侧翻成顶原点）。
+//! Input model (the serialized values agree across the three joystick
+//! instances):
+//! * **Touch zone**: the lower-left 35% width × 50% height of the window
+//!   (the serialized `layerSize` of the touch layer's RectTransform). A
+//!   **touch** that starts inside the zone belongs to the stick; one that
+//!   starts outside belongs to the gesture layer (`gesture`). The game
+//!   splits these with UI raycasts (the stick's CanvasGroup `blocksRaycasts`
+//!   stops the ray), and this code reproduces that split by evaluating the
+//!   same predicate in each layer. **The mouse never enters the stick**: the
+//!   game is touch-only, so the host's desktop mouse keeps the full-screen
+//!   gesture surface (the existing split for camera drags is unchanged by
+//!   this domain).
+//! * **Direction**: the first press captures that finger and the base spawns
+//!   at the touch point (floating style); direction = (touch − base centre)
+//!   mapped to game screen coordinates (y up) divided by the base radius,
+//!   radius = 128 canvas units × canvas scale (half the base RectTransform's
+//!   256×256). Dead zone 0 (only an exact 0 is caught), limit 1.0 (over the
+//!   limit is normalized × 1), the middle keeps its raw ratio, so the result
+//!   is the ratio clamped to unit length. `handleRange` 1.0, both axes
+//!   bidirectional, snap off.
+//! * **Event flow**: press → the base class's OnPointerDown calls OnDrag once
+//!   first, sending UPDATE (the base spawns at the touch point, the
+//!   difference is exactly zero, so the direction is zero), then sends BEGAN
+//!   (the presenter ignores BEGAN), so **the press makes the input active
+//!   with a zero move vector**: the player enters the Move state, faces
+//!   atan2(0,0)=0, and plays the walk pose in place at the lower rate bound
+//!   0.55; afterwards the engine input module sends OnDrag only once the
+//!   drag starts — the drag starts once the squared distance from the press
+//!   point ≥ the event system's `m_DragThreshold`² (serialized 10, device
+//!   pixels; the same value in the prefab and the scene, with no runtime
+//!   writer); after that each move → UPDATE (direction + camera basis baked
+//!   into the move vector); release/system cancel → END (active cleared). On
+//!   the press itself the game round-trips through the canvas camera in
+//!   floating point, yielding zero or tiny noise; this layer skips that trip
+//!   and uses exact zero (named: the noise is not reproduced). The game
+//!   presenter's UPDATE formula (OnTouchJoyStick):
+//!   move vector = camera forward (y removed, normalized; when the
+//!   horizontal length is near zero **that term** falls back to zero and the
+//!   right term is kept) × direction.y + camera right × direction.x; the sum
+//!   is not normalized. The basis is simulated from the camera at UPDATE
+//!   time — if the camera turns while the finger is held still, the move
+//!   vector does not follow (the game behaves the same way).
+//! * **Yield gate** (the game's `OnChangeGameState` dispatch on
+//!   GameStateType, read from the enum): Edit=2 and Talk=3 → disabled with
+//!   ResetState (a finger mid-drag ends with END); LearnSiteEnvironment=6 is
+//!   disabled the same way (the harvest learn-phenomenon state);
+//!   CutScene=5/SiteMove=10/LevelUpMyRoomSite=11/Delivery=12 are disabled
+//!   the same way but this repository has no matching state (tracked as
+//!   pending);
+//!   **SomeCharacterTalk=7 is not in the stick's dispatch table** —
+//!   environment-paired dialogue (NPC×NPC / NPC×fixture) does not change
+//!   the game state, so the stick stays available; Harvest=4 and
+//!   PhotoShot=8 likewise stay available (PhotoShot hides the UI). In this
+//!   repository: placement editing (`EditSessionActive`) and the player's own
+//!   dialogue session (`PlayerTalkSession`) → disabled; environment-paired
+//!   dialogue (the talk domain's session resource) **does not count**. While
+//!   disabled the touch zone belongs to the gesture layer (the game takes the
+//!   stick object out of the layer entirely, so rays pass to the full-screen
+//!   gesture layer).
+//! * **Presentation**: while capturing, the base (256 canvas units) shows at
+//!   the touch point and the handle (128) offsets along the direction =
+//!   direction × 128 × scale; both hide on release. The two sprites are cut
+//!   from the whole UI atlas page by their sprite rects (the rects are
+//!   bottom-origin coordinates; the consumer flips them to top-origin).
 //!
-//! 多指：**只跟首指**。已捕获时区内第二根指按下被吞掉（真源
-//! OnPointerDown 对重复捕获早退，射线也归摇杆件——手势层收不到）；
-//! 区外的第二根指照常进手势层（摇杆拖动 + 区外指拖相机并存，
-//! 这是触屏产品的常态操作形）。单指针是手势层的移植边界（真源
-//! 多指族 DUO/PINCH 不迁），本层对第二根**区内**指同样不迁。
+//! Multi-touch: **only the first finger is followed**. While one is
+//! captured, a second finger pressed inside the zone is swallowed (the game's
+//! OnPointerDown returns early on a repeated capture and the ray also belongs
+//! to the stick, so the gesture layer never sees it); a second finger outside
+//! the zone enters the gesture layer as usual (dragging the stick and
+//! dragging the camera with an outside finger coexist, the normal touch
+//! interaction). Single pointer is the gesture layer's boundary (the game's
+//! multi-finger family DUO/PINCH is not carried over), and this layer does
+//! not carry over a second finger **inside** the zone either.
 //!
-//! 冒烟口（`MOLY_JOYSTICK_AUTOSMOKE_SECS`）：往 `TouchInput` 消息流
-//! 注入剧本触摸——消息面就是真实输入面（引擎触摸事件落在同一条流
-//! 上），注入即走摇杆层本体。剧本两周期（右拖满偏移、上拖满偏移，
-//! 各含起手/满偏/收场三时刻），段界记玩家位置快照，位移方向逐段
-//! 可对账。
+//! Smoke hook (`MOLY_JOYSTICK_AUTOSMOKE_SECS`): injects scripted touches
+//! into the `TouchInput` message stream — the message surface is the real
+//! input surface (engine touch events land on the same stream), so an
+//! injection goes through the stick itself. The script has two cycles (drag
+//! right to full deflection, drag up to full deflection, each with
+//! start/full-deflection/end instants); a player position snapshot is taken
+//! at each segment boundary, so the displacement direction can be reconciled
+//! per segment.
 
 use crate::balloon::BALLOON_LAYER;
 use crate::canvas::RootCanvas;
@@ -66,8 +97,8 @@ use bevy::window::PrimaryWindow;
 
 pub use crate::joystick_law::{bake, bake_move_vector, handle_input, DEAD_ZONE, HANDLE_SIZE, LIMIT};
 
-/// 触摸区占比（真源触摸层 RectTransform 的 layerSize 序列化值
-/// (0.35, 0.5)）。
+/// Touch zone fraction (the serialized `layerSize` (0.35, 0.5) of the touch
+/// layer's RectTransform).
 const ZONE_W: f32 = 0.35;
 const ZONE_H: f32 = 0.5;
 
@@ -190,8 +221,7 @@ pub fn advance(
     if !state.enabled {
         touches.clear();
         if state.captured.take().is_some() {
-            // 真源状态切换收场：发布 END（ResetStateByCurrentPos 同拍发
-            // 一条 END 态事件，presenter 清 _isJoyStickInput）。
+            // State-change close-out in the game: END is published (ResetStateByCurrentPos sends one END-state event in the same step and the presenter clears _isJoyStickInput).
             state.active = false;
             state.dragging = false;
             state.direction = Vec2::ZERO;
@@ -250,8 +280,11 @@ pub fn advance(
                     continue;
                 }
                 if state.captured.is_none() && in_zone(touch.position, width, height) {
-                    // 首指捕获：底盘生于触点（浮动式）。已捕获时区内第二指
-                    // 吞掉（真源早退 + 射线归摇杆件）；区外指不归本层。
+                    // First-finger capture: the base spawns at the touch point
+                    // (floating style). While one finger is captured, a second
+                    // inside the zone is swallowed (the game returns early and
+                    // the ray belongs to the stick); a finger outside the zone
+                    // does not belong to this layer.
                     state.captured = Some(touch.id);
                     state.base = touch.position;
                     state.dragging = false;
@@ -290,23 +323,23 @@ pub fn advance(
                             drag_threshold
                         );
                     }
-                    // OnDrag：差值翻成真源屏坐标（y 向上）除以底盘半径，
-                    // 再过 HandleInput 的夹（死区 0 只捕精确 0；超上限
-                    // 归一 × 1；中段保持原始比例）。
+                    // OnDrag: the difference is mapped to game screen
+                    // coordinates (y up) and divided by the base radius, then
+                    // clamped by HandleInput (dead zone 0 catches only an exact
+                    // 0; over the limit is normalized × 1; the middle keeps its
+                    // raw ratio).
                     let raw = Vec2::new(
                         touch.position.x - state.base.x,
                         state.base.y - touch.position.y,
                     ) / radius;
                     state.direction = handle_input(raw);
-                    // presenter 的 UPDATE：烘移动向量并置活跃。相机不在
-                    // 场（装载期触摸）真源整式短路——不置活跃，等下一
-                    // 次 UPDATE 重烘。
-                    match bake_move_vector(state.direction, &cameras) {
-                        Some(vector) => {
-                            state.move_vector = vector;
-                            state.active = true;
-                        }
-                        None => {}
+                    // The presenter's UPDATE: bake the move vector and set the
+                    // input active. With no camera present (touch during
+                    // loading) the game short-circuits the whole formula — the
+                    // input is not set active and the next UPDATE bakes again.
+                    if let Some(vector) = bake_move_vector(state.direction, &cameras) {
+                        state.move_vector = vector;
+                        state.active = true;
                     }
                     if (state.direction - *last_logged).length() > 0.2 {
                         *last_logged = state.direction;
@@ -323,9 +356,11 @@ pub fn advance(
             }
             TouchPhase::Ended | TouchPhase::Canceled => {
                 if state.captured == Some(touch.id) {
-                    // 系统取消与正常松开同式收场（真源手势层只认
-                    // OnPointerUp；指被系统收走后跟踪面若不收会僵住，
-                    // 触屏产品的让位路径按松开处理）。
+                    // A system cancel closes out the same way as a normal
+                    // release (the game's gesture layer only handles
+                    // OnPointerUp; if a finger taken by the system were left
+                    // tracked, the surface would freeze, so the touch-product
+                    // release path treats it as a lift).
                     state.captured = None;
                     state.active = false;
                     state.dragging = false;

@@ -145,21 +145,21 @@ fn source_colour(in: UberVertexOutput, p: UberT1Params) -> vec4<f32> {
     @if(UBER_EFFECT_PASS && !UBER_EMISSION_AREA_ALL) return vec4<f32>(vec3<f32>(0.0), tinted.a * in.colour.a);
     @if(!UBER_EFFECT_PASS) return tinted * in.colour;
 }
-// 源程序的片元链在末尾有两条 uniform 分支。两条都读同一个「已乘过自发光
+// 游戏程序的片元链在末尾有两条 uniform 分支。两条都读同一个「已乘过自发光
 // 与顶点色」的 rgb，次序固定：亮度键控透明（只改 alpha）→ 现象光（只改
 // rgb）。基色程序与带自发光的程序在这一点上一致，所以这段尾巴对两个入口
-// 同形。两者都在源存储色彩空间里算，前向入口的格式解码仍在最后一步。
+// 同形。两者都在游戏存储色彩空间里算，前向入口的格式解码仍在最后一步。
 
-/// `_TranceparencyByLuminanceEnabled` 臂：按源亮度对 alpha 做一次 smoothstep
-/// 溶解。逐句对着源程序的标量段转写——
+/// `_TranceparencyByLuminanceEnabled` 臂：按游戏亮度对 alpha 做一次 smoothstep
+/// 溶解。按游戏程序的标量段逐式写——
 ///   v      = _InverseLuminanceTransparency >= 0.5 ? 1 - lum : lum
 ///   p      = min(progress, 1) ; s = min(sharpness, 1)
 ///   lo     = p * (2 - s) - (1 - s)
 ///   宽度    = p * (2 - s) - lo
 ///   alpha *= smoothstep(lo, lo + 宽度, v)
-/// 宽度代数上等于 `1 - s`，但这里照源写成那个减式，并照源先取倒数再相乘
-/// （而不是直接相除）：s = 1 时源本身就是除以零，这里不加保护——加了就与
-/// 源不一样。
+/// 宽度代数上等于 `1 - s`，但这里照游戏写成那个减式，并照游戏先取倒数再相乘
+/// （而不是直接相除）：s = 1 时游戏本身就是除以零，这里不加保护——加了就与
+/// 游戏不一样。
 fn luminance_transparency(rgb: vec3<f32>, alpha: f32, l: vec4<f32>) -> f32 {
     let lum = dot(rgb, vec3<f32>(0.298911989, 0.586610973, 0.114478));
     let v = select(lum, 1.0 - lum, l.z >= 0.5);
@@ -181,8 +181,8 @@ fn phenomena_light(rgb: vec3<f32>, light: vec4<f32>) -> vec3<f32> {
     return light.w * (c * light.rgb - c) + c;
 }
 
-/// 两条臂的共同尾段。`scalars.z` / `scalars.w` 就是源程序里那两个 uniform
-/// 判别量，判据照源写成 `0.5 < x`。两条臂都读**进入尾段时**的 rgb：现象光
+/// 两条臂的共同尾段。`scalars.z` / `scalars.w` 就是游戏程序里那两个 uniform
+/// 判别量，判断式照游戏写成 `0.5 < x`。两条臂都读**进入尾段时**的 rgb：现象光
 /// 不读被亮度臂改过的 alpha，亮度臂也不读被现象光改过的 rgb。
 fn shade_tail(colour: vec4<f32>, p: UberT1Params, light: vec4<f32>) -> vec4<f32> {
     var out = colour;

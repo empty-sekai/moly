@@ -366,7 +366,7 @@ pub fn game_command(input: &str) -> Result<(), String> {
         }
         // Validated now and queued for the next frame, which sends it to the
         // server; the answer arrives through the server view cache.
-        GameCommand::ServerEdit(command) => return enqueue(GameCommand::ServerEdit(command)),
+        GameCommand::ServerEdit(command) => enqueue(GameCommand::ServerEdit(command)),
         command => enqueue(command),
     }
 }

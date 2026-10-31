@@ -233,7 +233,7 @@ fn parse_actions(text: &str) -> AloneActions {
                     .get("trigger")
                     .unwrap_or_else(|| panic!("单位 {unit_id} 场景 {id} 缺 trigger")),
                 unit_id,
-                &id,
+                id,
             );
             let steps = parse_steps(
                 scenario
@@ -241,7 +241,7 @@ fn parse_actions(text: &str) -> AloneActions {
                     .and_then(|v| v.as_array())
                     .unwrap_or_else(|| panic!("单位 {unit_id} 场景 {id} 缺 steps 数组")),
                 unit_id,
-                &id,
+                id,
             );
             rows.push(law::Scenario {
                 id: id.to_owned(),
@@ -1069,11 +1069,10 @@ pub fn advance(
         }
         // This system runs after conversation admission. A Rest state never
         // survives TalkHold, and never steals a continuing dialogue's player.
-        if talk.is_none() {
-            if rt.script.is_some() || epoch.is_some() {
+        if talk.is_none()
+            && (rt.script.is_some() || epoch.is_some()) {
                 driver.alone_holds = rt.script.is_some();
             }
-        }
     }
 }
 

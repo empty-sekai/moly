@@ -243,7 +243,7 @@ fn treasure_shadow_source(
     let mut out = color;
     for channel in &mut out {
         let delta = *channel * t + -*channel;
-        *channel = scale * delta + *channel;
+        *channel += scale * delta;
     }
     out
 }
@@ -277,7 +277,7 @@ fn fog_source(
     let mut out = color;
     for c in 0..3 {
         let delta = distance_blended[c] - out[c];
-        out[c] = height * delta + out[c];
+        out[c] += height * delta;
         out[c] = out[c].clamp(0.0, 1.0);
     }
     out
@@ -349,11 +349,11 @@ pub fn ground_fragment_color(
     let mut color = base;
     for c in 0..3 {
         let light_delta = color[c] * globals.phenomena_directional_light_color[c] + -color[c];
-        color[c] = globals.phenomena_directional_light_color[3] * light_delta + color[c];
+        color[c] += globals.phenomena_directional_light_color[3] * light_delta;
     }
     for c in 0..3 {
         let shade_delta = color[c] * globals.phenomena_shade_color[c] + -color[c];
-        color[c] = ramp * shade_delta + color[c];
+        color[c] += ramp * shade_delta;
     }
     color = treasure_shadow_source(
         color,

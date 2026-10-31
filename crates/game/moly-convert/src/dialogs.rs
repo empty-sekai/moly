@@ -497,7 +497,7 @@ fn show(screens: &mut ScreenManager, which: DialogType, caller: &str) -> Result<
 pub fn open_start(
     mut screens: ResMut<ScreenManager>,
     mut dialogs: ResMut<ConvertDialogs>,
-    mut screen: ResMut<ConvertScreen>,
+    screen: ResMut<ConvertScreen>,
     roots: Query<(), With<StartRoot>>,
     layouts: Res<UiLayouts>,
 ) {
@@ -535,7 +535,7 @@ pub fn open_start(
 pub fn open_shorten(
     mut screens: ResMut<ScreenManager>,
     mut dialogs: ResMut<ConvertDialogs>,
-    mut screen: ResMut<ConvertScreen>,
+    screen: ResMut<ConvertScreen>,
     roots: Query<(), With<ShortenRoot>>,
     layouts: Res<UiLayouts>,
 ) {
@@ -679,7 +679,7 @@ fn thumbnail(
 /// Update: `RefreshView` of the start confirm, each frame it shows (the pass
 /// warning is its `Update`).
 pub fn setup_start(
-    mut layouts: ResMut<UiLayouts>,
+    layouts: ResMut<UiLayouts>,
     server: Res<AssetServer>,
     mut dialogs: ResMut<ConvertDialogs>,
     data: DialogData,
@@ -766,7 +766,7 @@ pub fn setup_start(
 /// the frame's clock (`UpdateSlot()`), then its price, the remaining time and
 /// the item's name written (`RefreshView`).
 pub fn setup_shorten(
-    mut layouts: ResMut<UiLayouts>,
+    layouts: ResMut<UiLayouts>,
     mut dialogs: ResMut<ConvertDialogs>,
     data: DialogData,
     mut views: Query<(&Nodes, &mut UiPrefabView), With<ShortenRoot>>,

@@ -13,7 +13,7 @@
 
 use bevy::prelude::*;
 
-use moly_assets::json::master::{self, MasterData, MasterTable};
+use moly_assets::json::master::{MasterData, MasterTable};
 use moly_law::ui::mysekai_rank::{MasterMysekaiRank, MysekaiRankModel};
 
 pub use crate::rank_table::{parse_ranks, UserTotalExp};

@@ -577,10 +577,10 @@ impl Contract {
             played.push(PlayedLayer {
                 index: layer_index,
                 layer,
-                machine: *machine,
+                machine,
                 state,
                 motion,
-                clip: *clip,
+                clip,
                 curves: first_curve..self.curves.len(),
             });
             layers.push(json!({"index":layer_index,"blending":blending,"serializedWeight":weight,

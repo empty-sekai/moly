@@ -94,12 +94,15 @@ pub const REPORT_PERIOD: Duration = Duration::from_secs(2);
 /// 都响亮失败——不猜。
 const WORLD_MATCH_TOL: f32 = 1e-3;
 
-/// 布料骨标记：链内骨实体在装配时挂上。读查询（`Without`）与写查询
-/// （`With`）以此分界——链骨的 Transform 由本模块独占写，动作库不
-/// 驱动它们，两者互不踩脚。动画位对链骨不用现行变换（用绑定姿态快照
-/// 合成，见 [`world_transform`]）；碰撞几何是**例外读者**：碰撞骨本身
-/// 可以是链骨（真源同形，随骨走），此时读链骨的现行——上一帧写回的
-/// 变换（见 [`collider_world_transform`]）。
+/// Cloth bone marker: attached to in-chain bone entities during assembly. Read
+/// queries (`Without`) and write queries (`With`) are split by it — the chain
+/// bones' Transform is written exclusively by this module and the animation library
+/// does not drive them, so the two never step on each other. Animation sampling
+/// does not use the live transform of a chain bone (it is composed from a bind-pose
+/// snapshot, see [`world_transform`]); collision geometry is the **exception
+/// reader**: a collider bone can itself be a chain bone (a valid shape that follows
+/// the bone), and then it reads the chain bone's live transform — the one written
+/// back on the previous frame (see [`collider_world_transform`]).
 #[derive(Component)]
 pub struct ClothBone;
 
@@ -770,15 +773,19 @@ impl ClothWeave<'_, '_> {
                     );
                 }
                 let entity = bind(chain_name, "碰撞体", &pc.bone, pc.bone_world)?;
-                // 碰撞骨同时是链骨：真源的合法形态，不是结构冲突。真源的
-                // 骨读（ReadBoneFromTransform）在帧首一次读全部登记骨的
-                // **当前**变换、先于模拟（UpdateStartSimulation，两条更新
-                // 路同序）——链骨被布料写回之后，绑在它上面的碰撞体读到的
-                // 就是上一帧的解算姿势（首帧装配态即绑定姿势，两者同一）。
-                // 几何读法走 [`collider_world_transform`]（链骨取现行局部
-                // 变换）。本批 31 份 rig 恰一例：unit 10 的饰品链中段骨自
-                // 带一枚平面碰撞体（selection=2 钉在动画位，位置恒绑定
-                // 姿，旋转随子线）。
+                // A collider bone that is also a chain bone: a valid shape, not a
+                // structural conflict. The bone read (`ReadBoneFromTransform`) reads
+                // the **current** transform of every registered bone once at the start
+                // of the frame, before the simulation advances (UpdateStartSimulation,
+                // the same order on both update paths) — once a chain bone has been
+                // written back by the cloth, a collider bound to it reads the solved
+                // pose of the previous frame (on the first frame the assembled state is
+                // the bind pose, so both agree).
+                // Geometry reads go through [`collider_world_transform`] (a chain bone
+                // uses its live local transform). Of the 31 rigs in this batch exactly
+                // one is like this: the middle bone of unit 10's accessory chain carries
+                // a planar collider (selection=2 pinned to the animated slot, position
+                // always the bind pose, rotation follows the sub-chain).
                 if chain_bones.contains(&entity) {
                     chain_bone_colliders += 1;
                 }
@@ -867,16 +874,22 @@ fn world_transform(
     world
 }
 
-/// 碰撞骨的世界变换：路径上的链骨取**现行**局部变换（上一帧布料写回的
-/// 姿势），其余取当帧动画局部。与 [`world_transform`]（动画位合成，链骨
-/// 用绑定姿态快照）是两条语义：真源的骨读在帧首一次读全部登记骨的当前
-/// 变换、先于模拟推进，碰撞体绑在链骨上时读到的就是它上一次被写回的
-/// 姿势（首帧装配态两者同为绑定姿势）。
+/// World transform of a collider bone: chain bones along the path use their
+/// **live** local transform (the pose written back by the cloth on the previous
+/// frame), all others the current frame's animated local transform. This is a
+/// different rule from [`world_transform`] (composed at the animated slot, with
+/// chain bones from a bind-pose snapshot): the bone read reads every registered
+/// bone's current transform once at the start of the frame, before the simulation
+/// advances, so a collider bound to a chain bone reads the pose that was last
+/// written back to it (on the first frame both are the bind pose).
 ///
-/// 边界：本系统逐链「解算→写回」，链 N 的碰撞体若引用**更早链**的骨，
-/// 读到的是本帧姿势而非上一帧（真源全帧首读、恒上一帧）。本批 31 份
-/// rig 的链骨碰撞体恰一例且**自引**（unit 10，碰撞体与骨同链，构建在
-/// 本链写回之前），读数与真源一致；跨链引用出现时这一差要重新核。
+/// Boundary: this system solves and writes back one chain at a time; if chain N's
+/// collider references a bone of an **earlier** chain, it reads this frame's pose
+/// rather than the previous one (the program reads all bones at the start of the
+/// frame, so it always sees the previous frame). Of the 31 rigs in this batch, the
+/// one case of a chain-bone collider is **self-referential** (unit 10, collider and
+/// bone in the same chain, built before this chain is written back), so the value
+/// agrees; if a cross-chain reference appears, this difference must be rechecked.
 fn collider_world_transform(
     base: &Transform,
     path: &[Entity],

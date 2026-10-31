@@ -378,7 +378,7 @@ fn gradient_rgba32(block: &MinMaxGradient, time: f32, random: f32) -> u32 {
 fn gradient_times_colour(g: u32, c: u32) -> u32 {
     (0..4).fold(0, |out, i| {
         let s = 8 * i;
-        out | (((((g >> s) & 0xff) + 1) * ((c >> s) & 0xff) >> 8) << s)
+        out | ((((((g >> s) & 0xff) + 1) * ((c >> s) & 0xff)) >> 8) << s)
     })
 }
 
@@ -386,7 +386,7 @@ fn gradient_times_colour(g: u32, c: u32) -> u32 {
 fn colour_times_gradient(g: u32, c: u32) -> u32 {
     (0..4).fold(0, |out, i| {
         let s = 8 * i;
-        out | (((((c >> s) & 0xff) + 1) * ((g >> s) & 0xff) >> 8) << s)
+        out | ((((((c >> s) & 0xff) + 1) * ((g >> s) & 0xff)) >> 8) << s)
     })
 }
 

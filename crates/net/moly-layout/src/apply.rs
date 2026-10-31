@@ -185,7 +185,7 @@ fn master(rules: &Rules, fixture: i32) -> Result<&FixtureMaster, Refusal> {
     })
 }
 
-fn placed_row<'a>(layout: &'a Layout, piece: Piece) -> Result<&'a HousingLayoutFixture, Refusal> {
+fn placed_row(layout: &Layout, piece: Piece) -> Result<&HousingLayoutFixture, Refusal> {
     layout
         .rows
         .iter()

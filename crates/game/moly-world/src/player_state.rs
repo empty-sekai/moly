@@ -1,46 +1,57 @@
-//! 玩家 avatar 行为状态机（第一批：门依赖态）。
+//! Player avatar behaviour state machine (first batch: gate-dependent states).
 //!
-//! 真源骨架（`PlayerAvatarStateMachine`，原生树与伪代码树双核）：
+//! Skeleton (`PlayerAvatarStateMachine`):
 //!
-//! - **每帧**：`UpdateController` 先推 `OnUpdate`（调当前态的
-//!   `UpdateState`，随后若态自设了 `nextStatus` 就代它走一次
-//!   `ChangeStatus`），再取输入向量：有输入 → `MoveTo`（写 `InputVec`
-//!   后 `ChangeStatus`，dash 位开时目标 23、否则 1）；无输入且当前 ∈
-//!   {Move, AutoMove, Dash} → `OnMoveFinish`（= `ChangeStatus(Idle)`）；
-//!   无输入且是别的态 → 不写（收场旗只对这三个态为 0）。
-//! - **`ChangeStatus(status)` 五段**：① 同态早退；② 动作数据为空抛错；
-//!   ③ **截获门**——`CanIntercept` 为假且是本人 avatar 时静默丢弃；
-//!   ④ 从 Move 离开去往 Move/AutoMove 之外时 NavMeshAgent 停在当前位；
-//!   ⑤ 旧态 Dispose → 换 `currentStatus` → 新态 Initialize → 本人
-//!   avatar 时多人广播。
-//! - **门默认开**：`PlayerAvatarStateBase` 构造在挂上动作数据后立刻
-//!   `SetInterceptFlag(true)`——Setup 期 31 个状态对象全建，门从状态机
-//!   装好起就是开的。各独占流程的舞步都是同一形状：**门开着换态进去 →
-//!   关门 → 等收场 → 开门 → 换态出去**（采集进出、自动寻路、演出家具
-//!   播放全是它）。说话人不关这扇门：挡玩家走动的是输入被对话面收走，
-//!   不是状态机。
+//! - **Every frame**: `UpdateController` first advances `OnUpdate` (calls
+//!   `UpdateState` of the current state, then, if the state set its own
+//!   `nextStatus`, performs one `ChangeStatus` for it), then takes the input
+//!   vector: input present → `MoveTo` (write `InputVec`, then `ChangeStatus`, with
+//!   target 23 when the dash bit is set and 1 otherwise); no input and current ∈
+//!   {Move, AutoMove, Dash} → `OnMoveFinish` (= `ChangeStatus(Idle)`); no input and
+//!   any other state → no write (the finishing flag is 0 only for those three
+//!   states).
+//! - **`ChangeStatus(status)` in five stages**: ① same state, early return;
+//!   ② empty motion data, throw; ③ **intercept gate** — silently dropped when
+//!   `CanIntercept` is false and this is the local avatar; ④ when leaving Move for
+//!   anything other than Move/AutoMove, the NavMeshAgent stays at the current
+//!   position; ⑤ Dispose the old state → swap `currentStatus` → Initialize the new
+//!   state → multi-player broadcast for the local avatar.
+//! - **The gate is open by default**: the `PlayerAvatarStateBase` constructor calls
+//!   `SetInterceptFlag(true)` right after the motion data is attached — all 31
+//!   state objects are built during Setup, so the gate is open as soon as the
+//!   state machine is installed. Every exclusive flow follows the same step: **open
+//!   gate, change state into the flow → close the gate → wait for the finish → open
+//!   the gate → change state out** (harvest enter/exit, auto pathfinding and
+//!   timeline-fixture playback all do this). A talk does not close this gate: what
+//!   stops the player from moving is the input being taken away by the dialogue
+//!   surface, not the state machine.
 //!
-//! 本仓等价物（与 `camera::FieldCameraState` 同形：常驻 Resource，状态
-//! 是被动标记——真源的状态对象也只是标记，行为活在各自域的协程里）：
+//! The equivalent here (the same shape as `camera::FieldCameraState`: a resident
+//! Resource, and the state is a passive marker — the engine's state objects are
+//! markers too, and the behaviour lives in each domain's own coroutines):
 //!
-//! - [`PlayerAvatarStates`]：当前态 + 截获门。
-//! - [`PlayerAvatarStates::change_status`]：五段中的 ①③⑤。②的动作数据
-//!   在 Resource 形态下构造即真；④的 agent 停位没有对应物——本仓位移
-//!   是输入驱动运动学（`player::advance`），让位由各域自己的持留承担
-//!   （对话 `TalkHold`、家具会话 `PlayerFixtureHeld`；采集见下），状态机
-//!   不再叠加一道；⑤的 Dispose /
-//!   Initialize 与多人广播：状态是标记，进出场行为归各自域，单机无
-//!   广播。
-//! - **`nextStatus` 通道不建**：第一批四态的 `UpdateState` 体没有一个
-//!   写它（Idle 只累加计时；Harvest、UseTimelineFixture、Talk 是空体）
-//!   ——通道等第一个真用它的态进批再落。
+//! - [`PlayerAvatarStates`]: current state + intercept gate.
+//! - [`PlayerAvatarStates::change_status`]: stages ①③⑤ of the five. Stage ②'s
+//!   motion data is true by construction in a Resource form; stage ④'s agent
+//!   parking has no counterpart — movement here is input-driven kinematics
+//!   (`player::advance`), and yielding is handled by each domain's own hold (talk
+//!   `TalkHold`, fixture sessions `PlayerFixtureHeld`; harvest see below), so the
+//!   state machine does not add another layer; stage ⑤'s Dispose / Initialize and
+//!   multi-player broadcast: states are markers, enter/exit behaviour belongs to
+//!   each domain, and a single-player session has no broadcast.
+//! - **No `nextStatus` channel**: none of the first batch's four states writes it
+//!   in `UpdateState` (Idle only accumulates time; Harvest, UseTimelineFixture and
+//!   Talk have empty bodies) — the channel is added when the first state that
+//!   actually uses it joins the batch.
 //!
-//! 写者：采集动作（`harvest::action`：`PlayHarvestAction` 进 7 关门、
-//! 收场开门回 0）· 对话会话（[`drive_from_talk`]）· 输入
-//! （[`drive_from_input`]），以及家具会话的进出场。家具控制租约存在时，本模块三个域写者全部让位；截获门由
-//! 该会话在最终释放时恢复，不能被别的域的延迟收场提前打开。门读者：
-//! 相机近距进入守卫（`camera::can_switch_to_fps`，在 {Harvest,
-//! UseTimelineFixture} 拒入）。
+//! Writers: the harvest action (`harvest::action`: `PlayHarvestAction` enters 7 and
+//! closes the gate, the finish reopens it and returns to 0) · the talk session
+//! ([`drive_from_talk`]) · input ([`drive_from_input`]), plus the enter/exit of
+//! fixture sessions. While a fixture session holds its control lease, all three
+//! writers in this module yield; the intercept gate is restored by that session on
+//! its final release and must not be opened early by another domain's delayed
+//! finish. Readers of the gate: the camera's close-range entry guard
+//! (`camera::can_switch_to_fps`, which refuses in {Harvest, UseTimelineFixture}).
 
 use bevy::prelude::*;
 
@@ -113,16 +124,20 @@ pub fn update_site_exit_states(time: Res<Time>, mut states: ResMut<PlayerAvatarS
     }
 }
 
-/// 对话写者：玩家对话会话在播 ⇒ 玩家处于 Talk。
+/// Talk writer: while a player talk session is playing ⇒ the player is in Talk.
 ///
-/// 真源进场是 `ChangeAvatarsStatusToTalk`（玩家 `ChangeState(6)`、参演
-/// NPC `ChangeState(4)`——NPC 支归对话域，不在此重复）。**收场没有专门
-/// 写者**：Talk 态留着，由下一次 `MoveTo`/`OnMoveFinish` 把状态带走。
-/// 等价地，本写者只在会话在播时重申 Talk（同态时 ① 早退），会话散场
-/// 不写，等输入写者接手。会话期间门保持开（真源对话不关 CanIntercept
-/// ——挡玩家走动的是输入被对话面收走，本仓对应物是玩家身上的
-/// `TalkHold`，见 [`drive_from_input`] 的让位）。玩家点击参加的配对段
-/// 同样进入 Talk；纯 NPC 演出和合成探针不改变玩家态。
+/// Entry is `ChangeAvatarsStatusToTalk` (the player `ChangeState(6)`, participating
+/// NPCs `ChangeState(4)` — the NPC side belongs to the talk domain and is not
+/// repeated here). **There is no dedicated exit writer**: the Talk state remains
+/// and the next `MoveTo`/`OnMoveFinish` carries the state away.
+/// Equivalently, this writer only reasserts Talk while the session is playing (same
+/// state, early return at ①); it writes nothing when the session ends, and waits for
+/// the input writer to take over. The gate stays open during a session (a talk does
+/// not close CanIntercept — what stops the player from moving is the input being
+/// taken away by the dialogue surface, whose counterpart here is `TalkHold` on the
+/// player, see the yielding in [`drive_from_input`]). A paired segment the player
+/// joins by clicking also enters Talk; pure NPC performances and synthetic probes do
+/// not change the player state.
 pub fn drive_from_talk(
     session: Option<Res<PlayerTalkSession>>,
     pair: Option<Res<crate::talk::ActiveTalk>>,
@@ -137,17 +152,19 @@ pub fn drive_from_talk(
     }
 }
 
-/// 输入写者：`UpdateController` 每帧分派的等价。
+/// Input writer: the equivalent of `UpdateController`'s per-frame dispatch.
 ///
-/// 有输入 → `MoveTo` 的尾部二选一：dash 位开 ⇒ Dash，否则 Move。无输入
-/// 且当前 ∈ {Move, AutoMove, Dash} → `OnMoveFinish`（= Idle）；无输入
-/// 且是别的态 → 不写。
+/// Input present → the tail of `MoveTo`: dash bit set ⇒ Dash, otherwise Move. No
+/// input and current ∈ {Move, AutoMove, Dash} → `OnMoveFinish` (= Idle); no input
+/// and any other state → no write.
 ///
-/// 两处输入让位（真源在 `GetMoveDirection` 一层就把输入收走，状态机看到的
-/// 是「无输入」）：摆放编辑面持有输入期间；玩家参演对话期间
-/// （`TalkHold`——与 `player::advance` 的位移让位同一标记）。
-/// 家具会话持有控制租约时不消费移动输入，但不清除输入；该会话仍需
-/// 观察点按和摇杆的主动结束请求，实际位移由它自己的生命周期推进。
+/// Two cases where input yields (the engine takes the input away one level up in
+/// `GetMoveDirection`, and the state machine only sees "no input"): while the
+/// placement editor holds input; while the player participates in a talk
+/// (`TalkHold` — the same marker `player::advance` uses to yield movement).
+/// A fixture session holding the control lease does not consume movement input, but
+/// does not clear it either; that session still observes click and joystick stop
+/// requests, and the actual movement advances on its own lifecycle.
 pub fn drive_from_input(
     edits: Res<crate::field_modes::EditSessionActive>,
     players: Query<(&PlayerInput, &DashMode, Option<&TalkHold>), With<PlayerControlled>>,

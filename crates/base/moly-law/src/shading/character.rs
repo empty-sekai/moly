@@ -528,7 +528,7 @@ pub struct CharacterFragmentInputs {
 /// 抖动与眉的 discard 无法表达成值，是否丢弃由调用方另问
 /// [`dither_discards`] / [`eyebrow_discards`]；被丢弃的片元两个目标全零。
 /// 源的段序：albedo → mask switch → shade 色 → body 因子与球面因子 →
-/// 选择 → 乘 shade alpha → 光混 → 着色混 → [雾] → alpha 覆写 → brightness。
+/// 选择 → 乘 shade alpha → 光混 → 着色混 → \[雾\] → alpha 覆写 → brightness。
 #[must_use]
 pub fn character_fragment(
     input: &CharacterFragmentInputs,

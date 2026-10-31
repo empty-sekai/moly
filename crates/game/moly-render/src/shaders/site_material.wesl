@@ -1,5 +1,5 @@
 // 站点族的 Base 程序：九个 shader 族共用一份，族与 keyword 变体用宏分派。
-// 式子照源程序的运算顺序逐句翻译。
+// 式子照游戏程序的运算顺序。
 //
 // 变体键（specialize 注入；每条管线恰有一个族键）：
 //   SITE_FIELDOBJECT      FieldObject 族：uniform 阈 clip（keyword）+
@@ -56,9 +56,9 @@
 // 源程序写两个颜色目标（SV_Target1 = 0 或 emission）；本管线的主 pass
 // 只有一个颜色目标，第二目标不在此列（Object 的 emission 块同此放弃）。
 //
-// ⚠ **色彩域是这份移植的承重前提，动任何一条算术之前先读下方「色彩域」
+// ⚠ **色彩域是这份实现的承重前提，动任何一条算术之前先读下方「色彩域」
 //    那一节**（在绑定声明之后、顶点输出之前）。整条片元链在**存储
-//    （gamma）域**上算，不在线性域——真源是 gamma 色彩空间构建。
+//    （gamma）域**上算，不在线性域——游戏是 gamma 色彩空间构建。
 
 import bevy_pbr::render::forward_io::Vertex;
 import bevy_pbr::render::mesh_functions;
@@ -178,7 +178,7 @@ struct SiteEnv {
 // ---- 主光阴影消费口（group 3 binding 10/11/12）：单图单矩阵（
 // 槽 [0..3] 之外不存在；深度图由 shadowmap.rs 的深度 pass 一次成图）。
 // 律五件套（moly_law::shading::fieldobject 的 tint/apply/atten/pcf9）是
-// 移植 oracle，这里按同式同序转录；改式必须律与本文件同步。
+// 参考实现，这里按同式同序写；改式必须律与本文件同步。
 // 槽序与 shadowmap.rs 的 ShadowConsumer 摊平序是契约，两边同改。
 
 struct SiteShadow {
@@ -231,7 +231,7 @@ fn clip_mask_fails(position: vec2<f32>) -> bool {
 
 // ---- 色彩域（改这个文件里任何一条算术之前先读）----
 //
-// 真源是 **gamma 色彩空间**构建：贴图采样不解码、片元里整条链在存储
+// 游戏是 **gamma 色彩空间**构建：贴图采样不解码、片元里整条链在存储
 // （编码）域上算、结果按编码值直写帧缓冲。本管线两头都不同：
 //
 //   1 站点贴图按 sidecar 的 `textureColourSpace` 装载（`site_material.rs`
@@ -239,9 +239,9 @@ fn clip_mask_fails(position: vec2<f32>) -> bool {
 //     sRGB ⇒ 采样时硬件按 sRGB EOTF 解码，`textureSample*` 给出的是线性值；
 //   2 本管线的色彩目标是 sRGB 格式 ⇒ 写出时硬件按 sRGB OETF 再编码一次。
 //
-// ⇒ 采样后先 [`srgb_format_encode`] 编回存储域，中间整条链与源逐式同域，
+// ⇒ 采样后先 [`srgb_format_encode`] 编回存储域，中间整条链与游戏逐式同域，
 //   写出前 [`srgb_format_decode`] 解一次、硬件那一次编码恰好还原。**两步都
-//   不是源的式子，是域适配**——源没有硬件的那两步，所以它也没有对应的逆。
+//   不是游戏的式子，是域适配**——游戏没有硬件的那两步，所以它也没有对应的逆。
 //
 // ⚠ **uniform 颜色不参与这两步**：它们两侧同为原始浮点直推（`site_material.rs`
 //   从提取产物的 `colors` 原样拷入、`env.rs` 的现象色是源字面量，都不做域
@@ -587,10 +587,10 @@ fn bayer_value(pixel: vec2<f32>, quantization: f32) -> f32 {
     return value * 0.0618750006 + 0.00999999978;
 }
 
-// ---- DropShadow 律消费口（按 moly-law shading::fieldobject 同式同序转录）----
+// ---- DropShadow 律消费口（按 moly-law shading::fieldobject 同式同序写）----
 
 // 律 drop_shadow_tint：tint = lerp(colour, colour × C1.rgb, C1.a)，
-// C1 即 env.drop_shadow_color（真源全局量 _MysekaiDropShadowColor1）。
+// C1 即 env.drop_shadow_color（游戏全局量 _MysekaiDropShadowColor1）。
 fn drop_shadow_tint(colour: vec3<f32>) -> vec3<f32> {
     return env.drop_shadow_color.w * (colour * env.drop_shadow_color.rgb - colour) + colour;
 }
@@ -695,8 +695,8 @@ fn pcf9(shadow_uv: vec2<f32>, compare_depth: f32) -> f32 {
 }
 
 // 主光阴影衰减：采样坐标 = 单矩阵 × 世界坐标；距离平方用世界位到相机位。
-// 收影轴是材质上的显式槽（真源 _RECEIVE_SHADOWS_OFF 轴：带该 keyword 的
-// 变体源里整族无影针，解析层按 keyword 定 0）。
+// 收影轴是材质上的显式槽（游戏 _RECEIVE_SHADOWS_OFF 轴：带该 keyword 的
+// 变体在游戏里整族无影针，解析层按 keyword 定 0）。
 fn main_light_shadow_atten(world_position: vec4<f32>) -> f32 {
     if params.receive_shadow.x < 0.5 {
         return 1.0;

@@ -529,10 +529,10 @@ impl ServerModel {
             .get("value")
             .ok_or_else(|| format!("server.edit {path} has no value"))?;
         let mut next = self.doc.clone();
-        let delivery = edit_path(&mut next, &masters, now, path, value)
+        let delivery = edit_path(&mut next, masters, now, path, value)
             .map_err(|reason| format!("server.edit {path}: {reason}"))?;
         next.check_structure()
-            .and_then(|()| check_masters(&next, &masters))
+            .and_then(|()| check_masters(&next, masters))
             .map_err(|reason| format!("server.edit {path}: {reason}"))?;
         self.doc = next;
         match delivery {
@@ -590,7 +590,7 @@ impl ServerModel {
                 let mut next = self.doc.clone();
                 next.gate_characters.push(row);
                 next.check_structure()
-                    .and_then(|()| check_masters(&next, &masters))
+                    .and_then(|()| check_masters(&next, masters))
                     .map_err(|reason| format!("server.edit gate.reserve: {reason}"))?;
                 self.doc = next;
                 let talks = reply_talks(&self.doc);
@@ -647,7 +647,7 @@ impl ServerModel {
                     })
                     .collect();
                 next.check_structure()
-                    .and_then(|()| check_masters(&next, &masters))
+                    .and_then(|()| check_masters(&next, masters))
                     .map_err(|reason| format!("server.edit gate.change: {reason}"))?;
                 self.doc = next;
                 let talks = reply_talks(&self.doc);
@@ -709,7 +709,7 @@ impl ServerModel {
                     }),
                 }
                 next.check_structure()
-                    .and_then(|()| check_masters(&next, &masters))
+                    .and_then(|()| check_masters(&next, masters))
                     .map_err(|reason| format!("server.edit fixture.grant: {reason}"))?;
                 self.doc = next;
                 self.mark_pending(super::inventory::SECTION_FIXTURES);

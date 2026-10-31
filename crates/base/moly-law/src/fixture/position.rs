@@ -1,26 +1,35 @@
-//! 家具摆放位置律：足迹对角中点 + 墙布局外推 + 朝向。
+//! Fixture placement position rule: footprint diagonal midpoint + wall
+//! layout push-out + direction.
 //!
-//! 源链：`SetGridPosition` → `FixtureLayoutData`（min/max 格、Center、
-//! GridSize、Direction、LayoutType）→ `GetFieldPosition` → 视图落位。
-//! 本文件转录这条链的两段：**足迹两端怎么来的**（`InitializeTiles` +
-//! `RotationTile`，见 [`footprint_rotated`]）与**足迹两端怎么变成世界位**
-//! （`GetFieldPosition`），外加视图那一侧的朝向角（[`direction_yaw_degrees`]）。
+//! Source chain: `SetGridPosition` → `FixtureLayoutData` (min/max cells,
+//! Center, GridSize, Direction, LayoutType) → `GetFieldPosition` → view
+//! placement. This file implements two segments of that chain: **how the
+//! two footprint ends are obtained** (`InitializeTiles` +
+//! `RotationTile`, see [`footprint_rotated`]) and **how the footprint
+//! ends become a world position** (`GetFieldPosition`), plus the view
+//! side's yaw angle ([`direction_yaw_degrees`]).
 //!
-//! ⚠ **朝向不是只作用在模型的旋转上，它先改足迹。** min/max 在源里
-//! 不是存档列而是从 (Center, GridSize, Direction) 推出来的，而世界位读
-//! 的就是推出来的那对 min/max ⇒ 同一件家具换个朝向，**世界位本身会动**
-//! （偶数边足迹上实测动 0.125，见测试 `even_span_position_moves_with_direction`）。
-//! 把朝向只接到模型旋转上、位置沿用 Front 的那对 min/max，在奇数边足迹
-//! 上看不出差别，在偶数边上错半格。
+//! ⚠ **Direction does not only rotate the model; it first changes the
+//! footprint.** In the game min/max are not stored columns but derived
+//! from (Center, GridSize, Direction), and the world position reads the
+//! derived min/max pair ⇒ rotating the same fixture, **the world
+//! position itself moves** (0.125 on even-span footprints, measured in
+//! the test `even_span_position_moves_with_direction`). Wiring the
+//! direction only to model rotation while keeping the Front min/max
+//! pair for the position shows no difference on odd-span footprints but
+//! is half a tile off on even ones.
 //!
-//! 三个钉在源方法体上的要点：
-//! - 位置是**足迹对角中点**：min 角取 `Location.Min`（格值 ×0.25），
-//!   max 角取 `Location.Max`（格值 ×0.25 再 +0.25，即那格的远角），
-//!   x/z 各取两角的中点；
-//! - **y 不走中点**：y = 格值 0.25 × Center.Y。伪代码里这一段的
-//!   返回寄存器混写会把 y 也写成中点，原生反编译钉死它不是；
-//! - 墙布局（LayoutType 命中 0xF0 任一位）时 center −= 墙法线 ×0.125
-//!   （= 格值 0.25 × 0.5），把家具从墙格中心推离墙面。
+//! Three points fixed by the game's method body:
+//! - the position is the **footprint diagonal midpoint**: the min corner
+//!   takes `Location.Min` (cell value ×0.25), the max corner takes
+//!   `Location.Max` (cell value ×0.25 then +0.25, i.e. the far corner of
+//!   that cell), and x/z each take the midpoint of the two corners;
+//! - **y does not use the midpoint**: y = cell value 0.25 × Center.Y.
+//!   A return-register mix-up in an earlier reading would also write y
+//!   as the midpoint, but it is not;
+//! - for a wall layout (LayoutType has any of the 0xF0 bits) center −=
+//!   wall normal ×0.125 (= cell value 0.25 × 0.5), pushing the fixture
+//!   away from the wall face.
 
 use crate::fixture::areas::{
     adjust_rotate_position, calculate_rotated_position, layout_square_min,
@@ -475,11 +484,13 @@ mod tests {
         }
     }
 
-    // ---- 朝向：四臂 + 各自的反向臂 -------------------------------------
+    // ---- direction: four arms + their mirror arms ----------------------
     //
-    // ⚠ 这一族判据**不能靠现有摆放数据跑起来**：那批摆放行的朝向全是
-    // Front，而 Front ⇒ 角 0 ⇒ 旋转矩阵是单位元、足迹律是恒等
-    // ⇒ 接与不接逐值相同。所以每一臂的非 Front 输入都在这里现构造。
+    // ⚠ This family of tests **cannot run on the existing placement
+    // data**: every row there has Front direction, and Front ⇒ angle 0
+    // ⇒ the rotation matrix is the identity and the footprint rule is
+    // the identity ⇒ wiring the direction or not gives identical values.
+    // So the non-Front inputs of each arm are constructed here.
 
     const ALL_DIRECTIONS: [Direction; 4] = [
         Direction::Front,
@@ -509,7 +520,8 @@ mod tests {
         }
     }
 
-    /// 足迹两端 → (x 跨度, z 跨度)。判据按跨度对账 w/d 互换。
+    /// Footprint ends → (x span, z span). Tests reconcile w/d swaps by
+    /// span.
     fn spans(min: GridPosition, max: GridPosition) -> (i32, i32) {
         (
             max.x as i32 - min.x as i32 + 1,
@@ -598,9 +610,12 @@ mod tests {
         );
         assert!(min.x <= max.x && min.y <= max.y && min.z <= max.z);
         assert_eq!((min.z, max.z), (-1, 1));
-        // ⚠ 这个错**世界位抓不到**：对角中点对颠倒的两端给出同一个数
-        // （min=1/max=-1 与 min=-1/max=1 的中点都是 0.125）⇒ 只有足迹
-        // 本身的判据会红。占用面与挖洞侧读的是足迹，不是中点。
+        // ⚠ This error **is invisible in the world position**: the
+        // diagonal midpoint gives the same number for the two ends
+        // swapped (the midpoint of min=1/max=-1 and of min=-1/max=1 is
+        // both 0.125) ⇒ only a test of the footprint itself turns red.
+        // The occupancy surface and the carved-hole side read the
+        // footprint, not the midpoint.
         assert_eq!(axis_midpoint(1, -1), axis_midpoint(-1, 1));
     }
 

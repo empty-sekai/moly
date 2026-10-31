@@ -1,22 +1,30 @@
-// 观众 avatar 着色：`Mysekai/Avatar` Base pass 的逐句翻译（式子全在
-// moly-law 的 shading::avatar，本文件逐式镜像，槽序与 avatar_material.rs
-// 的 Rust 结构体是契约，两边同改）。
+// Audience avatar shading: the `Mysekai/Avatar` Base pass (the formulas all live in
+// moly-law's shading::avatar and this file mirrors each one; the slot order and the
+// Rust struct in avatar_material.rs are a contract, both sides change together).
 //
-// 与 `Mysekai/Character` 是两份不同的程序：没有 face/body 遮罩、球面距离场、
-// 眉毛穿透那一族。Base 片元是一条 part-index 槽分派链：合并网格把多个 part
-// 合成一个网格一份材质，靠顶点 UV0 的 z 分量区分哪片属于哪个 part。
+// It is a different program from `Mysekai/Character`: no face/body masks, spherical
+// distance field or eyebrow-piercing family. The Base fragment is a part-index slot
+// dispatch chain: the merged mesh joins several parts into one mesh and one
+// material, and the z component of vertex UV0 tells which piece belongs to which
+// part.
 //
-// ⛔ 顶点 UV0.z（part-index）是数据，不是绘制结构。本仓的合成体 glb 没有
-// z 分量（提取缺口：`CombineMesh` 没在提取侧把 part-index 烘进 UV0.z）。
-// 这里照真源按「UV0.z 会在」写；喂数据那一侧在缺 z 分量时响亮拒绝，不拆绘制。
+// ⛔ Vertex UV0.z (part-index) is data, not draw structure. This repository's
+// composed glb has no z component (extraction gap: `CombineMesh` does not bake the
+// part-index into UV0.z on the extraction side).
+// This file is written assuming UV0.z is present; the data-feeding side rejects
+// loudly when the z component is missing and does not split the draw.
 //
-// 域（这条链每一步的域）：颜色贴图按 sRGB 装载 ⇒ 硬件采样时解码成线性 ⇒
-// 采样后先 `srgb_format_encode` 编回存储（gamma）域，整条片元链在存储域上算
-// （真源是 gamma 色彩空间构建，无幂运算）；写出前 `srgb_format_decode` 解一次
-// 交给 sRGB 目标，硬件那一次编码恰好还原。uniform 颜色与顶点色不参与这两步
-// （两侧同为原始浮点、本来就在存储域）；alpha 不参与（硬件 sRGB 只作用于 rgb）。
-// 相机是 Tonemapping::None + DebandDither::Disabled ⇒ 材质程序写的就是显示
-// 终值，域适配必须落在本着色器里。
+// Domain (the domain of every step in this chain): colour textures load as sRGB ⇒
+// hardware sampling decodes them to linear ⇒ after sampling, `srgb_format_encode`
+// encodes them back to the storage (gamma) domain, so the whole fragment chain
+// computes in the storage domain (the program is built in gamma colour space, with
+// no power ops); before writing, `srgb_format_decode` decodes once for the sRGB
+// target and the hardware's single encode restores the value exactly. Uniform
+// colours and vertex colours take part in neither step (both are raw floats, already
+// in the storage domain); alpha takes no part (hardware sRGB applies to rgb only).
+// The camera uses Tonemapping::None + DebandDither::Disabled ⇒ what the material
+// program writes is the final display value, so the domain adaptation must live in
+// this shader.
 
 import bevy_pbr::render::forward_io::Vertex;
 import bevy_pbr::render::mesh_functions;
@@ -99,12 +107,15 @@ fn vertex(mesh: Vertex) -> AvatarVertexOutput {
     @if(VERTEX_UVS_A) out.uv = mesh.uv;
     @if(!VERTEX_UVS_A) out.uv = vec2<f32>(0.0);
 
-    // part-index：真源把它烘在顶点 UV0 的 z 分量（`int(in_TEXCOORD0.z)`），
-    // 合并网格的单网格单材质靠它分派贴图槽。提取侧的产物把它烘成第二套 UV
-    // （TEXCOORD_1）的 x 分量（Bevy 两套 UV 都是 Float32x2、3 分量会被整段
-    // 丢弃，TEXCOORD_1.x 是唯一既装载得进又载得了值的载体）；消费端读作
-    // vertex.uv_b（第二套 UV 顶点属性）。基座只含身体这一个 part ⇒ 全顶点
-    // 恒身体槽（0），这是真源单 part 的语义，不是占位。
+    // part-index: the program bakes it into the z component of vertex UV0
+    // (`int(in_TEXCOORD0.z)`), and the merged mesh's single mesh with a single
+    // material dispatches texture slots by it. On the extraction side it is baked
+    // into the x component of the second UV set (TEXCOORD_1) (both of Bevy's UV sets
+    // are Float32x2 and a 3-component UV is discarded entirely; TEXCOORD_1.x is the
+    // only carrier that both loads and carries a value); the consuming side reads it
+    // as vertex.uv_b (the second UV vertex attribute). The base body contains only
+    // the body part ⇒ every vertex is in the body slot (0), which is the single-part
+    // semantics, not a placeholder.
     @if(VERTEX_UVS_B) out.part_index = i32(round(mesh.uv_b.x));
     // 无第二套 UV ⇒ 通道缺失（喂入侧已 fail-closed 拒绝，不会走到这）；
     // 保底钉身体槽，让着色器结构在任何变体下都有定义。
@@ -127,17 +138,21 @@ fn vertex(mesh: Vertex) -> AvatarVertexOutput {
 
 // ---- 片元共用件 ----
 
-// 交给 sRGB 色彩目标的值：按格式的 EOTF 解一次，硬件写出时那一次编码恰好
-// 还原。⚠ 这一步不是真源的式子，是域适配（同 sky_gradient.wesl 那份，
-// 逐式同 moly_law::weather::sky::srgb_target_value）。先钳到 0..1 再解。
+// The value handed to the sRGB colour target: decoded once with the format's EOTF,
+// so the hardware's single encode on write restores it exactly. ⚠ This step is not
+// part of the program's formulas; it is a domain adaptation (the same as
+// sky_gradient.wesl, formula for formula with moly_law::weather::sky::srgb_target_value).
+// Clamp to 0..1 first, then decode.
 fn srgb_target_value(encoded: vec3<f32>) -> vec3<f32> {
     let e = clamp(encoded, vec3<f32>(0.0), vec3<f32>(1.0));
     let hi = pow((e + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
     return select(hi, e / 12.92, e <= vec3<f32>(0.04045));
 }
 
-// sRGB 装载的贴图采样后编回存储域：硬件把存储（编码）字节解成线性，这里
-// 再按 OETF 编回去，让整条片元链在存储域上算（真源的全链域）。
+// A texture loaded as sRGB is encoded back to the storage domain after sampling:
+// the hardware decodes the stored (encoded) bytes to linear, and this encodes them
+// back with the OETF so the whole fragment chain computes in the storage domain
+// (the program's own domain for the whole chain).
 fn srgb_format_encode(linear: vec3<f32>) -> vec3<f32> {
     let e = clamp(linear, vec3<f32>(0.0), vec3<f32>(1.0));
     let lo = e * 12.92;

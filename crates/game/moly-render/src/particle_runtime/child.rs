@@ -245,7 +245,7 @@ impl ChildCommand {
 }
 
 /// The inherited size of a command's block, or the inherited word it carries
-/// that the child side does not transcribe, by name.
+/// that the child side does not implement, by name.
 fn inherited_size(words: &[u32; 13]) -> Result<ChildInherit, Refused> {
     ChildInherit::from_words(words).map_err(|refused| Refused::Unsupported(match refused {
         inherit::Refused::Block("color") => "inherited colour block",
@@ -390,7 +390,7 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
     // In world space a target that is not World-space takes its
     // world-to-local columns; the owner words carry the engine's matrices for
     // a Local target, while a Custom simulation space takes owner branches
-    // that are not transcribed.
+    // that are not implemented.
     if velocity.as_ref().is_some_and(|velocity| velocity.in_world_space)
         && emitter.simulation_space == SimulationSpace::Custom
     {
@@ -496,7 +496,7 @@ fn child_velocity(params: &moly_law::particle::schema::VelocityOverLifetimeParam
 /// `min + u * (max - min)` with the three successive draws of the particle
 /// seed's force stream (the root path's law), so the axes must share one mode.
 /// Per-frame randomization draws from the module's own stream instead, and the
-/// curve modes go through evaluation helpers; neither is transcribed here.
+/// curve modes go through evaluation helpers; neither is implemented here.
 fn child_force(params: &moly_law::particle::schema::ForceParams)
     -> Result<moly_law::particle::force::ForceOverLifetime, Refused> {
     let unsupported = |reason| Err(Refused::Unsupported(reason));
@@ -702,7 +702,7 @@ fn apply_with_laws(
         catch_up.runs &= update.flags & 5 != 0;
     }
     // The catch-up steps run the target's post-simulation modules, whose
-    // sub-emitter call is not transcribed on the staged block.
+    // sub-emitter call is not implemented on the staged block.
     if events.is_some() && catch_up.runs {
         return Err(Refused::Unsupported("catch-up of a target with its own birth edges"));
     }
@@ -816,7 +816,7 @@ fn apply_with_laws(
         };
         let space = ModuleSpace { velocity: &velocity_space, batch_seed: batch_seeds[index], clamp_dt,
             noise_scroll: newborn_scroll, force: force_space.as_ref() };
-        pre_modules(system, &laws, lane, lane.birth_dt, update.gravity, gravity_space, space);
+        pre_modules(system, laws, lane, lane.birth_dt, update.gravity, gravity_space, space);
     }
     for lane in &mut lanes {
         let dt = lane.birth_dt;
@@ -827,7 +827,7 @@ fn apply_with_laws(
             let placed = lane.position[a] - back * frame.emitter_velocity[a];
             lane.position[a] = placed + (lane.velocity[a] + lane.animated[a]) * (1.0 * dt);
         }
-        integrate_rotation(&laws, lane, dt);
+        integrate_rotation(laws, lane, dt);
     }
     // The target's own sub-emitter call, once per new four-lane group over
     // its accepted lanes with the group's four birth times, before the
@@ -899,14 +899,14 @@ fn apply_with_laws(
             for (index, lane) in lanes[..covered].iter_mut().enumerate() {
                 let space = ModuleSpace { velocity: &velocity_space, batch_seed: batch_seeds[index], clamp_dt: dt,
                     noise_scroll: scroll, force: force_space.as_ref() };
-                pre_modules(system, &laws, lane, dt, update.gravity, gravity_space, space);
+                pre_modules(system, laws, lane, dt, update.gravity, gravity_space, space);
             }
             for lane in &mut lanes[..covered] {
                 let age = lane.age;
                 let advanced = child_emit::min_propagating(age + (dt * 100.0) * lane.inverse, AGE_CAP);
                 lane.age = if age > 100.0 { age } else { advanced };
                 for a in 0..3 {
-                    lane.position[a] = (lane.velocity[a] + lane.animated[a]) * dt + lane.position[a];
+                    lane.position[a] += (lane.velocity[a] + lane.animated[a]) * dt;
                 }
             }
             // Four-wide from the block start while the group starts before
@@ -936,7 +936,7 @@ fn apply_with_laws(
             end = end.min(block_count);
             let covered = (4 * end.div_ceil(4)).min(lanes.len());
             for lane in &mut lanes[..covered] {
-                integrate_rotation(&laws, lane, dt);
+                integrate_rotation(laws, lane, dt);
             }
             if !(remaining >= catch_up.step) {
                 break;
@@ -1182,7 +1182,7 @@ fn integrate_rotation(laws: &ChildLaws, lane: &mut Lane, dt: f32) {
     }
     let axes = if laws.rotation_3d { 0..3 } else { 2..3 };
     for axis in axes {
-        lane.rotation[axis] = lane.angular[axis] * dt + lane.rotation[axis];
+        lane.rotation[axis] += lane.angular[axis] * dt;
     }
 }
 
@@ -1256,7 +1256,7 @@ fn own_clock_emitter(emitter: &EmitterParams) -> EmitterParams {
 /// with a start delay therefore keeps its clock at zero while the frame's
 /// slices stay at or below the word, for as long as it lives. A random delay
 /// is Play's evaluation with the system seed's hash, which is not
-/// transcribed, and is refused.
+/// implemented, and is refused.
 pub fn install_child_target(system: &mut Runtime, seeds: &mut seed::SystemSeedManager,
     owner: ChildOwner) -> Result<(), String> {
     if system.native_birth.is_some() {
@@ -1267,7 +1267,7 @@ pub fn install_child_target(system: &mut Runtime, seeds: &mut seed::SystemSeedMa
         0.0
     } else {
         super::play_start_delay(&system.emitter)
-            .ok_or("random start delay on a sub-emitter target: Play's seed-hash evaluation is not transcribed")?
+            .ok_or("random start delay on a sub-emitter target: Play's seed-hash evaluation is not supported")?
     };
     system.emitter = own_clock_emitter(&system.emitter);
     // Replay arm: the target's texture sheet lost at install.

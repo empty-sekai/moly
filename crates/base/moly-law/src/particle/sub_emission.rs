@@ -477,8 +477,8 @@ pub struct BirthEventRecord {
 
 /// The count law of one cached birth edge, read from the child's start delay,
 /// duration, loop flag and Emission module: a constant start delay, a rate
-/// over time in any mode (see [`TimeRate`]), a rate over distance in any mode
-/// (see [`DistanceRate`]), and the child's bursts (up to the eight
+/// over time in any mode (see `TimeRate`), a rate over distance in any mode
+/// (see `DistanceRate`), and the child's bursts (up to the eight
 /// slots, a constant or two-constant count; every time, cycle count, repeat
 /// interval and probability). The event's time emission is the child's
 /// EmitOverTime over the window [previous, current) of the particle's life in

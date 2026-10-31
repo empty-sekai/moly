@@ -1659,7 +1659,7 @@ pub fn place(
         visibility.set_if_neq(if open { Visibility::Inherited } else { Visibility::Hidden });
         crate::canvas::set_scale(&mut transform, scale);
     }
-    let Ok((roots_entity, root, mut view, mut visibility, mut transform)) = roots.single_mut() else {
+    let Ok((roots_entity, root, view, mut visibility, mut transform)) = roots.single_mut() else {
         return;
     };
     visibility.set_if_neq(if open { Visibility::Inherited } else { Visibility::Hidden });
@@ -1671,7 +1671,7 @@ pub fn place(
         return;
     };
     let dt = time.delta_secs();
-    let (mut root, mut view, mut visibility, mut transform) = (root, view, visibility, transform);
+    let (mut root, mut view, visibility, transform) = (root, view, visibility, transform);
     measure(&mut root.bindings, doc, &layouts, &view, canvas);
     let bindings = &root.bindings;
     let greeting_bubble = state.greeting_bubble;

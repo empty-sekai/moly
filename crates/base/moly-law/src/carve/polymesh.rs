@@ -1,29 +1,37 @@
-//! 多边形网与其上的查询（`rcBuildPolyMesh` + Detour 的 2D 转录）。
+//! Polygon mesh and the queries on it (implements `rcBuildPolyMesh` and the
+//! Detour queries in 2D).
 //!
-//! 轮廓之后，每条轮廓被三角化成凸单元，相邻单元之间的公共边就是「门」。
-//! 寻路在这张图上做 A\*，再用漏斗把多边形序列收成拐点——这与原生一致：
-//! 原生查的是多边形 navmesh，不是烘焙用的体素场。
+//! After the contours, every contour is triangulated into convex cells, and
+//! the shared edge between adjacent cells is a "portal". Pathfinding runs A\*
+//! on this mesh and then the funnel reduces the polygon sequence to corners —
+//! the query runs on the polygon navmesh, not on the voxel field used for
+//! baking.
 //!
-//! # 锚点档次（必须分清，不许混成一句）
+//! # Portal bits
 //!
-//! * **反编译档**：多边形网的输出形状与 portal 位布局（`0x8000 | dir`，
-//!   `dir` 取 0:`x==0` / 1:`z==h` / 2:`x==w` / 3:`z==0`）已在
-//!   `FUN_009121c0` 里逐条坐实。我方未分瓦 ⇒ 没有跨瓦边，这套标记用不上，
-//!   但记在这里，将来补分瓦时直接照用。
-//! * **知识库档**：三角化的选耳规则、顶点哈希式子、邻接边配对。原生这三段
-//!   在 `FUN_00913c24` / `FUN_00914164` / `FUN_00914590` 三个**函数体没有被
-//!   导出**的独立函数里（`find` 命中 0，同命令阳性对照命中 2）⇒ 读不到。
-//!   这里写的是公开算法，档次低于上一条。补齐的唯一路径是重跑一次导出，
-//!   不是再读调用方。
+//! The polygon mesh output layout and the portal bit layout follow Detour's
+//! polygon mesh builder: a portal on an edge of cell width `w` and height `h`
+//! is encoded as `0x8000 | dir`, where `dir` is
+//! 0:`x==0` / 1:`z==h` / 2:`x==w` / 3:`z==0`. This baker does not tile ⇒ there
+//! are no cross-tile edges, so these markers are unused, but they are
+//! recorded here for use when tiling is added.
 //!
-//! # 一处具名的范围缺口
+//! # Triangulation
 //!
-//! ⚠ **凸多边形合并（`getPolyMergeValue` / `mergePolyVerts`，nvp = 6）没有实现。**
-//! 它的评分与凸性谓词同样落在那批读不到的函数体里。对寻路而言它是**计数
-//! 优化，不是正确性要求**：三角网本身已经是合法的凸分解，漏斗在任何凸分解
-//! 上都给出走廊内的紧绷路径。代价是多边形数约为原生的 2–3 倍，而 A\* 在
-//! 平面图上的展开量不随之线性增长。补它之前，别把本模块的多边形数拿去与
-//! 原生对账——两边数的不是同一种单元。
+//! The ear-selection rule of the triangulation, the vertex hash formula and
+//! the adjacency edge pairing follow the public Recast algorithm.
+//!
+//! # One named scope gap
+//!
+//! ⚠ **Convex polygon merging (`getPolyMergeValue` / `mergePolyVerts`, nvp = 6)
+//! is not implemented, and its scoring and convexity predicates are not
+//! modelled.** For pathfinding it is a **count optimization, not a
+//! correctness requirement**: the triangle mesh is already a valid convex
+//! decomposition, and the funnel gives a tight path inside the corridor on
+//! any convex decomposition. The cost is about 2–3 times as many polygons,
+//! while A\*'s expansion count on a planar graph does not grow linearly with
+//! it. Until this is added, do not compare this module's polygon count with a
+//! Detour build — the two do not count the same kind of unit.
 
 use super::contour::Contour;
 use super::funnel::{self, Portal};
@@ -359,7 +367,7 @@ impl PolyMesh {
                 continue;
             }
             let d = distance2(q, p);
-            if best.map_or(true, |(_, bd)| d < bd) {
+            if best.is_none_or(|(_, bd)| d < bd) {
                 best = Some((index, d));
             }
         }
@@ -843,7 +851,7 @@ impl PolyMesh {
                 continue;
             }
             let d = distance2(q, p);
-            if best.map_or(true, |(_, _, bd)| d < bd) {
+            if best.is_none_or(|(_, _, bd)| d < bd) {
                 best = Some((index, q, d));
             }
         }

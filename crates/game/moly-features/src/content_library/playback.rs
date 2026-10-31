@@ -235,7 +235,7 @@ pub fn observe_start(
     mut state: ResMut<ContentLibrary>,
     player_session: Option<Res<crate::player_talk::PlayerTalkSession>>,
     pair_session: Option<Res<crate::talk::ActiveTalk>>,
-    mut runtime: ResMut<PlayerFixtureRuntime>,
+    runtime: ResMut<PlayerFixtureRuntime>,
     ledger: Option<Res<PlayerTalkLedger>>,
     mut cancel: MessageWriter<TalkCancelRequest>,
     mut fixtures: MessageWriter<PlayerFixtureRequest>,

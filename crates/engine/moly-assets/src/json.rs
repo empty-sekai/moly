@@ -1,8 +1,11 @@
-//! 清单类 JSON 提取产物的 Bevy Asset 翻译：整文件读成一个字符串资产。
+//! Bevy Asset translation of manifest-style JSON extraction output: the whole
+//! file is read into one string asset.
 //!
-//! 这类文件不匹配任何内置装载器的形状；自定义装载器让它们走与 glb 同一条
-//! AssetServer 通路——native 与 web 同路，装载延迟与失败归同一套判据，不另
-//! 开旁路。schema 的解释归各域模块，这里只管把字节变成字符串。
+//! Such files match the shape of no built-in loader; a custom loader routes
+//! them through the same AssetServer path as glb files — native and web share
+//! the path, load latency and failures go through the same checks, and no
+//! side channel is opened. Interpreting the schema belongs to each domain
+//! module; this module only turns bytes into a string.
 //!
 //! Master tables are JSON assets too; [`master`] loads them from the regions'
 //! master hosts and names each one it cannot give its consumer, and

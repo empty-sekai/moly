@@ -850,7 +850,7 @@ impl Board {
             for y in 0..fixture.current_size().y {
                 let at = GridPosition::new(cell.x, (i32::from(cell.y) + y) as i8, cell.z);
                 if !tiles.contains(at) {
-                    return Err(Refusal::FootprintOutside { cell: cell });
+                    return Err(Refusal::FootprintOutside { cell });
                 }
             }
         }
@@ -1046,7 +1046,7 @@ impl Board {
 
     fn collect_stacked(&self, base: &str, out: &mut Vec<String>) {
         for piece in &self.pieces {
-            if out.iter().any(|uid| *uid == piece.uid) || piece.uid == base {
+            if out.contains(&piece.uid) || piece.uid == base {
                 continue;
             }
             if self.under(piece).is_some_and(|under| under.uid == base) {

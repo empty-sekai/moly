@@ -1,49 +1,67 @@
-//! 玩家域：玩家实体装配与输入驱动的移动。
+//! The player domain: the player entity's assembly and its input-driven
+//! movement.
 //!
-//! 真源里玩家是独立于名册的实体（`AvatarDataStore.Player` 持唯一
-//! `PlayerAvatarPresenter`），移动**不寻路**：`PlayerAvatarMoveState`
-//! 与 `PlayerAvatarDashState` 的 UpdateState 同形——每帧
-//! `NavMeshAgent.Move(输入向量 × 速度 × dt)` 直接位移。速度来自
-//! ClientConfig 面板三键（`MysekaiNormalMoveScale` /
-//! `MysekaiHarvestMoveScale` / `MysekaiDashSpeedRate`，FloatConfigs 键
-//! 77/78/95），**逐帧取值**——真源 UpdateState 每帧调 getter，本仓同形。
-//! 取值序（走/冲两态同构）：
-//! * 站点是采集场（grassland）时步速键换 78、动画乘数取 2.0；否则键
-//!   77 与 1.75（真源按 `SiteManager.CurrentSiteType == 4` 分支，4 即
-//!   grassland——本仓缺省站）。
-//! * 场地相机处 FPS 态（`FieldCamera.CurrentState == 16`）时步速减半
-//!   （减半只落在位移速度上，动画乘数不受它影响）。
-//! * dash 态的 Move 乘数是 rate × scale——减半后的 scale 再乘 rate。
+//! The player is an entity separate from the roster (`AvatarDataStore.Player`
+//! holds the single `PlayerAvatarPresenter`), and movement **does not use
+//! pathfinding**: the `UpdateState` of `PlayerAvatarMoveState` and
+//! `PlayerAvatarDashState` moves the agent directly every frame with
+//! `NavMeshAgent.Move(input vector × speed × dt)`. The speed comes from three
+//! ClientConfig panel keys (`MysekaiNormalMoveScale` /
+//! `MysekaiHarvestMoveScale` / `MysekaiDashSpeedRate`, FloatConfigs keys
+//! 77/78/95), **read every frame**: UpdateState calls the getters on each
+//! frame, and this crate does the same.
+//! Order of evaluation (the walk and dash states share it):
+//! * On a harvesting site (grassland) the speed key is 78 and the animation
+//!   multiplier 2.0; otherwise key 77 and 1.75
+//!   (`SiteManager.CurrentSiteType == 4` selects the branch, and 4 is
+//!   grassland, the default site of this crate).
+//! * With the field camera in its FPS state
+//!   (`FieldCamera.CurrentState == 16`) the speed is halved (only the
+//!   displacement speed; the animation multiplier is unaffected).
+//! * In the dash state the Move multiplier is rate × scale, so the halved
+//!   scale is multiplied by the rate.
 //!
-//! 输入形态（方法体直读，非推断）：
-//! * 主路是虚拟摇杆（`OnTouchJoyStick`：摇杆向量投到相机的
-//!   forward/right 上，相机相对）——触摸面在 [`crate::joystick`]，活跃
-//!   时优先（真源 `GetMoveDirection` 只读摇杆面）。
-//! * **键盘是非真源的桌面适配**（具名）：真源产品只有触屏摇杆，键盘路
-//!   `GetKeyMoveDirection` 在真源**没有调用点**。适配守摇杆的量纲律：
-//!   WASD 给出摇杆比值 (横, 纵) ∈ {-1,0,1}²，过摇杆 HandleInput 的夹
-//!   （超上限 1 归一），再用摇杆的烘基式投到相机上——与一根拖到同一
-//!   比值的摇杆产出同一个移动向量，斜向不比正向快。
-//! * dash 是**模式开关**不是触发：`PlayerAvatarStateMachine.MoveTo` 按
-//!   玩家 `IsDashMode` 分派 Move/Dash 态，开关本身由 HUD 的 dash 按钮
-//!   驱动（[`crate::action_button`] 的冲刺按钮）。
-//! * 无输入回待机：`UpdateController` 在移动态读到空输入即转 Idle。
+//! Input forms:
+//! * The main path is the virtual joystick (`OnTouchJoyStick`: the stick
+//!   vector is projected onto the camera's forward/right axes, so it is
+//!   camera-relative). The touch surface is [`crate::joystick`]; while it is
+//!   active it takes precedence (`GetMoveDirection` reads only the stick).
+//! * The keyboard is a named desktop adaptation: the product has only the
+//!   touch joystick, and `GetKeyMoveDirection` has no call site. The
+//!   adaptation keeps the stick's units: WASD gives a stick ratio
+//!   (horizontal, vertical) ∈ {-1,0,1}², put through the joystick
+//!   HandleInput clamp (a length above 1 is normalised), then projected onto
+//!   the camera with the joystick's precomputed axes; a stick dragged to the
+//!   same ratio yields the same movement vector, so a diagonal is no faster
+//!   than a straight line.
+//! * Dash is a **mode switch**, not a trigger: `PlayerAvatarStateMachine.MoveTo`
+//!   dispatches to the Move/Dash state by the player's `IsDashMode`, and the
+//!   HUD's dash button ([`crate::action_button`]'s sprint button) drives the
+//!   switch.
+//! * With no input the player returns to idle: `UpdateController` moves to
+//!   Idle on reading empty input in the move state.
 //!
-//! 朝向**直设**：`Quaternion.Euler(0, atan2(输入.x, 输入.z), 0)`，无
-//! 转身动画段——转身衔接是 NPC 巡逻域的事。动画段随 [`MotionPhase`]
-//! 走玩家自己的驱动链（[`crate::player_avatar`]，在走播走姿、dash 模式
-//! 播冲刺、待机播待机段）；播放速率按真源式
-//! `clamp(√(输入x²+输入z²) × 站点档乘数, 0.55, 1.8)`（乘数采集场 2.0、
-//! 其余站 1.75），待机 1.0（`PlayerAvatarIdleState` 起播字面量）。
+//! The facing is **set directly**: `Quaternion.Euler(0, atan2(input.x, input.z), 0)`,
+//! with no turn animation segment; turn blending belongs to the NPC patrol
+//! domain. The animation segments follow [`MotionPhase`] through the player's
+//! own driver chain ([`crate::player_avatar`]: walk while walking, the dash
+//! clip in dash mode, the idle clip while dwelling); the playback speed uses
+//! `clamp(√(input x² + input z²) × site multiplier, 0.55, 1.8)` (multiplier
+//! 2.0 on harvesting sites, 1.75 elsewhere), and 1.0 while idle (the
+//! `PlayerAvatarIdleState` start literal).
 //!
-//! 相机契约：玩家实体持 [`AvatarRoot`]（本模块接管，名册侧不再插），
-//! 相机域读它逐帧取景——玩家装配完成帧起相机追玩家。
+//! Camera contract: the player entity holds [`AvatarRoot`] (inserted by
+//! this module), and the camera domain reads
+//! it every frame to frame the view; the camera follows the player from the
+//! frame the player is assembled.
 //!
-//! 身体是玩家 avatar 自己的模型与动作组（[`crate::player_avatar::body`]：
-//! 观众模型、它自己的骨架、它自己的 172 段剪辑），不借名册成员的外观。
-//! 播放器所有权归 [`crate::player_avatar`]。
-//! * 移动边界：约束面与裁决语义在 [`crate::walk_face`]（真源引擎原生
-//!   层不可读）；推进帧与 NPC 共用侵蚀场，整段位移受约束。
+//! The body is the player avatar's own model and action set
+//! ([`crate::player_avatar::body`]: the spectator's model, its own skeleton,
+//! its own 172 clip segments), not the appearance of a roster member. The
+//! player belongs to [`crate::player_avatar`].
+//! * Movement boundary: the constraint surface and the accept/refuse rules
+//!   are in [`crate::walk_face`]; a step frame shares the erosion field with
+//!   the NPCs, and the whole displacement is constrained.
 
 use crate::character::AvatarRoot;
 use crate::npc::MotionPhase;
@@ -67,28 +85,32 @@ const SEED_RADIUS: f32 = 3.0;
 /// 地表高度采样半径：取「脚下的地面」，与名册同款。
 const SURFACE_RADIUS: f32 = 2.0;
 
-/// 走姿动画速率乘数·常态档：真源状态类字面量（非采集场站）。
+/// Walk animation speed multiplier, normal band: the `MoveState`/`DashState`
+/// literal on sites other than a harvesting site.
 const ANIM_SPEED_NORMAL: f32 = 1.75;
 
-/// 走姿动画速率乘数·采集场档：真源状态类字面量（站点类型 grassland
-/// 时取代常态档）。相机 FPS 档不减半它——减半只落在位移速度上。
+/// Walk animation speed multiplier, harvesting band: the
+/// `MoveState`/`DashState` literal that replaces the normal band on a site
+/// of type grassland. The camera's FPS band does not halve it; only the
+/// displacement speed is halved.
 const ANIM_SPEED_HARVEST: f32 = 2.0;
 
-/// 动画速率下限：真源状态类常量（跑动段动画速率的地板）。
+/// Lower bound of the animation speed: the floor of the run segment's
+/// animation rate.
 const MIN_ANIMATION_SPEED: f32 = 0.55;
 
-/// 动画速率上限。版本考证：与资产基线同版的原生反编译里走/冲两态都是
-/// `fminf(v, 1.8)` 后 `v < 0.55 ? 0.55 : 上夹值`——上界在；后一版的伪码
-/// 反编译里这条 fminf 不在（同函数其余钳制照常渲染成比较 ⇒ 是版本差，
-/// 不是反编译噪声）。本仓按资产同版的原生树：上界保留，不许按伪码树
-/// 「顺手删上界」。斜向输入和向量不归一（√2 × 2.0 ≈ 2.83）会超它，
-/// 超出即压回。
+/// Upper bound of the animation speed. The walk and dash states both apply
+/// `fminf(v, 1.8)` and then `v < 0.55 ? 0.55 : <clamped value>`, so the upper
+/// bound holds. The same function clamps its other values with plain
+/// comparisons. The bound is kept: removing it would let the diagonal case
+/// through. A diagonal input is not normalised (√2 × 2.0 ≈ 2.83), so the
+/// animation speed exceeds the bound and is pressed back.
 const MAX_ANIMATION_SPEED: f32 = 1.8;
 
 pub use crate::markers::PlayerControlled;
 
-/// dash 模式开关（真源 `PlayerAvatarPresenter.IsDashMode`；切换来源是
-/// HUD 的冲刺按钮）。
+/// Dash mode switch (`PlayerAvatarPresenter.IsDashMode`); the HUD's sprint
+/// button toggles it.
 #[derive(Component, Default, Reflect)]
 #[reflect(Component)]
 pub struct DashMode(pub bool);
@@ -134,11 +156,13 @@ const SPAWN: crate::hold::HoldSite = crate::hold::HoldSite {
     quiet: &[],
 };
 
-/// Update：规格、面板与站点地表都就绪后，铺一次玩家。实体形状：移动
-/// 相位、身体输入（avatar 模型与动作组），另加玩家专属件：[`AvatarRoot`]
-/// （相机自此追玩家）、dash 模式、输入。面板门与名册铺装同款：速度律
-/// 的键要读它，面板未立不铺玩家。
-/// 出生相位是待机——真源 `InitializeStatus` 起手就是 Idle。
+/// Update: once the spec, the configs and the site ground are ready, spawns
+/// the player once. The entity carries the movement phase and the body spec
+/// (avatar model and action set), plus the player-only components:
+/// [`AvatarRoot`] (the camera follows the player from then on), the dash
+/// mode and the input. The config gate is the roster's: the speed law reads
+/// the configs, so no player is spawned while they are absent.
+/// The birth phase is idle: `InitializeStatus` starts the player in Idle.
 pub fn spawn_when_ready(
     mut commands: Commands,
     time: Res<Time>,
@@ -188,8 +212,9 @@ pub fn spawn_when_ready(
         Transform::from_translation(Vec3::from(seed)),
         // 玩家是渲染层级的节点：模型子实体的可见性沿父链向上查到本实体。
         Visibility::default(),
-        // 相机跟随契约：玩家实体持 AvatarRoot（真源站点相机追的就是
-        // 玩家 avatar 的视变换）。身体与动作组由 player_avatar::body 装上。
+        // Camera-follow contract: the player entity holds AvatarRoot (the
+        // site camera follows the player avatar's view transform). The body
+        // and its action set are attached by player_avatar::body.
         AvatarRoot,
         PlayerControlled,
         DashMode(false),
@@ -322,10 +347,13 @@ pub enum Boundary {
     Held,
 }
 
-/// 步速律本体（真源走/冲两态 UpdateState 的取值序，逐帧调用）：采集场
-/// 站（grassland）步速吃键 78、其余站吃键 77；场地相机处 FPS 态时步速
-/// 减半（只折位移速度，不碰动画乘数）；dash 态乘键 95——真源乘法序是
-/// `rate × scale`，减半后的 scale 再乘 rate。返回本帧位移速度，米/秒。
+/// The speed law (the evaluation order of the walk and dash states'
+/// UpdateState, called every frame): a harvesting site (grassland) reads
+/// speed key 78, any other site reads key 77; with the field camera in its
+/// FPS state the speed is halved (only the displacement speed, not the
+/// animation multiplier); the dash state multiplies by key 95 — the order is
+/// `rate × scale`, so the halved scale is multiplied by the rate. Returns
+/// this frame's displacement speed in metres per second.
 fn move_speed(
     configs: &crate::client_config::ClientConfigs,
     site: &crate::site::SiteSelection,
@@ -346,8 +374,9 @@ fn move_speed(
     scale
 }
 
-/// 走姿动画速率乘数（真源同函数里与步速并列的那一支）：采集场站 2.0、
-/// 其余站 1.75——相机 FPS 档不减半它。
+/// The walk animation speed multiplier (the branch beside the speed in the
+/// same function): 2.0 on harvesting sites, 1.75 elsewhere; the camera's FPS
+/// band does not halve it.
 fn animation_speed_mul(site: &crate::site::SiteSelection) -> f32 {
     if site.is_grassland() {
         ANIM_SPEED_HARVEST
@@ -372,21 +401,31 @@ pub fn move_pace(
     (speed, animation)
 }
 
-/// Update：把本帧输入推进成位置与朝向——玩家域自己的位移律（直接运动
-/// 学，真源 `NavMeshAgent.Move` 同形；寻路律归 NPC 巡逻域）。速度按
-/// [`move_speed`] 逐帧取值（面板三键 + 站点档 + 相机档）。位移经可行
-/// 走场约束：逐段取第一处阻挡前的可走前缀，不能跨过薄障碍。
-/// 面未就绪不推
-/// 进——真源 navmesh 自场景装载起就在，玩家不走没有约束面的帧。
+/// Update: advances the input of this frame into a new position and a new
+/// facing. This is the player domain's displacement, applied directly each
+/// frame rather than by pathfinding, like `NavMeshAgent.Move`; pathfinding
+/// belongs to the NPC patrol domain. The speed is read from [`move_speed`]
+/// every frame (the three panel keys, the site band, the camera band). Each
+/// step is constrained by the walk face to the walkable part of the move
+/// before its first obstruction, so a thin obstacle cannot be crossed. No
+/// step is taken while the face is not ready; the navigation mesh exists
+/// from scene load onward, so the player never moves on a frame without a
+/// constraint surface.
 ///
-/// 有输入：位置 += 方向 × 速度(dash 档) × dt，脚下高度贴地表采样；朝向
-/// 直设 `atan2(方向.x, 方向.z)`（真源同式，无转身段）；相位进 Walking。
-/// 无输入：相位进 Dwelling（待机段）。相位的读者是动画驱动链与相机。
-/// 玩家 [`Transform`] 的写者：本系统（位移与朝向），与对话域的转身
-/// 插值（参演玩家对话期间，本系统被持留让位跳过）。家具会话从接近、
-/// 贴合到离座都由自己的移动流程持有位置；其动画租约只覆盖播放段，
-/// 不能用播放器占用代替整段位移持留。输入仍由 read_input 采集，供
-/// 会话响应主动结束。内部形参带私有资源，故 pub。
+/// With input: position += direction × speed(dash band) × dt, and the height
+/// under the feet follows the sampled ground; the facing is set directly to
+/// `atan2(direction.x, direction.z)` with no turn segment; the phase enters
+/// Walking. Without input: the phase enters Dwelling (the idle clip). The
+/// phase's readers are the animation driver chain and the camera.
+/// This system writes the player's [`Transform`] (displacement and facing),
+/// as does the dialogue domain's turn interpolation; while a dialogue plays
+/// with the player taking part, a hold makes this system skip its work. A
+/// furniture session owns the position from approach through seating to
+/// leaving with its own movement flow; its animation lease covers only the
+/// playing segment, so a player occupancy cannot stand in for holding the
+/// whole displacement. Input is still collected by read_input so the session
+/// can end when asked. The system takes private resources as parameters, so
+/// it is pub.
 pub fn advance(
     bulk: Option<Res<crate::field_modes::BulkHarvestActive>>,
     time: Res<Time>,
@@ -504,8 +543,10 @@ pub fn advance(
                     speed
                 );
             }
-            // 朝向直设：真源移动态每帧写 Euler(0, atan2(x, z), 0)。拒进
-            // 帧也朝向推挤方向（真源 agent 每帧照样吃 Move 请求）。
+            // The facing is set directly: the move state writes
+            // Euler(0, atan2(x, z), 0) every frame. A refused frame also turns
+            // toward the push direction (the agent takes the Move request
+            // every frame regardless).
             transform.rotation = Quat::from_rotation_y(input.direction.x.atan2(input.direction.z));
             position.y = navigation_y_at(position.x, position.z, raw_y);
             transform.translation = position;
@@ -522,11 +563,13 @@ pub fn advance(
     }
 }
 
-/// Update：按真源速率律调动画播放速率——移动态
-/// `clamp(√(输入x²+输入z²) × 站点档乘数, 0.55, 1.8)`（乘数采集场 2.0、
-/// 其余站 1.75；走/冲两态同式，dash 不加速率），待机 1.0。排在玩家动画
-/// 驱动（换段）之后：换段会以缺省速率起新段，本系统同帧把速率压回
-/// 真源式。
+/// Update: sets the animation playback speed with the rate law — in the move
+/// state `clamp(√(input x² + input z²) × site multiplier, 0.55, 1.8)`
+/// (multiplier 2.0 on harvesting sites, 1.75 elsewhere; the walk and dash
+/// states share the formula, and dash adds no speed), and 1.0 while idle.
+/// Runs after the player animation driver (the segment switch): a switch
+/// starts the new segment at the default rate, and this system puts the rate
+/// back to the law within the same frame.
 pub fn tune_animation_speed(
     site: Option<Res<crate::site::SiteSelection>>,
     mut last_speed: Local<f32>,

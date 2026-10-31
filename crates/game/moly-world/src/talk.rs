@@ -95,9 +95,11 @@ pub fn load(mut commands: Commands, server: Res<AssetServer>) {
     commands.init_resource::<TalkLedger>();
     commands.init_resource::<crate::delayed_faces::DelayedFaces>();
     commands.init_resource::<DelayedAnimations>();
-    // 表情件请求通道与累计账本同批落地（Default 资源，消费者逐帧读，
-    // 缺了会在系统参数校验处 panic）。窗体状态机在窗体模块装载
-    // （常驻——真源层对象常驻，对话只是 show/hide 它）。
+    // The emote-part request channel and the running ledger are installed in the
+    // same batch (Default resources; consumers read them every frame and a missing
+    // one panics during system parameter validation). The window state machine is
+    // installed by the window module (always resident — the layer object is
+    // resident and a talk only shows/hides it).
     commands.init_resource::<TalkEmoteReqs>();
 }
 
@@ -375,12 +377,15 @@ pub(crate) fn parse_step(step: &serde_json::Value) -> Result<FixtureStep, String
             seconds: f("seconds"),
         },
         "look_at_fixture" => FixtureStep::LookAtFixture {
-            // 提取键位与引擎签名错位（源脚本位 1 是角色、位 2 是时长）：
-            // `fixture` 键实为**角色指称**，`who` 键实为**转身时长**。
-            // who 键可缺（语料 122 步里 119 步无；日服脚本 125 次调用里
-            // 119 次只传一个参）。剧本库 `look_at_fixture(id, time)` 原样
-            // 转给引擎，引擎桥接层对第二参做 lua_tonumber——nil 读 0，
-            // 这就是真源取到的值，不是占位。
+            // The extracted keys are shifted against the engine signature (in the
+            // script, argument 1 is the character and argument 2 is the duration):
+            // the `fixture` key is actually a **character reference** and the `who`
+            // key is actually the **turn duration**. The `who` key may be absent
+            // (119 of the 122 steps have none; 119 of 125 script calls in the
+            // Japanese build pass only one argument). The script library passes
+            // `look_at_fixture(id, time)` through unchanged, and the engine bridge
+            // applies lua_tonumber to the second argument — nil reads as 0,
+            // which is the value taken, not a placeholder.
             who: opt_f("who").unwrap_or(0.0),
             fixture: f("fixture"),
         },
@@ -569,11 +574,10 @@ fn verify_row(
                     issues.push(format!("motion {motion:?} has no start clip"));
                 }
             }
-            FixtureStep::Emoticon { name, .. } => {
-                if !archive.has(name) {
+            FixtureStep::Emoticon { name, .. }
+                if !archive.has(name) => {
                     issues.push(format!("emoticon {name:?} is unavailable"));
                 }
-            }
             _ => {}
         }
     }
@@ -630,10 +634,12 @@ pub struct ActiveTalk {
     turns: Vec<TalkTurn>,
 }
 
-/// 对话步的一次 NPC 转身。真源 `NPCLookAtBodyWait`：时长 `Approximately`
-/// 0 ⇒ `LookAt` 即时朝向；否则 `DoLookAtNoMotionAsync`——只补间视图的
-/// 朝向（缓动传 `Ease.Unset`，即补间库缺省），**不换动作**：没有转身剪辑，
-/// 角色在转身期间照播它原来的动作。
+/// One NPC turn of a talk step. `NPCLookAtBodyWait` semantics: with duration
+/// `Approximately` 0 ⇒ `LookAt` orients immediately; otherwise
+/// `DoLookAtNoMotionAsync` tweens only the view orientation (easing is
+/// `Ease.Unset`, i.e. the tween library default) and **does not change the
+/// animation**: there is no turn clip, so the character keeps playing its
+/// previous animation during the turn.
 struct TalkTurn {
     entity: Entity,
     from: Quat,
@@ -690,7 +696,7 @@ impl ActiveTalk {
     pub fn late_reaction(&self, now: f32, after: f32) -> Option<(u32, f32)> {
         let (unit, at) = self.reaction?;
         (at - self.voice_at > after && Some(unit) != self.voice_speaker && at >= self.voice_at)
-            .then(|| (unit, now - at))
+            .then_some((unit, now - at))
     }
 
     pub fn body_ready(&self) -> bool {
@@ -717,8 +723,10 @@ impl ActiveTalk {
             .map(|(_, entity)| *entity)
     }
 
-    /// 参演者清单（unit 与实体）——对话相机的取位面读它（真源取位表由
-    /// 出场角色的髋变换构成，本链的出场角色就是参演者）。
+    /// Participant list (unit and entity) — the talk camera's placement surface
+    /// reads it (the placement table is built from the hip transforms of the
+    /// characters on stage, and the on-stage characters of this chain are the
+    /// participants).
     pub fn participants(&self) -> &[(u32, Entity)] {
         &self.participants
     }
@@ -836,11 +844,15 @@ enum TalkSegment {
     },
 }
 
-/// 对话引擎延迟命令表里的换动作一族。真源只有一张静态表（脸、换动作
-/// 同表同钟）：`已过时间 + delay` 入表，LoopUpdate 冲到期的，WaitClick
-/// 放行后全冲，OnComplete 只冲到期的，Dispose 停钟不清表。脸的那一族在
-/// [`DelayedFaces`]，这里按同一套起停点与同一条钟律跑换动作——两张表
-/// 在同一帧的相对次序与真源单表的次序可能不同（它们写不同的通道）。
+/// The animation-switch family of the dialogue engine's delayed command table.
+/// The engine keeps one static table (faces and animation switches share the
+/// table and the clock): `elapsed + delay` is inserted into the table,
+/// LoopUpdate flushes the due entries, WaitClick releases all of them,
+/// OnComplete flushes only the due ones, and Dispose stops the clock without
+/// clearing the table. The faces family lives in [`DelayedFaces`]; this one runs
+/// animation switches with the same start/stop points and the same clock rule —
+/// the relative order of the two tables within a frame may differ from the order
+/// of the engine's single table (they write different channels).
 #[derive(Resource, Default)]
 pub struct DelayedAnimations {
     elapsed: f32,
@@ -1178,20 +1190,27 @@ pub fn voice_probe(
 #[derive(Component)]
 pub struct PartVoiceProbeGate;
 
-/// Update：`MOLY_PARTVOICE_PROBE_SECS` 给定秒数后注入一次性合成段，
-/// 选材取真实语料（候选集行序首个命中，确定性），四臂：
-/// ① mysekai 主链 voice 步（说话者→双包→流表）——起播臂；
-/// ② 跨说话者缺 cue 臂——真 cue 配另一位真实说话者。真源链里包随
-///    说话者变体（cue 名不参与路由），同一 cue 落进别的说话者的双包
-///    两包皆缺→具名跳过（ExistsCueName miss 同款）。选材不依赖候选集
-///    （该 cue 所在族的步只在锚定家具未摆放的段里）；
-/// ③ 蛋 fixture_voice 步（合成段锚定选材自带的家具，源门按构造过）
-///    ——单参包起播臂；
-/// ④ 门拒说话者（who=1，名册 band 归属）配 mysekai cue——门拒具名臂
-///   （真源对门拒者不载包，cue 属谁都不响）。
-/// partvoice 路由表缺席时四臂全数 fail-closed 具名跳过——那正是无表
-/// 不播的验收臂。无该环境变量时注入口自关，零开销；非法值响亮告警后
-/// 同样关闭。
+/// Update: after `MOLY_PARTVOICE_PROBE_SECS` seconds, injects a one-shot composed
+/// segment. Material is chosen from the real corpus (first hit in candidate-table
+/// order, deterministic), with four arms:
+/// ① the mysekai main chain voice step (speaker→two bundles→stream table) — the
+///    playback arm;
+/// ② the cross-speaker missing-cue arm — a real cue paired with another real
+///    speaker. In the chain the bundle follows the speaker variant (the cue name
+///    takes no part in routing), so the same cue lands in another speaker's two
+///    bundles, both missing → named skip (the same as an ExistsCueName miss).
+///    Material selection does not depend on the candidate table (the step that
+///    carries this cue exists only in segments whose anchor fixture is not placed);
+/// ③ the egg `fixture_voice` step (the composed segment's own fixture is anchored,
+///    and the gate passes by construction) — the single-argument bundle playback
+///    arm;
+/// ④ a gate-rejected speaker (who=1, by roster band membership) paired with a
+///    mysekai cue — the gate-reject named arm (a rejected speaker loads no bundle,
+///    so the cue's owner is not played).
+/// When the partvoice routing table is absent all four arms fail closed with a
+/// named skip — that is the acceptance arm for "no table, no playback". Without
+/// the environment variable the injection point disables itself at no cost; an
+/// invalid value is warned about loudly and disables it as well.
 pub fn partvoice_probe(
     mut commands: Commands,
     time: Res<Time>,
@@ -1267,10 +1286,12 @@ pub fn partvoice_probe(
         *done = true;
         return;
     };
-    // 缺 cue 臂选材：语料里的真 cue 配另一位真实说话者。真源链里包随
-    // 说话者变体（cue 名不参与路由）——同一 cue 落进别的说话者的双包
-    // 两包皆缺，具名跳过（ExistsCueName miss 静默跳过同款）。不依赖
-    // 候选集（该 cue 所在族的步只在锚定家具未摆放的段里）。
+    // Missing-cue arm material: a real cue from the corpus paired with another real
+    // speaker. In the chain the bundle follows the speaker variant (the cue name
+    // takes no part in routing) — the same cue lands in another speaker's two
+    // bundles, both missing, and is skipped by name (the same as the silent skip on
+    // an ExistsCueName miss). It does not depend on the candidate table (the step
+    // carrying this cue exists only in segments whose anchor fixture is not placed).
     let scenario_cue = "partvoice_12_023";
     let scenario_who = 42.0;
     let voice = |cue: &str, who: f64| FixtureStep::Voice {
@@ -1291,8 +1312,9 @@ pub fn partvoice_probe(
         fixture: *egg_fixture as f64,
     });
     steps.push(FixtureStep::WaitClick);
-    // 臂④：门拒说话者（who=1，名册 band 归属——真源不载包）配 mysekai
-    // cue：门拒在 cue 查表之前，cue 属谁都不该响。
+    // Arm ④: a gate-rejected speaker (who=1, assigned by roster band membership —
+    // no bundle is loaded) paired with a mysekai cue: the gate rejects before the
+    // cue lookup, so no cue should play.
     steps.push(voice(mysekai_cue, 1.0));
     steps.push(FixtureStep::WaitClick);
     info!(
@@ -1634,7 +1656,8 @@ pub fn advance_talk(
             &mut playback.players,
             &mut playback.transitions,
         );
-        // 该击即耗尽：WaitClicked 放行后清闩（真源同款）。
+        // This click is spent: clear the latch once WaitClicked releases (same as
+        // the engine).
         window.consume_click(TalkSession::Pair(&mut *active));
         active.click_releases += 1;
         // The next wait can be reached in this same frame. Announce that
@@ -1708,9 +1731,11 @@ pub fn advance_talk(
             active.voice_group = unit.is_none();
             active.voice_at = now;
         }
-        // voice 行投递音频域（serve_voice 同帧起播）：真源逐行命令序里
-        // voice 先于 text，起播挂点是行推进，不是窗体开场。partvoice 族
-        // 的包随说话者变体，指称一并投递（voice_ 族不读它）。
+        // The voice line is delivered to the audio domain (serve_voice starts it in
+        // the same frame): in the step order, voice comes before text, and it is
+        // started when the line advances, not when the window opens. The partvoice
+        // family's bundle follows the speaker variant, so the reference is delivered
+        // as well (the voice_ family does not read it).
         if let FixtureStep::Voice { cue, who, .. } = &step {
             // Resolve within this cast only. A repeated unit is ambiguous even
             // if the world contains some other actor with the same unit id.
@@ -1743,10 +1768,10 @@ pub fn advance_talk(
             &tables,
             &libraries,
             &timelines,
-            &mut *playback.graphs,
+            &mut playback.graphs,
             &mut playback.delayed_faces,
             &mut playback.delayed_animations,
-            &mut *side.materials,
+            &mut side.materials,
             &mut window,
             &mut emote_reqs,
             &mut commands,
@@ -1991,8 +2016,9 @@ fn dispatch_step(
             );
         }
         FixtureStep::Label { name } => {
-            // 名字栏 SetText（真源 Label → 名字栏文本组件）——窗体开在这条
-            // 链上。语料里锚点跳转的 label 步 0 出现，此支防御记账。
+            // Name bar SetText (Label → name-bar text component) — the window opens
+            // on this chain. The corpus contains 0 occurrences of a label step at an
+            // anchored jump; this branch is a defensive record.
             active.label_all = is_all_speakers(name);
             window.set_label_at(TalkSession::Pair(&mut *active), index, name);
             info!(
@@ -2077,9 +2103,11 @@ fn dispatch_step(
             delayed_animations.enqueue(*delay_seconds, command);
         }
         FixtureStep::Text { text } => {
-            // 正文进窗（ShowTextAsync 同款）：配对剧情与玩家对话共用这扇
-            // 窗（真源窗体引擎服务全部引擎播的对话）；说话人指称不参与
-            // 摆位（窗体是固定窗，正文只进打字机）。
+            // Body text enters the window (same as ShowTextAsync): paired stories and
+            // player dialogue share this window (the window engine serves every
+            // dialogue the engine plays); the speaker reference plays no part in
+            // placement (the window is fixed and the body text only goes into the
+            // typewriter).
             active.texts += 1;
             window.show_text_at(TalkSession::Pair(&mut *active), index, text);
             let speaker_word = match active.speaker {
@@ -2289,10 +2317,12 @@ fn dispatch_step(
             );
         }
         FixtureStep::FixtureVoice { cue, fixture } => {
-            // 源门：fixture_voice 只对锚定家具生效（步的家具 == 锚定家具；
-            // 不等＝源侧静默无操作，无 else 无日志）。门过即投递音频域：
-            // 真源同一 voice 单通道（StopVoiceAll 先行）、同一存在性门，
-            // 蛋链无变体门——包随家具角色（单参，不拼 unit）。
+            // Gate: fixture_voice applies only to the anchored fixture (the step's
+            // fixture must equal the anchored one; not equal = a silent no-op with no
+            // else branch and no log). When the gate passes the line goes to the
+            // audio domain: the same single voice channel (StopVoiceAll first) and the
+            // same existence gate; the egg chain has no variant gate — the bundle
+            // follows the fixture character (single argument, no unit concatenation).
             let speaker = active.fixture_entity(*fixture as i32).and_then(|target| {
                 fixtures
                     .get(target)

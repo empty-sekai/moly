@@ -1,16 +1,20 @@
-//! BezierParam 求值——`BezierParam.Evaluate` / `CurveParam.Setup`
-//! 的逐字转录（反编译已双读核对）。
+//! BezierParam evaluation: matches `BezierParam.Evaluate` /
+//! `CurveParam.Setup`.
 //!
-//! 反编译形（BezierParam.c / CurveParam.c）：
-//! * `get_EndValue`：`useEndValue` 假 → 返回 `startValue`（end 槽
-//!   被 start 顶替），求值退化为常值 start；
-//! * `get_UseCurve`：`useEndValue && useCurveValue`；
-//! * `Evaluate(t)`：`t` 先夹到 `[0,1]`；曲线臂（`useCurve` 且
-//!   `curveValue != 0`）取二次贝塞尔，控制点 =
-//!   `end + (start-end)·clamp01(curveValue·0.5 + 0.5)`（Setup 逐字）；
-//!   否则 `start + t·(end' - start)` 线性。
+//! Behavior:
+//! * `get_EndValue`: if `useEndValue` is false, returns `startValue`
+//!   (the end slot is replaced by start), so evaluation reduces to the
+//!   constant start;
+//! * `get_UseCurve`: `useEndValue && useCurveValue`;
+//! * `Evaluate(t)`: `t` is first clamped to `[0,1]`; the curve branch
+//!   (`useCurve` and `curveValue != 0`) uses a quadratic Bezier with
+//!   control point =
+//!   `end + (start-end)·clamp01(curveValue·0.5 + 0.5)` (set up by
+//!   `CurveParam.Setup`);
+//!   otherwise `start + t·(end' - start)`, linear.
 //!
-//! 数据面全部 31 份 rig 的深度值 `depth ∈ [0,1]`，夹取是防御臂。
+//! In the data, all 31 rigs have depth values `depth ∈ [0,1]`, so the
+//! clamp is a defensive branch.
 
 /// rig `cloth.components[*].clothParams.<name>` 的贝塞尔参数块。
 #[derive(Debug, Clone, PartialEq)]

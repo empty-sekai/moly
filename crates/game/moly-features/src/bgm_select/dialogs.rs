@@ -351,7 +351,9 @@ fn passes(record: &RecordModel, filter: &BgmFilter, details: Option<&Details>) -
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 enum DocState {
+    #[default]
     Loading,
     Installed,
     Refused,
@@ -385,11 +387,6 @@ struct Documents {
     filter_bindings: Option<FilterBindings>,
 }
 
-impl Default for DocState {
-    fn default() -> Self {
-        DocState::Loading
-    }
-}
 
 fn load_documents(mut commands: Commands, server: Res<AssetServer>) {
     commands.insert_resource(Documents {

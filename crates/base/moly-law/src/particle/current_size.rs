@@ -17,7 +17,7 @@
 //! The asset reader decides once per curve whether the module reads it as an
 //! optimised polynomial ([`optimised`]; for two curves both must qualify, the
 //! maximum curve being tested first). Such a curve is read only through its
-//! two-segment polynomial ([`Polynomial`]): the multiplier is folded into the
+//! two-segment polynomial (`Polynomial`): the multiplier is folded into the
 //! coefficients when the asset loads, the first segment is evaluated at `t`
 //! itself, the second at `t - switch`, and the second is taken where
 //! `fmin(t, 0.99999) >= switch`, so past the last key the cubic is extended,

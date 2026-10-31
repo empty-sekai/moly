@@ -1,6 +1,8 @@
-//! 游戏本体：Bevy plugin，一个域一个模块。判据是用户眼睛，零测试。
+//! The game itself: a Bevy plugin with one module per domain. The check is
+//! what the player sees; there are no unit tests.
 //!
-//! 帧次序：0 层输入/决策 → 1 层聚合 → 2 层快照（依据记在 `schedule.rs`）。
+//! Frame order: layer 0 input/decisions → layer 1 aggregation → layer 2
+//! snapshots (the ordering is written down in `schedule.rs`).
 
 
 #[macro_use]
@@ -206,19 +208,15 @@ pub mod schedule;
 // The shared leaf modules live in `moly-core`; the re-export keeps every
 // `crate::<module>` path in this crate resolving.
 pub(crate) use moly_core::animation_time;
-pub(crate) use moly_core::asset_cache;
 #[cfg(target_arch = "wasm32")]
 pub(crate) use moly_core::browser_log;
 pub use moly_core::client_config;
 pub(crate) use moly_core::dev_tools;
 pub(crate) use moly_core::frame_capture;
-pub(crate) use moly_core::hold;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use moly_core::native_graphics_diagnostics;
 pub(crate) use moly_core::pipeline_report;
 pub(crate) use moly_core::run_mode;
-pub(crate) use moly_core::settings_store;
-pub(crate) use moly_core::world_seed;
 
 use bevy::prelude::*;
 

@@ -801,7 +801,7 @@ fn execute(world: &mut World, party: Party, row: SystemFixture, fixture: Entity,
         ("BirthdayPartyPresenter.ShowFirstConfirmDialog", CONFIRM_FIRST, START)
     };
     let format = crate::common_dialog::wording(world, caller, body_key);
-    let body = moly_law::text::custom_text_mesh::format_wording(&format, &[given_name.clone()])
+    let body = moly_law::text::custom_text_mesh::format_wording(&format, std::slice::from_ref(&given_name))
         .unwrap_or_else(|reason| {
             error!("[birthday] {caller}: {reason}; the body is drawn unformatted");
             format.clone()

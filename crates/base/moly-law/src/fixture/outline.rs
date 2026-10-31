@@ -19,7 +19,7 @@ pub const ZERO_VALUE_THRESHOLD: f32 = 0.001;
 pub const CONFIG_TO_WORLD: f32 = 0.001;
 
 /// 配置面：字段与 `GlobalFixtureSettingsData` 的序列化字段一一对应。
-/// 值域声明（Width ∈ [0,50]、DepthOffset ∈ [-10,10]、两个 Rate ∈ [0,1]）
+/// 值域声明（Width ∈ \[0,50\]、DepthOffset ∈ [-10,10]、两个 Rate ∈ \[0,1\]）
 /// 是编辑器滑条约束，运行时律不依赖它。
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct GlobalFixtureSettings {

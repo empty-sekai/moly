@@ -1,29 +1,40 @@
-//! 单调分区（`rcBuildRegionsMonotone` 的 2D 转录）。
+//! Monotone region building (implements `rcBuildRegionsMonotone` in 2D).
 //!
-//! 烘焙链在小区过滤之后进入原生 Recast 的后三段：分区 → 轮廓 → 多边形网。
-//! 本站点走的是**单调分区**这一支：原生调度里这一步之前没有距离场构建，
-//! 一个调 `rcBuildDistanceField` + 分水岭 `rcBuildRegions` 的实现与它不等价。
+//! After small-region filtering, the bakes chain enters the last three Recast
+//! stages: regions → contours → polygon mesh. This site takes the **monotone
+//! regions** branch: the schedule builds no distance field before this step,
+//! and an implementation calling `rcBuildDistanceField` plus the watershed
+//! `rcBuildRegions` is not equivalent to it.
 //!
-//! # 形状
+//! # Shape
 //!
-//! 逐行扫描。每行里，一段连续的可行走格构成一个「跨段」；跨段先按**西邻**
-//! 继承上一个跨段的临时号，再看**北邻**：北邻若唯一，跨段就并进那个区；
-//! 北邻多于一个，跨段自立新区。一行扫完后统一定号，再把本行的临时号重映射
-//! 成定号。
+//! Row-by-row sweep. In each row a run of consecutive walkable cells forms a
+//! "sweep"; a sweep first inherits the temporary id of the previous sweep via
+//! the **west neighbour**, then looks at the **north neighbour**: if the north
+//! neighbour is unique, the sweep joins that region; if there is more than one,
+//! the sweep starts a new region. After a row is swept all ids are fixed, and
+//! the row's temporary ids are remapped to the fixed ids.
 //!
-//! # 与原生的两处具名差异
+//! # Two named differences from Recast
 //!
-//! * **区号用 `u32`，不是原生的 `u16`。** 原生把 `0x8000` 位借去当边界区
-//!   标志，区号因此只剩 15 位；那个上限是**跟着分瓦来的**——原生按 100 体素
-//!   一瓦烘，单瓦内的区数远够用。本烘焙是单张整场格（3000² 量级），1 cm
-//!   体素下区数可以轻易越过 65535，沿用 `u16` 会静默截断。
-//! * **`borderSize` 恒 0，四条边界区不刷。** 边界区是瓦缝的产物：原生给每瓦
-//!   padding 27 体素，用 `0x8001..0x8004` 四个带标志位的区把 padding 圈起来，
-//!   好让跨瓦的区不被当成本瓦的小区杀掉。单张整场格没有瓦缝，那四个区无处
-//!   安放，随之「北邻带边界标志则不并」这条判据也恒不触发。
+//! * **Region ids are `u32`, not Recast's `u16`.** Recast borrows the `0x8000`
+//!   bit as the border-region flag, leaving only 15 bits for the id; that
+//!   limit **comes with tiling** — Recast bakes one 100-voxel tile at a time,
+//!   and the regions within a single tile fit far below it. This bake is one
+//!   whole-field grid (3000² scale), where with 1 cm voxels the region count
+//!   can easily pass 65535; keeping `u16` would silently truncate.
+//! * **`borderSize` is always 0; the four border regions are not emitted.**
+//!   Border regions are a product of tile seams: Recast pads each tile by 27
+//!   voxels and rings the padding with four flagged regions `0x8001..0x8004`,
+//!   so that regions crossing tiles are not killed as small regions of this
+//!   tile. A single whole-field grid has no tile seams, the four regions have
+//!   nowhere to go, so the check "do not join when the north neighbour carries
+//!   the border flag" is never triggered either.
 //!
-//! 这两处差异只改**分区的编号与边界处理**，不改**哪些格可行走**——可走集
-//! 在本模块之前就已经由栅格化、挖洞、侵蚀、小区过滤定死了。
+//! These two differences only change **the numbering of regions and the border
+//! handling**, not **which cells are walkable** — the walkable set is already
+//! fixed before this module by rasterization, carving, erosion and small-region
+//! filtering.
 
 use super::grid::Grid;
 

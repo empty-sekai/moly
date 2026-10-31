@@ -198,9 +198,9 @@ impl<T> Document<T> {
         if let Document::Loading(handle) = self {
             let read = match server.load_state(&*handle) {
                 LoadState::Failed(error) => Err(format!("did not load ({error})")),
-                _ => match jsons.get(&*handle) {
-                    Some(json) => parse(&json.0),
-                    None => return None,
+                _ => {
+                    let json = jsons.get(&*handle)?;
+                    parse(&json.0)
                 },
             };
             *self = Document::Read(read);

@@ -1,31 +1,36 @@
-//! 漏斗整直：把「按序穿过的一串门」收成拐点序列。
+//! Funnel straightening: reduces "a sequence of portals passed in order" to a
+//! sequence of corners.
 //!
-//! # 它在链条里的位置
+//! # Its place in the chain
 //!
-//! 原生查询侧是 Detour：`findPath` 在多边形图上做 A\*，给出一串多边形；
-//! `findStraightPath` 再把这串多边形之间的**公共边（门）**收成拐点。托管层
-//! `NavMeshAgent.CalculatePath` 返回的 `corners` 就是后者的产物——不是格链。
+//! The query side is Detour: `findPath` runs A\* on the polygon mesh and
+//! returns a sequence of polygons; `findStraightPath` then reduces the
+//! **shared edges (portals)** between those polygons to corners. The
+//! `corners` returned by the managed `NavMeshAgent.CalculatePath` are the
+//! product of the latter — not a cell chain.
 //!
-//! # 锚点档次
+//! # Algorithm
 //!
-//! ⚠ **本文件锚的是 upstream Detour，不是反编译。** 烘焙侧（分区/轮廓/多边形网）
-//! 的原生函数有 27 个导出可读，**查询侧一个都没有**——它们在 Detour 那半边，
-//! 不在本次导出的搜索空间里。所以这里写的是公开算法的转录，档次是「知识库」，
-//! 低于本仓其它地方的「反编译」。落这条注释是为了后来的人能一眼看出
-//! 哪些结论可以照抄、哪些需要回真源重新导出。
+//! ⚠ **This file implements Detour's straight path funnel.** The algorithm is
+//! public, following upstream Detour.
 //!
-//! # 形状
+//! # Shape
 //!
-//! 自起点起维护一个由左右两条射线夹出的楔形（漏斗）。逐门收紧：新的左点
-//! 若没有越过右边界就收紧左边界，越过了就说明右点是一个真拐点——把右点吐
-//! 出来，漏斗从它重新张开。右侧对称。
+//! Starting from the origin, the funnel maintains a wedge bounded by a left
+//! and a right ray. It tightens portal by portal: if the new left point does
+//! not cross the right boundary, the left boundary tightens; if it does, the
+//! right point is a true corner — emit it and reopen the funnel from it. The
+//! right side is symmetric.
 
-/// 二维叉积：`(b-a) × (c-a)`。正号表示 c 在 a→b 的左侧。
+/// 2D cross product: `(b-a) × (c-a)`. A positive sign means c is to the left of
+/// a→b.
 ///
-/// ⚠ 漏斗内部的判据由此定死：左边界 `L` 在上、右边界 `R` 在下时，
-/// 点 `P` 在漏斗内 ⟺ `cross(A,L,P) <= 0 ∧ cross(A,R,P) >= 0`
-/// （在左边界的右侧、且在右边界的左侧）。下面四处比较全按这条写。
-/// upstream Detour 的 `triarea2` 是 `-cross`，照抄它的不等号方向会整个反掉。
+/// ⚠ The inside test of the funnel follows from this: with the left boundary
+/// `L` above and the right boundary `R` below, a point `P` is inside the
+/// funnel ⟺ `cross(A,L,P) <= 0 ∧ cross(A,R,P) >= 0` (to the right of the left
+/// boundary and to the left of the right boundary). All four comparisons
+/// below follow this convention. Upstream Detour's `triarea2` is `-cross`, so
+/// Detour's inequality directions would flip every test.
 fn cross(a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> f32 {
     (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
 }
@@ -102,16 +107,22 @@ pub(crate) fn straight_path(start: [f32; 2], end: [f32; 2], portals: &[Portal]) 
 mod tests {
     use super::*;
 
-    /// 成对判据：一串把通道逼到同一侧的门**必须**产出中间拐点；
-    /// 同一对起终点在通道张开时**必须**整直成直达两点。
+    /// Paired test: a series of portals that pin the corridor to one side
+    /// **must** produce an intermediate corner; the same start and end
+    /// points with an open corridor **must** straighten into a direct
+    /// two-point path.
     ///
-    /// 反向臂在这里是承重的：只看正向臂的话，一个「原样返回每道门中点」的
-    /// 错误实现也会有中间点，看起来同样像绕过了拐角。
+    /// The test also checks the opposite case: without the open-corridor
+    /// case, a wrong implementation that returns every portal midpoint would
+    /// also have intermediate points and look equally like it went around the
+    /// corner.
     ///
-    /// ⚠ 正向臂的门必须**真的**挡住那条直线。起终点 (0,0.5)→(3,1.8) 的直线
-    /// 在 x=2 处 y=1.367，越过了第三道门压到 1.0 的左边界 ⇒ 必须在 (2,1) 拐。
-    /// （初稿终点写成 (3,0.9)，直线在 x=2 处才 0.767，仍在门内——那串门根本
-    /// 没逼人拐弯，正向臂量的是一条本来就直达的路。）
+    /// ⚠ The pinched portals must **really** block the straight line. The
+    /// line from (0,0.5) to (3,1.8) has y=1.367 at x=2, crossing the left
+    /// boundary of 1.0 pushed down by the third portal ⇒ it must turn at
+    /// (2,1). (With the end at (3,0.9) the line has only y=0.767 at x=2, still
+    /// inside the portals — that portal series never forced a turn and the
+    /// test would measure a path that was direct anyway.)
     #[test]
     fn funnel_turns_only_where_the_corridor_forces_it() {
         let start = [0.0, 0.5];

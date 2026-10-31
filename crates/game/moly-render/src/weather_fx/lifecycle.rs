@@ -146,7 +146,7 @@ fn constant_mode(curve: &MinMaxCurve) -> bool {
 /// every ancestor carry scale exactly one. `UpdateLocalToWorldMatrixAndScales`
 /// then stores a unit shape scale in every scaling mode and, for Local
 /// scaling, a unit emitter scale; for Hierarchy scaling it derives the emitter
-/// scale through a lossy composition that was not transcribed, and the port
+/// scale through a lossy composition that was not implemented, and the port
 /// takes it as one.
 pub(super) fn source_culling(system: &Value, renderer: &Value, emitter: &EmitterParams,
     route: &crate::particle_runtime::SourceRoute, unit_chain: bool) -> Culling {
@@ -172,7 +172,7 @@ pub(super) fn source_culling(system: &Value, renderer: &Value, emitter: &Emitter
         SourceRoute::Undecided(reason) => return Culling::Refused(format!("the bounds path needs the procedural decision: {reason}")),
     };
     if !unit_chain {
-        return refused("the emitter scale of a non-unit chain (UpdateLocalToWorldMatrixAndScales) is not transcribed");
+        return refused("the emitter scale of a non-unit chain (UpdateLocalToWorldMatrixAndScales) is not supported");
     }
     if system.get("stopAction").and_then(Value::as_i64) != Some(0) {
         return refused("the stop action of a culled system is not ported");
@@ -252,10 +252,10 @@ pub(super) fn source_culling(system: &Value, renderer: &Value, emitter: &Emitter
     let velocity = if has("VelocityModule") {
         let Some(v) = emitter.velocity_over_lifetime.as_ref() else { return refused("velocity module not exported"); };
         if ![&v.x, &v.y, &v.z].into_iter().all(constant_mode) {
-            return refused("curve-mode FindMinMaxIntegrated calls pow, acos and cos through the PLT; not transcribed");
+            return refused("curve-mode FindMinMaxIntegrated calls pow, acos and cos through the PLT; not supported");
         }
         if v.in_world_space && space != BoundsSpace::World {
-            return refused("a world-space velocity box goes through the emitter's worldToLocal, whose inversion is not transcribed");
+            return refused("a world-space velocity box goes through the emitter's worldToLocal, whose inversion is not supported");
         }
         Some(VelocityBounds { x: v.x.clone(), y: v.y.clone(), z: v.z.clone(), in_world_space: v.in_world_space })
     } else { None };
@@ -526,7 +526,6 @@ impl PlayState {
                 self.stop_emitting = true;
                 self.stop_time = now;
                 self.clear(system);
-                return;
             }
         }
         // Pause: re-Play with the stop flags kept; no reset, warm or catch-up.

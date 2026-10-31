@@ -1,24 +1,28 @@
-//! 小地图：ScreenLayerMysekaiSiteMap 的上屏（独立 2D 相机层，与气泡层
-//! 平行的覆盖层）。
+//! Site map: the screen of `ScreenLayerMysekaiSiteMap` (an independent 2D
+//! camera layer, an overlay parallel to the balloon layer).
 //!
-//! 数据面（提取产物，`moly://` 资产根下）：
-//! - `site/sitemap/prefab/prefab.json`——六根的 RectTransform（92 实例）
-//!   与 CustomRawImage（21 实例）；
-//! - `site/sitemap/animation/animation.json`——clip_open_cloud 的 32 条
-//!   曲线全键值（开云动画逐键驱动，键值直读不发明）；
-//! - `site/sitemap/texture/texture.json`——贴图清单与色彩空间声明（UI
-//!   一律取 sRGB=True 变体）；
-//! - `site/sitemap/screen_layer/screen_layer.json`——屏幕层布局真值（APK
-//!   player data 的 ScreenLayer prefab，`Resources.Load` 装载的那棵树）：
-//!   图标×位置的下标配对、底图/面板的 RectTransform、图标 prefab 内件
-//!   与面下色；
-//! - `site/sites.json`——站点主表（id · name · isBase · sitePosition）。
+//! Data side (under the `moly://` asset root):
+//! - `site/sitemap/prefab/prefab.json` — the RectTransforms of six roots
+//!   (92 instances) and the CustomRawImages (21 instances);
+//! - `site/sitemap/animation/animation.json` — every key of the 32 curves of
+//!   `clip_open_cloud` (the cloud-opening animation is driven key by key; the
+//!   key values are read, not invented);
+//! - `site/sitemap/texture/texture.json` — the texture list and colour-space
+//!   declarations (UI always takes the sRGB=True variant);
+//! - `site/sitemap/screen_layer/screen_layer.json` — the screen layer layout
+//!   (the ScreenLayer prefab in the player data, the tree loaded with
+//!   `Resources.Load`): the icon×position index pairing, the RectTransforms of
+//!   the ground image and panel, the icon prefab's parts and the fade
+//!   colours;
+//! - `site/sites.json` — the site master (id · name · isBase · sitePosition).
 //!
-//! 真源律（反编译）与本模块的对应：
-//! - 图标列：`_siteMapIcons[i]` 运行时放到 `_siteMapIconPositions[i]`——
-//!   **下标配对是唯一的连接律**（按名字或 id 接都会错位）；实例根的
-//!   authored 缩放是真值（运行时只写位置不写缩放）。HOME 恒列表第 0 位
-//!   （`HOME_SITE_ICON_INDEX = 0`）。
+//! Correspondence between the game's site map (`ScreenLayerMysekaiSiteMap`)
+//! and this module:
+//! - Icon column: `_siteMapIcons[i]` is placed at `_siteMapIconPositions[i]`
+//!   at runtime — **index pairing is the only link** (pairing by name or id
+//!   misaligns the rows); the instance root's authored scale is the value in
+//!   use (runtime writes the position only, never the scale). HOME is always
+//!   at index 0 of the list (`HOME_SITE_ICON_INDEX = 0`).
 //! - Tap on a released site (`SiteMapIcon.OnClickButtonFeedback` →
 //!   `ScreenLayerMysekaiSiteMap.OnPushSiteMapIcon`): the current site backs
 //!   the screen (`ScreenManager.BackUIScreen`, a [`LayerCommand::Pop`]); the
@@ -139,13 +143,15 @@ use crate::ui_layout::{UiLayouts, UiPrefabView};
 pub mod sitemap_tap;
 
 // ---------------------------------------------------------------------------
-// 常量（真源锚在注释里）
+// Constants (the game-side name of each is cited in its doc comment)
 // ---------------------------------------------------------------------------
 
-/// 真源常量：默认站点 id（主表类的 `DEFAULT_SITE_ID = 1`）——HOME。
+/// Default site id, as the site master defines it (`DEFAULT_SITE_ID = 1`):
+/// HOME.
 const DEFAULT_SITE_ID: i32 = 1;
 
-/// 真源常量：HOME 图标在屏幕层图标列表的序号（`HOME_SITE_ICON_INDEX = 0`）。
+/// Index of the HOME icon in the screen layer's icon list
+/// (`HOME_SITE_ICON_INDEX = 0`).
 const HOME_SITE_ICON_INDEX: usize = 0;
 
 pub use crate::ui_inputs::SITEMAP_LAYER;
@@ -203,10 +209,13 @@ const UNLOCK_SAMPLE_PERIOD: f32 = 0.5;
 const SITE_NAME_SIZE: f32 = 36.0;
 const PHENOMENA_JP_SIZE: f32 = 32.0;
 const PHENOMENA_EN_SIZE: f32 = 24.0;
-/// 现象 JP 行里图标与文本的间距（真源 HorizontalLayoutGroup 的 spacing
-/// 是序列化值未提取；组居中律按「图标+文本」合成宽现算）。
+/// Spacing between the icon and the text in the phenomena JP row. The
+/// serialized `HorizontalLayoutGroup` spacing is not available here, so this
+/// is a named approximation; the group is centred by computing the combined
+/// width of icon and text at spawn time.
 const PHENOMENA_ICON_GAP_PX: f32 = 8.0;
-/// 文本色（真源未提取，取深色可读色）。
+/// Text colour: the serialized value is not available here, so this is a
+/// named dark, readable colour.
 const TEXT_COLOR: Color = Color::srgb(0.16, 0.13, 0.11);
 
 /// 字形图集烘制参数（与气泡层同范式：仓内开源字体、两遍法按实际墨迹
@@ -341,7 +350,8 @@ struct IconSpot {
     root_scale: f32,
     /// 按钮件显示尺寸（=点击命中域；home 842×664、其余 522×420）。
     button: Vec2,
-    /// 图标根是否为庆典庭院（点击真源的生日派对门）。
+    /// Whether the icon root is the festival garden (a tap opens the
+    /// birthday party door, as the game does).
     festival: bool,
 }
 
@@ -361,7 +371,7 @@ struct PhenomenaLayout {
 struct PrefabLayout {
     line: Placed,
     shadow: Placed,
-    /// img_map_shadow 的装载 tint（真源 CustomImage 的 m_Color）。
+    /// img_map_shadow's load tint (the `CustomImage` colour `m_Color`).
     shadow_tint: [f32; 4],
     name_outdoor: Vec2,
     name_home: Vec2,
@@ -388,7 +398,8 @@ struct CurveBinding {
 struct SiteRow {
     id: i32,
     name: String,
-    /// 站点类型名（真源枚举名；与屏幕层图标行的 join 键）。
+    /// Site type name (the site type enum's name; the join key against the
+    /// screen layer's icon rows).
     site_type: String,
     /// 是否上小地图：以「图标贴图 img_map_site_{id} 在贴图清单里」为准
     /// （楼层站点 2/3/4 是 HOME 内部结构，图标族没有它们的贴图）。
@@ -892,7 +903,7 @@ pub fn parse(
         .collect();
     assert_eq!(
         spots[HOME_SITE_ICON_INDEX].site_type, "home_site",
-        "sitemap：屏幕层图标列表第 0 位必须是 home_site（真源 HOME_SITE_ICON_INDEX=0）"
+        "sitemap: index 0 of the screen layer's icon list must be home_site (HOME_SITE_ICON_INDEX=0)"
     );
     let frame_of = |section: &str| -> Frame {
         let node = &screen["screen"][section];
@@ -917,9 +928,10 @@ pub fn parse(
     let jp_row = jp_row_node.place(phenomena_view.center, phenomena_view.size);
     let en_row = parse_node_rect(&format!("{phenomena_root_path}/PhenomenaENText"))
         .place(phenomena_view.center, phenomena_view.size);
-    // 现象图标槽 44×44（行内横排的位置由真源布局组件在运行时定，产物
-    // 里是布局前的作者位——消费侧按「图标+文本组居中」现算，见
-    // spawn_phenomena_icon）。
+    // Phenomena icon slot 44×44 (the in-row horizontal position is decided
+    // by the layout component at runtime; the data carries the authored
+    // position before layout, so the consumer computes it from the centred
+    // icon + text group, see spawn_phenomena_icon).
     let icon_size = parse_node_rect(&format!("{phenomena_root_path}/Text/PhenometaIcon")).size;
     // The weather button `_weatherButton`: the screen layer's own entry
     // (`screen.weatherButtonRoot`), laid out in its parent's frame. The
@@ -1514,8 +1526,8 @@ pub struct SiteMapSetup {
 // 铺装辅助
 // ---------------------------------------------------------------------------
 
-/// 一个 sprite 的铺装（custom_size = prefab 的显示尺寸；z 决定同层遮挡，
-/// 与真源的兄弟序一致）。
+/// Placement of one sprite (custom_size = the prefab's display size; z
+/// decides occlusion within the layer, matching the game's sibling order).
 fn spawn_image(
     commands: &mut Commands,
     data: &SitemapData,
@@ -1595,7 +1607,8 @@ fn spawn_text(
     entities
 }
 
-/// DOTween ease 3（OutSine；真源 OpenSiteAsync 两处淡入的 SetEase 常量）。
+/// DOTween ease 3 (OutSine; the SetEase constant of both fades in
+/// `OpenSiteAsync`).
 fn ease_out_sine(t: f32) -> f32 {
     (t * std::f32::consts::FRAC_PI_2).sin()
 }
@@ -1713,8 +1726,10 @@ pub fn spawn_when_ready(
     commands.entity(overlay).add_child(ui_root);
     data.map_root = Some(map_root);
 
-    // 底图：世界全景图（真源装载给「サイトの球体画像」）。位置与尺寸
-    // 都是屏幕层真值：2520×1140 的图在参照画布里锚中上（y+380）。
+    // Ground image: the world panorama (the image the game loads for the
+    // site's sphere picture). Position and size are the screen layer's:
+    // a 2520×1140 image anchored top-centre in the reference canvas
+    // (y+380).
     let ground_at = data.screen.ground;
     let ground = spawn_image(
         &mut commands,
@@ -1752,7 +1767,7 @@ pub fn spawn_when_ready(
     }
     assert_eq!(
         home_id, DEFAULT_SITE_ID,
-        "sitemap：第 0 号图标必须是 HOME（真源 HOME_SITE_ICON_INDEX=0）"
+        "sitemap: icon 0 must be HOME (HOME_SITE_ICON_INDEX=0)"
     );
 
     spawn_weather_panel(&mut commands, &data, ui_root);
@@ -2104,9 +2119,11 @@ fn spawn_cloud_cluster(
     cluster
 }
 
-/// 现象行的三件位（面板系）：图标中心、JP 文本左起点、EN 行中心。
-/// JP 行 =「图标 + 文本」横排、组在行心居中（真源布局组件的组居中律；
-/// 间距取具名近似值）。
+/// The three slots of a phenomena row (panel frame): the icon centre, the
+/// JP text's left origin, the EN row's centre.
+/// The JP row is the icon and the text side by side, the group centred on
+/// the row centre (the layout component centres the group; the spacing is
+/// a named approximation).
 fn phenomena_slots(
     data: &SitemapData,
     text: &SitemapText,
@@ -2258,8 +2275,9 @@ fn spawn_open_cloud(
             .get(&(node.to_owned(), attribute.to_owned()))
             .unwrap_or_else(|| panic!("sitemap：clip_open_cloud 缺曲线 {node}.{attribute}"))
     };
-    // 真源把 open_cloud 摆在按钮位置（serialized 根位被运行时覆盖；根的
-    // 尺寸也不消费——命中域在 hide_cloud 侧）。
+    // The game places open_cloud at the button position (the serialized root
+    // position is overwritten at runtime; the root's size is not consumed
+    // either — the hit area lives on the hide_cloud side).
     let cluster = commands
         .spawn((
             Transform::from_xyz(0.0, 0.0, 0.6),
@@ -2319,8 +2337,9 @@ fn spawn_open_cloud(
         e
     };
 
-    // flare_back（最底）→ site_mask → cloud 容器 → 云（容器内数字序）
-    // → flare_front（最顶）：z 单调递增，与真源兄弟序一致。
+    // flare_back (bottom) → site_mask → cloud container → clouds (numeric
+    // order inside the container) → flare_front (top): z increases
+    // monotonically, matching the game's sibling order.
     let flare_back_e = textured(commands, cluster, "open_cloud", "flare_back", 0.0, 0.0);
     let site_mask_e = textured(commands, cluster, "open_cloud", "site_mask", 0.01, 0.0);
     let container_layout = data

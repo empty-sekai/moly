@@ -25,8 +25,10 @@ use std::collections::HashMap;
 #[derive(Resource)]
 pub struct SiteSceneJsonHandle(Handle<JsonAsset>);
 
-/// 解析出的名单，按真源顺序。`inactiveNodes` 键是可选的：站点没有它
-/// 就是空表，缺席不是缺陷；键在而形状不对才是响亮拒绝。
+/// The parsed list, in the order the source document lists it. The
+/// `inactiveNodes` key is optional: a site without it gets an empty list,
+/// and absence is not a defect; only a key that is present with the wrong
+/// shape is a loud refusal.
 #[derive(Resource)]
 pub struct InactiveList(Vec<String>);
 

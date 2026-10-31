@@ -87,10 +87,9 @@ impl DitherConfigLoad {
             .clone();
         let settled = if server.load_state(&handle).is_failed() {
             Err(format!("{DITHER_CONFIG_PATH} did not load"))
-        } else if let Some(document) = documents.get(&handle) {
-            parse_distances(&document.0)
         } else {
-            return None;
+            let document = documents.get(&handle)?;
+            parse_distances(&document.0)
         };
         match &settled {
             Ok(distances) => info!(

@@ -1,37 +1,49 @@
-//! 转身律：换目标朝向时的角度选段与转体时长。
+//! Turn rule: angle-to-segment selection and turn duration when the target
+//! heading changes.
 //!
-//! 真源换目标时的转身是两件并行的事：选一个转身动画段、把朝向在一段
-//! 时间内转过去。本模块复算的是这两件事的**纯函数部分**：
+//! Changing the target heading involves two parallel things: choosing a turn
+//! animation segment and rotating the heading over a span of time. This
+//! module recomputes the **pure-function part** of both:
 //!
-//! * **选段角**：调用方把当前朝向与目标朝向各折成欧拉 y（引擎的
-//!   四元数→欧拉读数会过一个「把负角折进 [0,360)」的包装，
-//!   [`make_positive_yaw`] 复算该包装的 y 分量），选段角 = 两者之差的
-//!   绝对值，落在 [0,360)。[`turn_motion`] 按六段链把它映成转身段基名
-//!   ——右转三段、左转三段，段名常量 `NPC_ROTATE_MOTION_NAME_*` 六个
-//!   字面量逐个钉住（恒 `mov_cw_normal` 族：常量字面量如此，不随角色
-//!   自身的位移段族换）。
-//! * **转体时长**：角度除以 60——真源 `MysekaiUtility.GetRotateTime` 的
-//!   式子是 `|两向量夹角| / 60`（秒）。输入是当前朝向与目标方向的非带
-//!   符号夹角，[`angle_between`] 按引擎 `Vector3.Angle` 同式复算（点积
-//!   除模长、夹到 [-1,1]、acos、折度——不含夹持时浮点误差会把 acos 喂
-//!   出 NaN）。
+//! * **Segment angle**: the caller converts the current heading and the
+//!   target heading each into an Euler y (the engine's quaternion→Euler
+//!   reading passes through a wrapper that folds negative angles into
+//!   [0,360), and [`make_positive_yaw`] recomputes that wrapper's y
+//!   component); the segment angle is the absolute value of their difference,
+//!   in [0,360). [`turn_motion`] maps it through the six-band chain to a turn
+//!   segment base name — three right-turn bands and three left-turn bands, the
+//!   six literals of the segment name constants `NPC_ROTATE_MOTION_NAME_*`
+//!   pinned one by one (always the `mov_cw_normal` family: the constant
+//!   literals are so, and do not switch with the character's own displacement
+//!   segment family).
+//! * **Turn duration**: the angle divided by 60 — `MysekaiUtility.GetRotateTime`
+//!   computes `|angle between the two vectors| / 60` (seconds). The input is
+//!   the unsigned angle between the current heading and the target direction,
+//!   and [`angle_between`] recomputes it with the same formula as the engine's
+//!   `Vector3.Angle` (dot product divided by the magnitudes, clamped to
+//!   [-1,1], acos, converted to degrees — without the clamp floating-point
+//!   error can feed acos a NaN). This angle is unsigned.
 //!
-//! 两个角**不是同一个量**：选段角是欧拉 y 的差（可到 360，左/右由它
-//! 分段），时长角是两方向的夹角（至多 180，即实际要走的最短角路程）。
-//! 差 350° 的转身选 45° 左段、却只花 10°/60 秒——两个量各司其职，
-//! 合并成一个是编造。
+//! The two angles **are not the same quantity**: the segment angle is the
+//! difference of the Euler y values (up to 360; it decides left versus right),
+//! while the duration angle is the angle between the two directions (at most
+//! 180, i.e. the shortest angular distance actually travelled). A turn with a
+//! gap of 350° picks the left 45° segment yet takes only 10°/60 seconds — each
+//! quantity has its own job, and merging them would be an invention.
 //!
-//! # 朝向的插值本身不在律里
+//! # The heading interpolation itself is not part of the rule
 //!
-//! 真源的转体走动画补间库（`DOLocalRotateAsync`）：最短角路径、时长
-//! 即上面的 [`rotate_time`]、缺省缓动。补间的采样与四元数操作是引擎侧
-//! 机制，接线在消费侧（npc 域）做，律只供它的两个决定量。
+//! The turn runs through the animation tween library (`DOLocalRotateAsync`):
+//! shortest angular path, duration equal to [`rotate_time`] above, default
+//! easing. Sampling a tween and manipulating quaternions are engine-side
+//! mechanisms; the wiring happens on the consuming side (the npc domain), and
+//! the rule only supplies its two deciding quantities.
 
 /// 转身段：六段链的输出。序数（[`Self::index`]）只作动画域建表用，
 /// 不承载语义。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TurnMotion {
-    /// 差角 ∈ [0,60]：右转 45° 段。
+    /// 差角 ∈ \[0,60\]：右转 45° 段。
     Turn45R,
     /// 差角 ∈ (60,120]：右转 90° 段。
     Turn90R,
@@ -56,8 +68,9 @@ impl TurnMotion {
         TurnMotion::Turn45L,
     ];
 
-    /// 段基名：真源选段常量的字面量。动画域在基名上拼段后缀
-    /// （`_S` 起始 / `_L` 循环）成共享动作库里的剪辑名。
+    /// Segment base name: the literal of the game's segment constant. The
+    /// animation domain appends a segment suffix (`_S` start / `_L` loop) to
+    /// the base name to form the clip name in the shared action library.
     pub fn base_name(self) -> &'static str {
         match self {
             TurnMotion::Turn45R => "mov_cw_normal_turn45_r",
@@ -87,7 +100,8 @@ impl TurnMotion {
     }
 }
 
-/// 转体角速度（度/秒）：时长式子的除数，真源字面量 60.0。
+/// Turn rate (degrees/second): the divisor of the duration formula, literal
+/// 60.0.
 pub const ROTATE_DEGREES_PER_SECOND: f32 = 60.0;
 
 /// 引擎四元数→欧拉包装的 y 分量：负过 `-0.0001` 弧度折角加 360，
@@ -118,9 +132,12 @@ pub fn turn_angle(current_yaw_deg: f32, target_yaw_deg: f32) -> f32 {
     (make_positive_yaw(target_yaw_deg) - make_positive_yaw(current_yaw_deg)).abs()
 }
 
-/// 六段链选段。真源比较链直译：首段 `[0,60]` 上下都含等号；其余各段
-/// 下开上闭（卫兵写的是「排除下界及以下、或上界以上」，读法即下开上
-/// 闭）；大于 300 与**负角**同落 45° 左段——负角走的是内段的左转臂；
+/// Six-band segment selection. The comparison chain reads: the first band
+/// `[0,60]` includes both bounds; every other band is open below and closed
+/// above (each guard excludes the lower bound and below, or above the upper
+/// bound, which reads as open below / closed above); angles greater than 300
+/// and **negative angles** both land in the left 45° band — negative angles
+/// take the left arm of the inner band;
 /// NaN: every guard of the compiled chain branches on an unordered compare
 /// (`b.lt` / `b.hi` / `b.le` all take it), so NaN runs to the last band,
 /// whose select sees the equal flag set and gives the left 45° clip.
@@ -132,9 +149,11 @@ pub fn turn_motion(angle: f32) -> TurnMotion {
         if angle <= 60.0 || 120.0 < angle {
             if angle <= 120.0 || 180.0 < angle {
                 if angle <= 180.0 || 240.0 < angle {
-                    // 内段（角 > 240 或为负）：真源以三个布尔重组选择，
-                    // b3 恒假（NaN 到不了这里），字面直译：
-                    // (240,300] 左 90、负角与 >300 左 45。
+                    // Inner band (angle > 240 or negative): the selection
+                    // recomposes three booleans; b3 is always false (NaN
+                    // never reaches here). Read literally:
+                    // (240,300] is left 90; negative angles and >300 are
+                    // left 45.
                     let over_240 = if angle <= 300.0 { angle < 240.0 } else { false };
                     let at_240 = if angle <= 300.0 { angle == 240.0 } else { true };
                     if !at_240 && !over_240 {
@@ -185,8 +204,10 @@ mod tests {
 
     #[test]
     fn base_names_are_the_six_rotate_motion_constants() {
-        // 锚：真源选段返回的字符串就是这六个常量。动画域按 `基名 + 段
-        // 后缀` 找剪辑，基名错一个字母整族断线。
+        // Check: the strings returned by segment selection are exactly these
+        // six constants. The animation domain looks up clips by `base name +
+        // segment suffix`; a single wrong letter in a base name breaks the
+        // whole family.
         assert_eq!(TurnMotion::Turn45R.base_name(), "mov_cw_normal_turn45_r");
         assert_eq!(TurnMotion::Turn90R.base_name(), "mov_cw_normal_turn90_r");
         assert_eq!(TurnMotion::Turn180R.base_name(), "mov_cw_normal_turn180_r");
@@ -225,8 +246,9 @@ mod tests {
 
     #[test]
     fn upper_band_bounds_are_inclusive() {
-        // 锚：真源卫兵链的读法是下开上闭——上界本身留在本段。每个上界
-        // 是一条独立断言，错一段只红一条。
+        // Check: the guard chain reads as open below / closed above — the
+        // upper bound itself stays in its band. Each upper bound is a separate
+        // assertion, so a wrong band only fails one test.
         assert_eq!(turn_motion(0.0), TurnMotion::Turn45R);
         assert_eq!(turn_motion(60.0), TurnMotion::Turn45R);
         assert_eq!(turn_motion(120.0), TurnMotion::Turn90R);
@@ -249,9 +271,12 @@ mod tests {
 
     #[test]
     fn negative_angles_fall_to_the_left_45_band() {
-        // 锚：真源比较链里负角进不了任何右段（首卫兵放行后一路走到内
-        // 段的左臂）。这不是死代码——调用方喂的选段角恒非负，但链条
-        // 本身对负角有确定输出，钉住它防止「优化」掉这个分支。
+        // Check: in the comparison chain a negative angle cannot reach any
+        // right band (after the first guard lets it through it runs down to
+        // the left arm of the inner band). This is not dead code — callers
+        // always feed a non-negative segment angle, but the chain itself has a
+        // well-defined output for negative angles, and the test pins it so the
+        // branch is not "optimized" away.
         assert_eq!(turn_motion(-0.001), TurnMotion::Turn45L);
         assert_eq!(turn_motion(-90.0), TurnMotion::Turn45L);
         assert_eq!(turn_motion(-359.0), TurnMotion::Turn45L);
@@ -319,8 +344,9 @@ mod tests {
 
     #[test]
     fn rotate_time_divides_the_angle_by_sixty() {
-        // 锚：时长式 `|角|/60`。60° 恰 1 秒；负角取绝对值——真源式子
-        // 外面套了绝对值。
+        // Check: the duration formula `|angle|/60`. 60° is exactly 1 second;
+        // a negative angle is taken by absolute value — the formula applies
+        // the absolute value to its input.
         assert_eq!(rotate_time(0.0), 0.0);
         assert_eq!(rotate_time(60.0), 1.0);
         assert_eq!(rotate_time(90.0), 1.5);

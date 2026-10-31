@@ -11,17 +11,19 @@
 //! (`crate::avatar_wear_data::AvatarMasters`, present once they have
 //! resolved). An id whose master is absent from the runtime root, or which
 //! names no row, is named and read as null, as a master lookup that finds no
-//! row is null in the source's chain. The chain, sentence by sentence:
-//! * **皮肤包**（玩家链材质合成）：coordinate.costumeAssetbundleName ??
-//!   costume.assetbundleName ?? "default"——服装包是**纯贴图换肤**，
-//!   包内 `skin` 资产贴 `_SkinTex` 槽，网格不变。
-//! * **饰品包**：coordinate.accessoryAssetbundleName ??
-//!   accessory.assetbundleName ?? 无（真源 key 非空才装载；None 是
-//!   一等分支——不挂）。
-//! * **肤色调色**：**只读 skinColor.Color，null ⇒ (1,1,1,1)**。玩家链
-//!   **不读 coordinate.SkinColor**——那是观众链 Avatar-Color 族的式子，
-//!   两链同族不同形（玩家链那段逐句里只有 AvatarData+0x20 一处皮肤色
-//!   读取，没有 coordinate+0x48）。
+//! row is null in the source's chain. The chain, clause by clause:
+//! * **Skin bundle** (material composition on the player chain):
+//!   coordinate.costumeAssetbundleName ?? costume.assetbundleName ?? "default".
+//!   A costume bundle is a **texture-only reskin**: the `skin` asset inside the
+//!   bundle fills the `_SkinTex` slot and the mesh is unchanged.
+//! * **Accessory bundle**: coordinate.accessoryAssetbundleName ??
+//!   accessory.assetbundleName ?? none. A bundle is loaded only when the key is
+//!   non-empty; `None` is a first-class branch — nothing is attached.
+//! * **Skin tint**: **reads skinColor.Color only, null ⇒ (1,1,1,1)**. The player
+//!   chain does **not** read coordinate.SkinColor — that is the formula of the
+//!   audience chain's Avatar-Color family, and the two chains share the family
+//!   but differ in form: the player chain's skin-colour read is a single one at
+//!   `AvatarData+0x20`, with no `coordinate+0x48`.
 //! * **No penlight.** The MySekai player never holds one, whatever the
 //!   server sends: the room sync keys have no penlight column, the penlight
 //!   mesh is mounted only by the audience and live chains (no MySekai
@@ -31,23 +33,32 @@
 //!   has no penlight (`userAvatar` has no such id); the material's penlight
 //!   properties keep their defaults.
 //!
-//! **挂件装配形态**：真源玩家链把饰品网格合批进合并网格（part-index
-//! 槽 1 进 UV0.z）；本仓合成体 glb 的 part-index 载体是第二套 UV 的
-//! x 分量（`avatar_material` 的既有约定）。件网格本身没有该通道（独立件，
-//! 真源在合批时才烘）⇒ 装配时运行时注入 `UV_1 = (1,0)`（槽 1），
-//! 材质与身体共享同一套 AvatarMaterial 值——同一分派律，网格不合批
-//! （提取侧没做合批，运行时做网格手术是另一条路，不在本单）。
-//! 饰品挂 `Accessory_face` 骨下（真源对蒙皮件挂同一节点；非蒙皮件的
-//! 顶点刚体变换也是按该骨的位置）。
+//! **Accessory assembly form**: the player chain bakes accessory meshes into
+//! the merged mesh (part index in slot 1 goes into UV0.z); in this repository's
+//! composed glb the part-index carrier is the x component of the second UV set
+//! (the existing convention of `avatar_material`). A part mesh has no such
+//! channel of its own (it is a standalone piece, and the number is baked only
+//! at merge time) ⇒ assembly injects `UV_1 = (1,0)` at runtime (slot 1), and the
+//! material shares the same AvatarMaterial values as the body — the same
+//! dispatch rule, without merging meshes (merging is not done on the extraction
+//! side, and performing mesh surgery at runtime is a separate change, out of
+//! scope here).
+//! The accessory hangs under the `Accessory_face` bone (the same node used for
+//! skinned pieces; for non-skinned pieces the vertex rigid transform is also
+//! relative to that bone's position).
 //!
-//! **贴图取件**：饰件/荧光棒的 glb 不把贴图接进标准 PBR 槽（只在
-//! extras 里，装载器不读）——但内嵌图像由装载器注册为标签子资产
-//! `Texture{index}`，按标签取件（不猜文件名）。饰件的 Texture0 即真源
-//! accessoryTexture（首个 Renderer 材质的 `_MainTex`）。
+//! **Texture lookup**: the accessory/penlight glb does not wire its textures
+//! into the standard PBR slots (they only sit in extras, which the loader does
+//! not read) — but the loader registers the embedded images as label
+//! sub-assets `Texture{index}`, so they are fetched by label (no filename
+//! guessing). The accessory's Texture0 is accessoryTexture (the `_MainTex` of
+//! the first Renderer's material).
 //!
-//! 闩组件挂在玩家实体上：装配系统等身体换装闩（`AvatarToon`，场景
-//! 已展开的等价信号）到位后装配一次，`AccessoryWorn` 防重进；None
-//! 分支也闩（不挂是真源的一等分支，面板行已具名）。
+//! The latch component lives on the player entity: the assembly system waits for
+//! the body reskin latch (`AvatarToon`, the equivalent signal that the scene is
+//! expanded), then assembles once; `AccessoryWorn` prevents re-entry. The `None`
+//! branch also latches (nothing attached is a first-class branch, and it has a
+//! named line in the panel log).
 
 use bevy::asset::{AssetPath, RecursiveDependencyLoadState};
 use bevy::gltf::{Gltf, GltfMesh};
@@ -60,10 +71,11 @@ use crate::player::PlayerControlled;
 use crate::avatar_wear_data::{AvatarMasters, ClientUserAvatar};
 use moly_law::shading::avatar as law;
 
-/// 皮肤包「未设置」的回退值：真源字面量 "default"（皮肤包选择链的兜底臂）。
+/// Fallback value for "skin bundle not set": the literal "default" (the fallback
+/// arm of the skin-bundle selection chain).
 const DEFAULT_SKIN_BUNDLE: &str = "default";
 
-/// 饰件挂点骨名（真源玩家链 accessoryNode 谓词的名字）。
+/// Accessory mounting bone name (the name of the player chain's accessoryNode predicate).
 const ACCESSORY_BONE: &str = "Accessory_face";
 
 // ---------------------------------------------------------------------------
@@ -76,36 +88,37 @@ const ACCESSORY_BONE: &str = "Accessory_face";
 /// must live here).
 #[derive(Resource)]
 pub struct AvatarWear {
-    /// 皮肤包名（解析链输出；未设置 ⇒ "default"）。
+    /// Skin bundle name (output of the resolution chain; unset ⇒ "default").
     pub skin_bundle: String,
-    /// 肤色调色 rgba（真源 skinColor.Color；未设置 ⇒ 白）。
+    /// Skin tint rgba (skinColor.Color; unset ⇒ white).
     pub skin_color: [f32; 4],
-    /// 肤色调色的原始色码（日志用；未设置 ⇒ "none"）。
+    /// Raw colour code of the skin tint (for logging; unset ⇒ "none").
     pub skin_color_code: Cow<'static, str>,
-    /// 饰件包名（None = 真源 null 分支：不挂）。
+    /// Accessory bundle name (`None` = the null branch: nothing is attached).
     pub accessory_bundle: Option<String>,
-    /// 皮肤贴图（`_SkinTex`；皮肤包的 `skin` 资产）。
+    /// Skin texture (`_SkinTex`; the `skin` asset of the skin bundle).
     pub skin_tex: Handle<Image>,
-    /// 饰件 glb。
+    /// Accessory glb.
     pub accessory_gltf: Option<Handle<Gltf>>,
-    /// 饰件贴图（glb 内嵌 Texture0 = 真源 accessoryTexture）。
+    /// Accessory texture (embedded Texture0 of the glb = accessoryTexture).
     pub accessory_tex: Option<Handle<Image>>,
 }
 
-/// 皮肤包内 `skin` 资产的产物路径（提取侧命名约定：`<包>__skin.png`；
-/// 真源按资产名 "skin" 从包里取）。
+/// Product path of the `skin` asset inside the skin bundle (extraction naming
+/// convention: `<bundle>__skin.png`; the asset is taken from the bundle by the
+/// asset name "skin").
 fn skin_tex_path(bundle: &str) -> String {
     format!("moly://avatar-parts/skin/{bundle}/tex/{bundle}__skin.png")
 }
 
-/// 饰件包的 glb 路径。
+/// glb path of an accessory bundle.
 fn decoration_glb_path(bundle: &str) -> String {
     format!("moly://avatar-parts/decoration/{bundle}/{bundle}.glb")
 }
 
-/// glb 内嵌图像的标签子资产路径（装载器把全部内嵌贴图注册为
-/// `Texture{index}`；不被材质引用的贴图也注册——这是不猜文件名取件
-/// 的唯一通道）。
+/// Label sub-asset path of an embedded glb image (the loader registers every
+/// embedded texture as `Texture{index}`, including textures that no material
+/// references — the only way to fetch them without guessing file names).
 fn glb_texture(glb: &str, index: usize) -> AssetPath<'static> {
     AssetPath::from(glb.to_owned()).with_label(format!("Texture{index}"))
 }
@@ -130,13 +143,14 @@ fn row_of<'a, T>(
     row
 }
 
-/// `#rrggbb` 色码 → srgb [0,1]（master 表 colorCode 的形状）。坏值警告行
-/// 带原值、按未设置处理（真源回退白），不静默吞。
+/// `#rrggbb` colour code → srgb [0,1] (the shape of the masters' colorCode).
+/// The bad-value warning carries the raw value and the value is treated as unset
+/// (the fallback is white) instead of being silently swallowed.
 fn parse_hex_color(raw: &str) -> Option<[f32; 4]> {
     let hex = raw.strip_prefix('#').unwrap_or(raw);
     if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
         warn!(
-            "[player] 穿戴集面板：色码 {raw:?} 不是 #rrggbb，按未设置处理（真源回退白）"
+            "[player] wear panel: colour code {raw:?} is not #rrggbb; treated as unset (falls back to white)"
         );
         return None;
     }
@@ -192,24 +206,26 @@ pub fn load(
         "avatarSkinColorId",
         "avatar-skin-colors.json",
     );
-    // 皮肤包（真源玩家链）：coordinate.costume ?? costume ?? "default"。
+    // Skin bundle (player chain): coordinate.costume ?? costume ?? "default".
     let skin_bundle = coordinate
         .and_then(|row| row.costume_assetbundle_name.clone())
         .or_else(|| costume.cloned())
         .unwrap_or_else(|| DEFAULT_SKIN_BUNDLE.to_owned());
-    // 饰件包（真源装配链）：coordinate.accessory ?? accessory ?? 无。
+    // Accessory bundle (assembly chain): coordinate.accessory ?? accessory ?? none.
     let accessory_bundle = coordinate
         .and_then(|row| row.accessory_assetbundle_name.clone())
         .or_else(|| accessory.cloned());
-    // 肤色调色：玩家链只读 skinColor.Color（未设置 ⇒ 白）；不读
-    // coordinate 的色（观众链的式子，见模块头注）。
+    // Skin tint: the player chain reads skinColor.Color only (unset ⇒ white) and
+    // not the coordinate colour (that is the audience chain's formula, see the
+    // module header).
     let skin_color = skin
         .and_then(|code| parse_hex_color(code))
         .unwrap_or([1.0, 1.0, 1.0, 1.0]);
     let skin_color_code = Cow::from(skin.cloned().unwrap_or_else(|| "#ffffff".to_owned()));
 
-    // 皮肤贴图只由 GPU 采样（avatar 材质取渲染世界里的纹理），没有读纹素的
-    // CPU 读者，也没有别的请求方。
+    // The skin texture is sampled only by the GPU (the avatar material takes it
+    // from the render world); there is no CPU reader of its texels and no other
+    // requester.
     let skin_tex = moly_assets::residency::load_image(&server, skin_tex_path(&skin_bundle));
     let (accessory_gltf, accessory_tex) = match &accessory_bundle {
         Some(bundle) => {
@@ -222,12 +238,12 @@ pub fn load(
         None => (None, None),
     };
     info!(
-        "[player] 穿戴集（服务端 userAvatar）：coordinate={} costume={} accessory={} skinColor={} ⇒ 皮肤包 {skin_bundle} / 调色 {skin_color_code} / 饰件 {}",
+        "[player] wear (server userAvatar): coordinate={} costume={} accessory={} skinColor={} ⇒ skin bundle {skin_bundle} / tint {skin_color_code} / accessory {}",
         id(avatar.coordinate),
         id(avatar.costume),
         id(avatar.accessory),
         id(avatar.skin_color),
-        accessory_bundle.as_deref().unwrap_or("无（不挂）"),
+        accessory_bundle.as_deref().unwrap_or("none (nothing attached)"),
     );
     commands.insert_resource(AvatarWear {
         skin_bundle,
@@ -244,13 +260,15 @@ pub fn load(
 // 装配闩与标记
 // ---------------------------------------------------------------------------
 
-/// 饰件装配闩（玩家实体；None 分支也闩——不挂是真源一等分支）。
+/// Accessory assembly latch (on the player entity; the `None` branch latches as
+/// well — nothing attached is a first-class branch).
 #[derive(Component)]
 pub struct AccessoryWorn;
 
-/// 挂件网格实体标记：身体换装扫描的排除面（饰件走 AvatarMaterial 槽 1，
-/// 不该被身体换装扫走；且件网格无 part-index 通道，被扫到会在判据处
-/// 响亮拒绝）。
+/// Marker on accessory mesh entities: excluded from the body reskin scan (an
+/// accessory uses AvatarMaterial slot 1 and must not be swept up as a body part;
+/// its mesh also has no part-index channel, so a sweep would hit the check and be
+/// rejected loudly).
 #[derive(Component)]
 pub struct WearPart;
 
@@ -258,8 +276,9 @@ pub struct WearPart;
 // 饰件装配
 // ---------------------------------------------------------------------------
 
-/// Update：身体换装闩到位后装饰品。装载失败响亮 panic（未提取件具名
-/// 拒绝）；glb 未到齐静默等下一帧。
+/// Update: attach the accessory once the body reskin latch is in place. A load
+/// failure panics loudly (an unextracted piece is rejected by name); an
+/// incomplete glb waits silently for the next frame.
 pub fn attach_accessory(
     mut commands: Commands,
     server: Res<AssetServer>,
@@ -276,7 +295,7 @@ pub fn attach_accessory(
     for player in &players {
         let Some(bundle) = wear.accessory_bundle.clone() else {
             commands.entity(player).insert(AccessoryWorn);
-            info!("[player] avatar 挂件：饰品未设置（真源 null 分支，不挂）");
+            info!("[player] avatar accessory: none set (null branch, nothing attached)");
             continue;
         };
         let Some(gltf_handle) = wear.accessory_gltf.clone() else {
@@ -290,8 +309,8 @@ pub fn attach_accessory(
             _ => return, // 未到齐，下一帧再试
         }
         let gltf = gltfs.get(&gltf_handle).expect("装载门已过");
-        // 真源取 prefab 里第一个 MeshFilter 的网格；装载器的 meshes 按文件序
-        // 排列，meshes[0] 即场景节点序里第一件。
+        // The prefab's first MeshFilter mesh is the one used; the loader lists
+        // meshes in file order, so meshes[0] is the first entry in scene node order.
         let source = gltf
             .meshes
             .first()
@@ -307,15 +326,17 @@ pub fn attach_accessory(
             .get(&primitive.mesh)
             .unwrap_or_else(|| panic!("avatar 饰件 {bundle} 的 Mesh 资产不在 Assets 里"))
             .clone();
-        // part-index 注入：槽 1（真源在合批时把 part 序号烘进 UV0.z；本仓
-        // 载体是第二套 UV 的 x 分量，件网格原生没有该通道）。
+        // part-index injection: slot 1 (the part number is baked into UV0.z at
+        // merge time; here the carrier is the x component of the second UV set, and
+        // a part mesh has no such channel of its own).
         let vertices = mesh.count_vertices();
         mesh.insert_attribute(
             Mesh::ATTRIBUTE_UV_1,
             vec![[1.0f32, 0.0f32]; vertices],
         );
         let mesh_handle = mesh_assets.add(mesh);
-        // 材质与身体同一套值（真源单网格单材质的分派律；槽 1 喂饰件贴图）。
+        // The accessory's material uses the same values as the body (the
+        // single-mesh single-material dispatch rule; slot 1 feeds the accessory texture).
         let mut law_material = law::default_material();
         law_material.skin_color = wear.skin_color;
         let material = materials.add(AvatarMaterial {

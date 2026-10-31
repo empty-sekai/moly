@@ -1852,7 +1852,7 @@ impl CollisionScene for GroundQuery {
         let mut touched = Vec::new();
         for (at, (entry, scene)) in entries.entries.iter().enumerate() {
             if let Some(u) = scene.unported.iter().find(|u| query.collides_with & u.layers != 0
-                && u.bounds.as_ref().map_or(true, |bounds| bounds_meet(bounds, query.center, query.extents))) {
+                && u.bounds.as_ref().is_none_or(|bounds| bounds_meet(bounds, query.center, query.extents))) {
                 self.refusal.get_or_insert(u.query_refusal);
             }
             for (i, c) in scene.colliders.iter().enumerate() {

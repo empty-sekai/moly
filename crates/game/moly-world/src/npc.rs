@@ -74,8 +74,9 @@ pub use crate::markers::CharacterUnitId;
 #[derive(Component)]
 pub struct WalkSpeed(pub f32);
 
-/// 步间停顿时长（秒）：真源角色表的 `locomotion.pauseSeconds` 列（目标
-/// 机主循环每轮决策前的停顿时长，见 `npc_objective` 的停顿律）。
+/// Pause duration between steps (seconds): the `locomotion.pauseSeconds` column
+/// of the character table (the pause before each decision round of the main loop,
+/// see the pause rules in `npc_objective`).
 #[derive(Component)]
 pub struct PauseSeconds(pub f32);
 
@@ -945,8 +946,9 @@ const STUCK_DISTANCE: f32 = 0.09;
 /// 卡死时间窗（源字面量，秒）：窗内位移不足距离阈 ⇒ 卡死上报。
 const STUCK_SECONDS: f32 = 5.0;
 
-/// 位移段族名（真源 locomotion 的 idleMotion / walkMotion 两列）：共享
-/// 动作库在族名上加段后缀成剪辑名。角色装配系统消费。
+/// Motion segment family names (the idleMotion / walkMotion columns of
+/// locomotion): the shared motion library appends a segment suffix to each family
+/// name to form the clip name. Consumed by the character assembly system.
 #[derive(Component)]
 pub struct MotionClips {
     pub idle: String,
@@ -1040,9 +1042,9 @@ pub struct FitCandidate {
 /// 贴合支的步速（源字面量，米/秒）：全程匀速直线插值。
 const FIT_SPEED: f32 = 0.3;
 
-/// 唯一名册：真源的身份列叫 `characterUnitIds`，npc.* 族按它索引；
-/// npc.* 族的数据活在实体 component 上，实体就是名册的行，不再有第二份
-/// 按行数组。
+/// The single roster: the identity column is called `characterUnitIds`, and the
+/// npc.* families are indexed by it; npc.* family data lives on entity components,
+/// the entity is the roster row, and there is no second per-row array.
 #[derive(Resource)]
 pub struct Registry {
     pub character_unit_ids: Vec<u32>,
@@ -1145,15 +1147,18 @@ pub fn parse(
     commands.remove_resource::<CharacterListHandle>();
 }
 
-/// Update：清单与目标面都定案后，铺一次名册。内部形参带私有资源，
-/// 故 pub。
+/// Update: once the catalog and the target surface have both settled, lay out the
+/// roster once. Some parameters carry private resources, hence pub.
 ///
-/// 名册是服务端面板的访客行展开后的 unit（行序、去重；真源在建 NPC 之前
-/// 先设对话列表，所以这里等对话列表就位）。Full 是产品自有的全员展示，
-/// 不是访客状态，保留全目录。成员建在 [`CREATION_POSITION`]、单位旋转
-/// （真源单机房间的无位姿实例化），落位由门的随机登场做。目标机以出生态
-/// 插入——起动旗立起（源起动装配的同形），首判在名册铺开的当帧由目标机
-/// 执行：出生即决策、即出发。
+/// The roster is the units expanded from the server panel's visitor rows (row
+/// order, deduplicated; the dialogue list is set before the NPCs are created, so
+/// this waits for the dialogue list). Full is the product's own all-members
+/// display, not a visitor state, so it keeps the whole catalog. Members are created
+/// at [`CREATION_POSITION`] with the unit rotation (the single-player room's
+/// pose-less instantiation), and placement is done by the door's random entry. The
+/// target main line is inserted in its spawn state — the start flag is raised (the
+/// same shape as start assembly), and the first decision runs on the frame the
+/// roster is laid out: it decides and departs on spawn.
 pub fn spawn_when_ready(
     mut commands: Commands,
     catalog: Option<Res<Catalog>>,
@@ -1195,7 +1200,7 @@ pub fn spawn_when_ready(
     let Some(face_res) = face else {
         return;
     };
-    let face: &crate::npc_objective::ObjectiveFace = &*face_res;
+    let face: &crate::npc_objective::ObjectiveFace = &face_res;
     if !face.is_fresh(epoch.0) || face.walkable().is_empty() {
         return;
     }
@@ -1580,7 +1585,7 @@ pub fn reseed(
     let Some(face_res) = face else {
         return;
     };
-    let face: &crate::npc_objective::ObjectiveFace = &*face_res;
+    let face: &crate::npc_objective::ObjectiveFace = &face_res;
     if !face.is_fresh(epoch.0) {
         return;
     }
@@ -1728,9 +1733,11 @@ pub fn reseed(
         if retire {
             actions.effects.push(crate::npc_state::StateEffect::Retire);
         }
-        // 目标机复位到出生态：同站重建对成员是新一次起动（旗再立、停顿清零、
-        // 槽位清空）。抽签引擎不复位——成员自己的跨站连续性没有真源
-        // 依据可断，保留序列比假装重抽更诚实。
+        // The target main line is reset to its spawn state: a same-site rebuild is a
+        // new start for the member (flag raised again, pause cleared, slots emptied).
+        // The draw engine is not reset — there is no basis for breaking a member's own
+        // cross-site continuity, and keeping the sequence is better than pretending to
+        // redraw.
         *mind = crate::npc_objective::ObjectiveMind::at_spawn();
         info!(
             "[npc unit={}] 换站重播种：位次 {}，落位 ({:.2},{:.2},{:.2})，出生即首判",

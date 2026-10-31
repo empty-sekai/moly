@@ -290,7 +290,7 @@ struct LoadCounts {
     acc_loop_end_flag: u32,
     acc_unsupported_text: u32,
     /// Emitters whose rotationOverLifetime the engine curve dispatch refuses
-    /// (a lane shape outside the transcribed evaluator, or a lane the export
+    /// (a curve shape outside the modelled evaluator, or a shape the extraction
     /// lacks a field for). The emitter is refused, not drawn with its
     /// rotation frozen at the birth angle.
     acc_rol_refused: u32,
@@ -484,8 +484,9 @@ struct SimParams {
     color_over_lifetime: Option<MinMaxGradient>,
     size_over_lifetime: Option<MinMaxCurve>,
     size_over_lifetime_y: Option<MinMaxCurve>,
-    /// 自旋律（引擎原生逐指令：模式 × 通用/烘制两路的采样 + 翻转因子；
-    /// 逐粒子种子驱动，每帧 0 次流抽取）。None = 冻结在出生角。
+    /// Self-rotation (mode × sampled from either the generic or the baked curve path,
+    /// plus flip factor; driven per particle by its seed, with 0 stream draws per
+    /// frame). `None` = frozen at the birth angle.
     rotation_over_lifetime: Option<RotationOverLifetime>,
     /// 限速律（钳制段 + 拖拽段；语料拖拽恒 0，非零在构造处拒）。
     /// None = 不钳速。
@@ -1082,7 +1083,7 @@ fn build_item(
         let tname = s_field(t, "name").unwrap_or_default();
         let file = s_field(t, "file").unwrap_or_default();
         let handle = moly_assets::residency::load_image(
-            &server,
+            server,
             AssetPath::from(format!("{EMOTICON_DIR}/{file}")),
         );
         tex_by_name.insert(tname.clone(), textures.len());
@@ -1997,10 +1998,10 @@ fn renderer_draw(
                 return Err("Stretch scales not exported".into());
             };
             if renderer.get("freeformStretching").and_then(Value::as_bool) != Some(false) {
-                return Err("Stretch freeform stretching is not transcribed".into());
+                return Err("Stretch freeform stretching is not supported".into());
             }
             if pivot != Vec3::ZERO {
-                return Err("Stretch with a renderer pivot is not transcribed".into());
+                return Err("Stretch with a renderer pivot is not supported".into());
             }
             if camera_velocity_scale != 0.0 {
                 return Err(
@@ -2014,7 +2015,7 @@ fn renderer_draw(
                 .is_some_and(|v| v.speed_modifier != MinMaxCurve::Constant(1.0))
             {
                 return Err(
-                    "Stretch with a velocity speed modifier other than the constant one is not transcribed"
+                    "Stretch with a velocity speed modifier other than the constant one is not supported"
                         .into(),
                 );
             }
@@ -2381,7 +2382,8 @@ struct Instance {
     item: usize,
     npc: Entity,
     timeline_rotation_reference: Option<Entity>,
-    /// 节点 TRS 的运行副本（剪辑通道写这里；顶挂旋转写 top）。
+    /// Live copy of the node TRS (clip channels write here; top-mounted rotation
+    /// writes top).
     node_pos: Vec<Vec3>,
     node_scale: Vec<Vec3>,
     node_rot: Vec<Quat>,
@@ -2522,7 +2524,7 @@ fn mount_frame(
 }
 
 /// 相位对应的剪辑段。
-fn clip_of<'a>(phase: Phase, clips: Option<&'a Clips>) -> Option<&'a Clip> {
+fn clip_of(phase: Phase, clips: Option<&Clips>) -> Option<&Clip> {
     let clips = clips?;
     match phase {
         Phase::Start => clips.start.as_ref(),
@@ -3678,13 +3680,13 @@ pub fn advance(
             info!("[emoticon] 展示轮播 → {name}");
             show_emote(
                 &mut commands,
-                &mut *meshes,
-                &mut *materials,
+                &mut meshes,
+                &mut materials,
                 &globals,
                 &children,
                 &names,
                 &cameras,
-                &mut *emotes,
+                &mut emotes,
                 &archive.archive,
                 &name,
                 first,
@@ -3722,15 +3724,15 @@ pub fn advance(
             npc_global,
         );
         compute_worlds(item, inst, &anchor);
-        build_and_write(item, inst, cam.as_ref(), &mut *meshes);
+        build_and_write(item, inst, cam.as_ref(), &mut meshes);
     }
     // 回收（倒序：swap_remove 动的是尾部，先删大下标不动小下标）。
     for &ii in dead.iter().rev() {
         clear_instance(
             &mut commands,
-            &mut *meshes,
-            &mut *materials,
-            &mut *emotes,
+            &mut meshes,
+            &mut materials,
+            &mut emotes,
             ii,
         );
     }
@@ -3830,13 +3832,13 @@ pub fn serve_talk(
     for (npc, name, seconds) in reqs.shows.drain(..) {
         show_emote(
             &mut commands,
-            &mut *meshes,
-            &mut *materials,
+            &mut meshes,
+            &mut materials,
             &globals,
             &children,
             &names,
             &cameras,
-            &mut *emotes,
+            &mut emotes,
             &archive.archive,
             &name,
             npc,

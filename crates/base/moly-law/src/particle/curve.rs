@@ -18,7 +18,7 @@
 //! ([`EngineCurve`]) and multiplied by the curve multiplier afterwards. A
 //! weighted key never lets the reader optimize a lane; its segments are
 //! evaluated by `InterpolateKeyframe`'s weighted branch ([`interpolate_keyframe`]),
-//! whose Bezier time solve calls the device C library ([`device_libm`]).
+//! whose Bezier time solve calls the device C library (`device_libm`).
 //!
 //! The emoticon host builds its rotation and limit velocity modules from the
 //! particle law, so they follow these forms, but its own start, size,
@@ -233,10 +233,10 @@ pub fn bezier_interpolate(t: f32, l: CurveKey, r: CurveKey) -> f32 {
 ///
 /// `cbrt(z) = sign(z) * f32(exp(f64(logf(|z|)) / 3))`, the sign taken after the
 /// double-precision `exp`; a zero or NaN `z` takes the positive branch. `logf`, `exp`,
-/// `atan2f` and `cosf` are the device C library's ([`device_libm`]).
+/// `atan2f` and `cosf` are the device C library's (`device_libm`).
 pub fn bezier_time(x: f32, ow: f32, omiw: f32) -> f32 {
     let eps = f32::from_bits(0x3a83_126f);
-    let in_unit = |u: f32| u >= 0.0 && u <= 1.0;
+    let in_unit = |u: f32| (0.0..=1.0).contains(&u);
     let fallback = if x < 0.5 { 0.0 } else { 1.0 };
     let a = ow * 3.0;
     let t3 = omiw * 3.0;
@@ -585,7 +585,7 @@ impl CurveCache {
 /// ([`weighted_segment`], which with the left key the last one tests that key's
 /// two bits) is [`interpolate_keyframe`] at the time found (the wrapped time
 /// under repeat, with no offset). Every other segment is the cubic of
-/// [`cache_coefficients`].
+/// `cache_coefficients`.
 ///
 /// The evaluator keeps a one-segment cache ([`CurveCache`]: the job-local cache
 /// of `EvaluateThreaded`, shared by the four lanes of a call, or the curve
@@ -610,7 +610,7 @@ pub struct EngineCurve {
 impl EngineCurve {
     /// Admits the lane for a consumer whose clock is `time`.
     ///
-    /// The arithmetic domain ([`EngineCurve::fresh`]) comes first. Then the
+    /// The arithmetic domain (`EngineCurve::fresh`) comes first. Then the
     /// cache: a clamp wrap and a repeat wrap before a first key at time zero
     /// cannot change a result for any t at or above +0 (every window a fresh
     /// evaluation writes is its own segment's key interval, or starts at the
@@ -620,7 +620,7 @@ impl EngineCurve {
     /// rounded sums, and the period index can round up, so a window may
     /// straddle a wrapped knot or a period boundary. It is admitted on the
     /// normalized clock only when every such window is consistent by value
-    /// ([`EngineCurve::post_repeat_certificate`]), and refused on an unbounded
+    /// (`EngineCurve::post_repeat_certificate`), and refused on an unbounded
     /// clock. This admission is for a consumer that evaluates as from a reset
     /// cache ([`EngineCurve::evaluate`]); a consumer that carries each curve
     /// object's cache through its evaluations in the engine's order

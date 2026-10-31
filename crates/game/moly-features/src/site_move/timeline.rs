@@ -6,8 +6,7 @@
 //! Where each value comes from, in words:
 //! - The Core state machine stores its five floats with one wide store of four
 //!   single-precision words followed by one scalar store; the words are kept
-//!   bit-exact below (the decompiled C# shows zeros for them, a known artefact
-//!   of that wide store, and must not be copied).
+//!   bit-exact below.
 //! - Every wait is `UniTask.Delay(TimeSpan.FromSeconds(x))`; the clocks and
 //!   that rounding are [`crate::tween_clock`]'s. `FromSeconds`
 //!   goes through `TimeSpan.Interval(value, 1000)`, which rounds to whole

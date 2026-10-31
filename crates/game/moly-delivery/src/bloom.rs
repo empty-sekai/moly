@@ -83,8 +83,10 @@ struct Plan {
     waiting: Option<String>,
 }
 
+#[derive(Default)]
 enum Stage {
     /// No delivery site, or its bloom is not set up yet.
+    #[default]
     Idle,
     Preparing(Plan),
     Running {
@@ -98,11 +100,6 @@ enum Stage {
     Refused,
 }
 
-impl Default for Stage {
-    fn default() -> Self {
-        Self::Idle
-    }
-}
 
 /// The place view's director on the current delivery site.
 #[derive(Resource, Default)]

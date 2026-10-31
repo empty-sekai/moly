@@ -257,7 +257,7 @@ fn bind_surfaces(
                 let slot = parse_fixture_material(&name.0, &value).expect("fixture surface properties");
                 let state = passes.and_then(SourceMaterialPasses::color_state)
                     .unwrap_or_else(|| panic!("家具材质 {} 缺提取后的 Base pass 渲染状态", name.0));
-                let mut texture = |property: &str| -> Handle<Image> {
+                let texture = |property: &str| -> Handle<Image> {
                     if let Some(handle) = textures.and_then(|v| v.0.get(property)) { return handle.clone(); }
                     let default = value.get("shaderTextureDefaults").and_then(|v| v.get(property)).and_then(|v| v.as_str());
                     match default {

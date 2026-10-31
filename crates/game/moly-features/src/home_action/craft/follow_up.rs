@@ -838,9 +838,9 @@ fn draw(layouts: &UiLayouts, view: &mut UiPrefabView, bindings: &Bindings, follo
             if let Some(title) = wording(layouts, "MSG_FIXTURE_BONUS_UP_DIALOG", &[]) {
                 view.set_text(&bindings.title, title);
             }
-            let before = wording(layouts, "FORMAT_ADD_PARAM", &[before.clone()])
+            let before = wording(layouts, "FORMAT_ADD_PARAM", std::slice::from_ref(before))
                 .unwrap_or_else(|| before.clone());
-            let after = wording(layouts, "FORMAT_ADD_PARAM", &[after.clone()])
+            let after = wording(layouts, "FORMAT_ADD_PARAM", std::slice::from_ref(after))
                 .unwrap_or_else(|| after.clone());
             view.set_text(&bindings.before, before);
             view.set_text(&bindings.after, after);
@@ -854,7 +854,7 @@ fn draw(layouts: &UiLayouts, view: &mut UiPrefabView, bindings: &Bindings, follo
             view.set_visible(&bindings.changes, *diff);
         }
         FollowUp::NewSite { site_name, .. } => {
-            if let Some(text) = wording(layouts, "MSG_MYSEKAI_OPEN_SITE_MESSAGE", &[site_name.clone()]) {
+            if let Some(text) = wording(layouts, "MSG_MYSEKAI_OPEN_SITE_MESSAGE", std::slice::from_ref(site_name)) {
                 view.set_text(&bindings.description, text);
             }
         }

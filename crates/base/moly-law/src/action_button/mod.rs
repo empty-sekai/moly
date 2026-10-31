@@ -454,7 +454,7 @@ impl ButtonStack {
     }
 
     pub fn push(&mut self, button: ButtonType, target: TargetId, is_priority: bool) {
-        if self.entries.iter().any(|e| *e == (button, target)) {
+        if self.entries.contains(&(button, target)) {
             return;
         }
         if is_priority {
@@ -508,6 +508,6 @@ impl ButtonStack {
     }
 
     pub fn contains(&self, button: ButtonType, target: TargetId) -> bool {
-        self.entries.iter().any(|e| *e == (button, target))
+        self.entries.contains(&(button, target))
     }
 }

@@ -1,21 +1,29 @@
-// 引擎原生后处理：引擎泛光（预滤波、横向 9 点、纵向 5 点、散射上采样）与
-// 引擎 uber（场景色 + 泛光顶层，乘曝光、钳到 0..1、查 LDR 表）。片元式逐条
-// 转写自随包发布的引擎泛光与引擎 uber 程序（gamma 色彩空间构建），常数照抄
-// 程序里的字面量。
+// Engine post-processing: engine bloom (prefilter, horizontal 9-tap, vertical
+// 5-tap, scatter upsample) and the engine uber pass (scene colour plus the top
+// bloom level, multiplied by exposure, clamped to 0..1, LDR LUT lookup). The
+// fragment formulas follow the engine's shipped bloom and uber programs (built
+// in gamma colour space), and the constants are the program's literals.
 //
-// # 色彩域
+// # Colour domain
 //
-// 真源的相机目标是 UNorm、存编码值：泛光预滤波**直接在编码值上**取阈值
-// （程序里没有解码），金字塔存工作值的平方根、各级读出来先平方；引擎 uber
-// 先把场景色解码进线性域、加泛光、查表，再编码写回。本管线的场景缓冲是
-// sRGB 纹理：采样即解码、写入即编码，所以 uber 里不手写这两步；预滤波要的
-// 是编码值，就逐纹素读出再编码回去，并在编码值上自己做双线性（真源硬件
-// 是在 UNorm 编码值上插值的）。uber 写回用的是硬件编码：程序的线性段斜率
-// 是 12.9232101 而不是 12.92，两者在 8 位存储上的差不到半个量化级。
+// The camera target is a UNorm target holding encoded values: the bloom prefilter
+// applies its threshold **directly to the encoded values** (the program does not
+// decode), the pyramid stores the square root of its working values and squares
+// them on each read; the engine uber first decodes the scene colour to linear,
+// adds the bloom, looks up the LUT, then encodes and writes back. This pipeline's
+// scene buffer is an sRGB texture: sampling is decoding and writing is encoding,
+// so the uber does not hand-write those two steps; the prefilter needs encoded
+// values, so it reads them texel by texel and encodes them back, and does its own
+// bilinear interpolation on the encoded values (the hardware interpolates on UNorm
+// encoded values). The uber writes back with hardware encoding: the program's
+// linear-segment slope is 12.9232101 rather than 12.92, and the two differ by less
+// than half a quantisation step in 8-bit storage.
 //
-// 纹理原点：本管线全屏三角形的 uv 原点在左上、真源在左下。这里每一步要么
-// 只做采样、要么核关于纵轴对称（纵向 5 点），所以不需要翻转；查找表的行
-// 顺序与真源同为「第 0 行 = v 0」，上传不翻行、取表坐标照抄。
+// Texture origin: this pipeline's fullscreen triangle has its uv origin at the
+// top-left and the product at the bottom-left. Every step here either only samples
+// or is symmetric about the vertical axis (the vertical 5-tap), so no flip is
+// needed; the LUT's row order is "row 0 = v 0" in both, the upload does not flip
+// rows, and the LUT coordinates are used as-is.
 
 import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
 

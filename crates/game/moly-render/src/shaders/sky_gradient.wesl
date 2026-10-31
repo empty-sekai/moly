@@ -1,14 +1,14 @@
-// 天空渐变着色：逐式镜像 moly-law::weather::sky 的律（唯一真源在那边）。
+// 天空渐变着色：逐式镜像 moly-law::weather::sky 的律（唯一权威实现在那边）。
 // 网格法线朝内、三角绕序与法线一致，背面剔除下从内部看到的是正面；
 // 网格不受光照：天空的颜色只来自渐变条与附加色。
 //
 // 域（这条链每一步的域，改这个文件之前先读）：
 //   1 渐变条按非 sRGB 装载 ⇒ 硬件不解码 ⇒ 采样值就是存储（编码）域；
-//   2 交叉淡化与附加项相加都在编码域里做——源天空着色程序全文没有一个
+//   2 交叉淡化与附加项相加都在编码域里做——游戏天空着色程序全文没有一个
 //     幂运算，它是 gamma 色彩空间构建，编码值直写帧缓冲；
 //   3 本仓的色彩目标是 sRGB 格式，写出时硬件按 sRGB OETF 再编码一次
 //     ⇒ 交给它的必须是解过一次的值，否则整片天空恒亮一档。
-// ⇒ 这一路上唯一走 gamma↔linear 往返的是附加色，而它在真源里整段在
+// ⇒ 这一路上唯一走 gamma↔linear 往返的是附加色，而它在游戏里整段在
 //   CPU 侧、在渐变条被采样之前就算完了（见 additive_property）。
 
 import bevy_pbr::render::forward_io::VertexOutput;
@@ -32,7 +32,7 @@ fn gamma_to_linear(x: vec3<f32>) -> vec3<f32> {
     return select(upper, x / 12.92, x <= vec3<f32>(0.04045));
 }
 
-// 引擎的 Mathf.LinearToGammaSpace：sRGB 分段编码，四支。指数照抄源里的
+// 引擎的 Mathf.LinearToGammaSpace：sRGB 分段编码，四支。指数照写游戏里的
 // 截断字面量（0.4166667 / 0.45454545），不写 1/2.4 与 1/2.2。
 fn linear_to_gamma(x: vec3<f32>) -> vec3<f32> {
     let base = max(x, vec3<f32>(0.0));
@@ -43,19 +43,19 @@ fn linear_to_gamma(x: vec3<f32>) -> vec3<f32> {
     return select(positive, vec3<f32>(0.0), x <= vec3<f32>(0.0));
 }
 
-// 天空材质属性块里 _AdditiveColor 的本帧取值：真源在 CPU 侧每帧算一次，
+// 天空材质属性块里 _AdditiveColor 的本帧取值：游戏在 CPU 侧每帧算一次，
 // 逐通道 LinearToGammaSpace(强度 × GammaToLinearSpace(底值))。⚠ 只有 r/g/b
-// 三通道参与——真源那个 uniform 声明成三分量，底色的 alpha 从头到尾没被
+// 三通道参与——游戏那个 uniform 声明成三分量，底色的 alpha 从头到尾没被
 // 读，写进属性块的颜色 alpha 是字面量 0。所以这里不碰 additive_color.a。
 //
-// 这一步在源里是每帧一次的 CPU 计算，这里逐片元重算：全部输入都是 uniform，
+// 这一步在游戏里是每帧一次的 CPU 计算，这里逐片元重算：全部输入都是 uniform，
 // 取值同一个。放在这里而不是喂入侧，是为了让这个着色器与律一一对上。
 fn additive_property(color: vec3<f32>, intensity: f32) -> vec3<f32> {
     return linear_to_gamma(gamma_to_linear(color) * intensity);
 }
 
 // 交给 sRGB 色彩目标的值：按格式的 EOTF 解一次，硬件写出时那一次编码恰好
-// 还原。⚠ 这一步不是真源的式子，是域适配——源是 gamma 色彩空间构建、
+// 还原。⚠ 这一步不是游戏的式子，是域适配——游戏是 gamma 色彩空间构建、
 // 编码值直写帧缓冲，没有硬件编码那一步。UNORM 目标存不下 0..1 之外的值，
 // 先钳与硬件后钳等价，顺带让幂底数为正。
 fn srgb_target_value(encoded: vec3<f32>) -> vec3<f32> {

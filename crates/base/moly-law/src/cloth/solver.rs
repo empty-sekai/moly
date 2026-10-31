@@ -1,61 +1,74 @@
-//! 单链解算器：90Hz 定步长累加器 → 世界运动惯性 → 子步
-//! {Verlet 积分 → 约束迭代（碰撞→根距钳→结构距离→限角）→
-//! 固定点回钉} → 回拉 → NaN 守卫。dt 显式入参，状态由调用方
-//! 跨帧携带（与 [`crate::path`] 同款）。
+//! Single-chain solver: 90Hz fixed-step accumulator → world motion inertia → substeps
+//! {Verlet integration → constraint iterations (collision→root distance clamp→structural distance→angle limit) →
+//! fixed-point repin} → restore → NaN guard. dt is an explicit parameter and state is carried
+//! across frames by the caller (the same paradigm as [`crate::path`]).
 //!
-//! 式子来源对照（伪 C 反编译 → 本文件）：
-//! * 子步数：`CalcMaxUpdateCount`（UpdateTimeManager 90Hz 档；
-//!   demo SIM_HZ=90、子步上限 6、帧 dt 钳 [0,0.1]）；
-//! * Verlet：`ForceAndVelocityJob`——阻尼 `(1-drag)^updatePower`
-//!   （整子步 updatePower=1）、速度上限 `maxVelocity·dt`、
-//!   重力/外力 `·dt²`；
-//! * 根距钳制：`ClampDistanceJob`——目标 `clamp(d, minR·L, maxR·L)`、
-//!   `L = len·scaleRatio`，修正按 `clamp01(1-velInfl·0.5)` 逐迭代
-//!   逼近（velInfl = clampDistanceVelocityInfluence，sd 数据 0.2）；
-//! * 结构距离：`RestoreDistanceJob`——刚度=逐源粒子深度求值，
-//!   分摊比 `(mass_j+5·infl_j)/(5·infl_i+mass_i+mass_j+5·infl_j)`，
-//!   逐源粒子求和后除以条目数均摊；
-//! * 限角：`CompositeRotationJob`（clamp 半）——与动画方向夹角超
-//!   `GetClampRotationAngle(algorithm)·π/180` 时钳到限、长度保持；
-//! * 碰撞：`CollisionJob` 的三种 Detection（见 collider.rs）；
-//! * 固定点：`FixPositionJob` 在迭代环后回钉。
+//! Formula reference (game behavior → this file, 1:1):
+//! * substep count: `CalcMaxUpdateCount` — substeps run at 90 Hz
+//!   (SIM_HZ=90), at most 6 per frame, frame dt clamped to [0,0.1];
+//! * Verlet: `ForceAndVelocityJob` — damping `(1-drag)^updatePower`
+//!   (a whole substep uses updatePower=1), velocity cap
+//!   `maxVelocity·dt`, gravity/external force `·dt²`;
+//! * root distance clamp: `ClampDistanceJob` — target
+//!   `clamp(d, minR·L, maxR·L)`, `L = len·scaleRatio`, the correction
+//!   approaches it per iteration by `clamp01(1-velInfl·0.5)`
+//!   (velInfl = clampDistanceVelocityInfluence, sd data 0.2);
+//! * structural distance: `RestoreDistanceJob` — stiffness = evaluated
+//!   at each source particle's depth, sharing ratio
+//!   `(mass_j+5·infl_j)/(5·infl_i+mass_i+mass_j+5·infl_j)`,
+//!   summed per source particle then divided by the entry count;
+//! * angle limit: `CompositeRotationJob` (clamp half) — when the angle
+//!   to the animation direction exceeds
+//!   `GetClampRotationAngle(algorithm)·π/180`, clamps to the limit,
+//!   length preserved;
+//! * collision: the three Detection kinds of `CollisionJob` (see
+//!   collider.rs);
+//! * fixed positions: `FixPositionJob` repins after the iteration loop.
 //!
-//! # 已知形差（诚实挂账，见 mod.rs 表与 REPORT）
+//! # Known differences (see the module documentation)
 //!
-//! * 回拉（restoreRotation）：demo 形 = 每子步一次、向动画方向
-//!   按 `power` slerp；反编译的 CompositeRotation（restore 半）
-//!   注册在迭代环内、内部式（四元数链传播 + `pow(p/90,0.5)` 系
-//!   权重）只部分可读——本律采 demo 形并在迭代环外执行一次，
-//!   两读法的差异在 REPORT 具名。
-//! * 约束修正的速度吸收：Magica 用独立速度缓冲按 `(1-velInfl)`
-//!   记账；本律 pos/prev 形下修正全额进速度（PBD 惯例）。稳态
-//!   等价、瞬态有差。
-//! * 约束读位：反编译同迭代内并行读位置（job 系统序不保证）；
-//!   本律顺序投影（Gauss-Seidel）。
-//! * 显式 mode-0 重置沿用本律的 pos/prev 表示：当帧动画位播种，
-//!   按帧恢复 velocityWeight，分别权重积分前惯性与约束/回拉后的
-//!   保存速度。没有补造原生独立速度/旋转/oldBase/oldSlow 缓冲，
-//!   也没有改变现有的限速位置、摩擦缺口与约束速度全吸收语义。
+//! * restore (restoreRotation): this module runs it once per substep as
+//!   a slerp toward the animation direction by `power`; in the game the
+//!   CompositeRotation (restore half) is registered inside the
+//!   iteration loop with its own formula (quaternion chain propagation +
+//!   `pow(p/90,0.5)` weighting), which is not modelled — this module runs
+//!   the restore once outside the iteration loop.
+//! * velocity absorption of constraint corrections: Magica keeps
+//!   bookkeeping in a separate velocity buffer scaled by `(1-velInfl)`;
+//!   in this module's pos/prev form the full correction enters velocity
+//!   (the PBD convention). Equal in steady state, different in
+//!   transients.
+//! * constraint reads: the game reads positions in parallel within an
+//!   iteration (job system order is not guaranteed); this module
+//!   projects sequentially (Gauss-Seidel).
+//! * the explicit mode-0 reset reuses this module's pos/prev
+//!   representation: seeded with the frame's animated positions,
+//!   restoring velocityWeight per frame, separately weighting the
+//!   pre-integration inertia and the velocity saved after
+//!   constraints/restore. No separate velocity/rotation/oldBase/oldSlow
+//!   buffers are constructed, and the existing semantics of the speed
+//!   limit, the friction gap and full constraint velocity absorption
+//!   are unchanged.
 
 use super::collider::WorldCollider;
 use super::math;
 use super::schema::{ChainDef, ClothParamsDef, Selection};
 
-/// 90Hz 定步长（UpdateTimeManager 的 90 档；demo 同值）。
+/// 90Hz fixed step (the 90 tier of UpdateTimeManager).
 pub const SIM_HZ: f32 = 90.0;
-/// 一次子步的物理 dt。
+/// Physics dt of one substep.
 pub const SIM_DT: f32 = 1.0 / SIM_HZ;
-/// 每帧子步上限（demo `cloth.js` 同值；超出的时间留在累加器里）。
+/// Maximum substeps per frame; time beyond that stays in the accumulator.
 pub const MAX_SUBSTEPS: u32 = 6;
-/// 约束迭代次数（demo `iterations=4`；反编译 SolverIterationCount
-/// 是 manager 配置值，demo 取 4 为用户验收形）。
+/// 4 constraint iterations per substep (`SolverIterationCount` is a
+/// manager setting; 4 is used here).
 pub const CONSTRAINT_ITERATIONS: u32 = 4;
-/// 帧 dt 上限（demo：钳 [0, 0.1]）。
+/// Frame dt limit (clamped to [0, 0.1]).
 pub const MAX_FRAME_DT: f32 = 0.1;
 
-/// `useResetTeleport=false` 链的兜底复位位移（米）。**我方选择**：
-/// 反编译只读得出数据阈值臂，demo 以 1.0m 兜底挡超大跳变，本律
-/// 沿用并具名。
+/// Fallback reset distance (metres) for chains with `useResetTeleport=false`.
+/// This is a choice of this implementation: a jump larger than 1.0 m resets
+/// the chain.
 pub const FALLBACK_TELEPORT_DISTANCE: f32 = 1.0;
 
 /// 拓扑与约束表（[`build_chain`] 一次建好，跨帧复用）。
@@ -82,7 +95,8 @@ pub struct ChainTopology {
     pub struct_edges: Vec<(u32, u32, f32)>,
     /// 每条结构边的刚度（按源粒子深度求值，clamp01）。
     pub struct_stiffness: Vec<f32>,
-    /// 每源粒子的结构条目数（反编译 `/count` 均摊用）。
+    /// Number of structural entries per source particle (used for the
+    /// `/count` averaging).
     pub struct_entry_count: Vec<u32>,
     /// 根距钳制对 `(v, r, len)`。
     pub root_pairs: Vec<(u32, u32, f32)>,
@@ -134,9 +148,9 @@ pub struct EvaluatedParams {
 }
 
 impl EvaluatedParams {
-    /// 从 rig 参数定义 + 每粒子深度求值。曲线分派按
-    /// `GetClampRotationAngle` / `GetRestoreRotationPower` 反编译：
-    /// `algorithm==1` 取 `-2` 槽，否则取主槽。
+    /// Curve dispatch follows `GetClampRotationAngle` /
+    /// `GetRestoreRotationPower`: `algorithm==1` takes the `-2` slot,
+    /// anything else takes the main slot.
     pub fn evaluate(def: &ClothParamsDef, depth: &[f32]) -> Self {
         let deg2rad = core::f32::consts::PI / 180.0;
         let count = depth.len();
@@ -754,7 +768,8 @@ fn project_struct_distance(
         return;
     }
     let n = topo.n;
-    // 反编译形：逐源粒子累加修正，除以该粒子的条目数均摊。
+    // Accumulates corrections per source particle, then divides by that
+    // particle's entry count.
     scratch.struct_acc.resize(n, [0.0; 3]);
     scratch.struct_counts.resize(n, 0);
     scratch.struct_acc.fill([0.0; 3]);
@@ -1517,8 +1532,9 @@ mod tests {
         assert!(advance(&mut st, &topo, &ev, &input, DT).is_err());
     }
 
-    /// `algorithm` 曲线分派：=1 取 `-2` 槽（GetClampRotationAngle /
-    /// GetRestoreRotationPower 反编译），≠1 取主槽。
+    /// `algorithm` curve dispatch: =1 takes the `-2` slot
+    /// (`GetClampRotationAngle` / `GetRestoreRotationPower`), any other
+    /// value takes the main slot.
     #[test]
     fn algorithm_slot_dispatch() {
         let (def, mut p) = minimal_chain();

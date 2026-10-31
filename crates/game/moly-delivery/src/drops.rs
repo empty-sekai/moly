@@ -830,7 +830,7 @@ pub fn gather_loop(
     mut link: ResMut<ServerLink>,
     mut gather: ResMut<DeliveryGatherLoop>,
     mut model: ResMut<DeliveryModel>,
-    mut client: ResMut<ClientBirthdayPartyData>,
+    client: ResMut<ClientBirthdayPartyData>,
     mut runs: ResMut<RewardRuns>,
     mut progress: MessageWriter<DeliveryProgress>,
 ) {
