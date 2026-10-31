@@ -22,6 +22,7 @@ members = [
     "crates/game/moly-photo",
     "crates/game/moly-fixture-edit",
     "crates/game/moly-delivery",
+    "crates/game/moly-harvest",
     "crates/game/moly-devtools",
     "crates/game/moly-masters",
     "crates/game/moly-game",

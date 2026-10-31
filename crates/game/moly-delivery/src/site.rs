@@ -568,9 +568,9 @@ pub fn arrive(
     configs: Option<Res<moly_features::client_config::ClientConfigs>>,
     mut spawns: ResMut<super::drops::DeliveryDropSpawns>,
     mut gather_loop: ResMut<super::drops::DeliveryGatherLoop>,
-    catalog: Option<Res<moly_features::harvest::catalog::HarvestCatalog>>,
-    mut glbs: ResMut<moly_features::harvest::HarvestGltfs>,
-    mut docs: ResMut<moly_features::harvest::HarvestDocs>,
+    catalog: Option<Res<moly_harvest::catalog::HarvestCatalog>>,
+    mut glbs: ResMut<moly_harvest::HarvestGltfs>,
+    mut docs: ResMut<moly_harvest::HarvestDocs>,
     server: Res<AssetServer>,
     frames: Res<bevy::diagnostic::FrameCount>,
 ) {

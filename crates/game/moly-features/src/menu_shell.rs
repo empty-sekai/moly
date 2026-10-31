@@ -1692,22 +1692,22 @@ pub fn camera_reset_disable(
 /// One `GraphicButtonTapEffect` a button's view interaction drives: its
 /// component id, the Graphic components it fades (`_effectGraphic`, and
 /// `_effectGraphicIcon` when set) and its serialized colour fields.
-pub(crate) struct GraphicTapEffect {
-    pub(crate) id: i64,
-    pub(crate) graphics: Vec<i64>,
-    pub(crate) config: tap_rule::TapEffectConfig,
+pub struct GraphicTapEffect {
+    pub id: i64,
+    pub graphics: Vec<i64>,
+    pub config: tap_rule::TapEffectConfig,
 }
 
-/// The camera reset button's view interaction: the CustomButton's
-/// `buttonViewInteraction`, as the `GraphicButtonTapEffect`s it drives, in
-/// call order. Empty when the button has no view interaction (the press and
-/// release then play nothing). A `MultiButtonTapEffect` forwards each call to
-/// the entries of its `_tapEffectList` in order (nothing when the list is
-/// empty), so its entries are expanded in place. A class that is not ported
-/// (`CoverButtonTapEffect`, `HarvestButtonInteraction`; none is the camera
-/// reset button's on any root) is reported and drives nothing; a missing
-/// field is refused.
-pub(crate) fn tap_effect(doc: &UiPrefab, button: i64) -> Vec<GraphicTapEffect> {
+/// A button's view interaction (the camera reset button, the bulk harvest
+/// button): the CustomButton's `buttonViewInteraction`, as the
+/// `GraphicButtonTapEffect`s it drives, in call order. Empty when the button
+/// has no view interaction (the press and release then play nothing). A
+/// `MultiButtonTapEffect` forwards each call to the entries of its
+/// `_tapEffectList` in order (nothing when the list is empty), so its entries
+/// are expanded in place. A class that is not supported
+/// (`CoverButtonTapEffect`, `HarvestButtonInteraction`) is reported and
+/// drives nothing; a missing field is refused.
+pub fn tap_effect(doc: &UiPrefab, button: i64) -> Vec<GraphicTapEffect> {
     let components = || doc.nodes.iter().flat_map(|node| node.components.iter());
     let component = |id: i64| components().find(|c| c.path_id == id)
         .unwrap_or_else(|| panic!("{}: component {id} is not in the layout", doc.prefab));

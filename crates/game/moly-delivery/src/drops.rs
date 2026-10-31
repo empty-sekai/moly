@@ -86,7 +86,7 @@ use super::honor::{RewardOwner, RewardRuns};
 use super::site::{DeliveryObjects, DeliverySite};
 use super::{publish, DeliveryActionState, DeliveryModel, DeliveryProgress, DropModel};
 use moly_features::audio::{SeClass, SeRequest, SeRequests};
-use moly_features::harvest::{HarvestDocs, HarvestGltfs, Rng};
+use moly_harvest::{HarvestDocs, HarvestGltfs, Rng};
 use moly_features::player::PlayerControlled;
 use moly_features::userdata::client::birthday_party::ClientBirthdayPartyData;
 use moly_protocol::api::GatherContent;
@@ -162,7 +162,7 @@ impl DeliveryDropSpawns {
 /// Request a drop package's model and document (the harvest caches).
 pub fn request(
     server: &AssetServer,
-    catalog: &moly_features::harvest::catalog::HarvestCatalog,
+    catalog: &moly_harvest::catalog::HarvestCatalog,
     package: &str,
     glbs: &mut HarvestGltfs,
     docs: &mut HarvestDocs,
@@ -302,8 +302,8 @@ fn height_at(
     x: f32,
     z: f32,
 ) -> f32 {
-    face.and_then(|face| moly_features::harvest::walk_surface_y(face, objective, epoch, x, z))
-        .unwrap_or_else(|| moly_features::harvest::surface_y(verts, x, z, 0.0))
+    face.and_then(|face| moly_harvest::walk_surface_y(face, objective, epoch, x, z))
+        .unwrap_or_else(|| moly_harvest::surface_y(verts, x, z, 0.0))
 }
 
 /// `PlayDropItemSE(rarity)`.
@@ -328,7 +328,7 @@ pub fn spawn(
     json: Res<Assets<moly_assets::json::JsonAsset>>,
     glbs: Res<HarvestGltfs>,
     docs: Res<HarvestDocs>,
-    catalog: Option<Res<moly_features::harvest::catalog::HarvestCatalog>>,
+    catalog: Option<Res<moly_harvest::catalog::HarvestCatalog>>,
     site: Res<DeliverySite>,
     mut spawns: ResMut<DeliveryDropSpawns>,
     mut se: ResMut<SeRequests>,
@@ -349,7 +349,7 @@ pub fn spawn(
         let Some(ground) = ground.as_deref() else {
             return;
         };
-        spawns.ground = Some(moly_features::harvest::ground_world_verts(ground, &meshes, &parts));
+        spawns.ground = Some(moly_harvest::ground_world_verts(ground, &meshes, &parts));
     }
     while let Some(item) = spawns.pending.first() {
         let Some(material) = catalog.materials.get(&item.model.material_id) else {
@@ -379,12 +379,12 @@ pub fn spawn(
         let view_radius = view["radius"].as_f64().unwrap_or_else(|| {
             panic!("drop document {leaf}: MysekaiAreaDropItemView has no radius")
         }) as f32;
-        let scene_index = moly_features::harvest::prefab_scene_index(&doc.0, &leaf);
+        let scene_index = moly_harvest::prefab_scene_index(&doc.0, &leaf);
         let scene = gltf.scenes.get(scene_index).cloned().unwrap_or_else(|| {
             panic!("drop model {leaf}: prefab scene {scene_index} out of range")
         });
         let verts = spawns.ground.as_deref().unwrap_or(&[]);
-        let (snapped, tries) = moly_features::harvest::snap_from(&face, objects.arrive.xz(), item.raw);
+        let (snapped, tries) = moly_harvest::snap_from(&face, objects.arrive.xz(), item.raw);
         let y = height_at(
             Some(&*face),
             objective.as_deref(),
@@ -457,7 +457,7 @@ pub fn spawn(
             let d2 = (1.0 - distance).clamp(0.3, 1.0);
             commands
                 .entity(entity)
-                .insert(moly_features::harvest::HarvestDropAnimation::hop(
+                .insert(moly_harvest::HarvestDropAnimation::hop(
                     start, landing, d1, d2, item.r, true,
                 ));
             info!(
@@ -618,7 +618,7 @@ pub fn advance(
             Entity,
             &mut Transform,
             &mut DeliveryDropItem,
-            Has<moly_features::harvest::HarvestDropAnimation>,
+            Has<moly_harvest::HarvestDropAnimation>,
         ),
         Without<PlayerControlled>,
     >,
@@ -710,7 +710,7 @@ pub fn advance(
                     continue;
                 }
                 let acceleration = acceleration + dt;
-                transform.translation = moly_features::harvest::move_towards(
+                transform.translation = moly_harvest::move_towards(
                     transform.translation,
                     player,
                     step + acceleration,
@@ -728,7 +728,7 @@ pub fn advance(
 /// site).
 pub fn gather(
     mut model: ResMut<DeliveryModel>,
-    catalog: Option<Res<moly_features::harvest::catalog::HarvestCatalog>>,
+    catalog: Option<Res<moly_harvest::catalog::HarvestCatalog>>,
     mut warned: Local<bool>,
     mut drops: Query<&mut DeliveryDropItem>,
 ) {
@@ -762,7 +762,7 @@ pub fn gather(
 /// `mysekai_material`, quantity 1): `CanCollectMaterial`'s
 /// `IsMaterialReceivableOverPossessionLimit` arm.
 fn can_collect_resource(
-    catalog: Option<&moly_features::harvest::catalog::HarvestCatalog>,
+    catalog: Option<&moly_harvest::catalog::HarvestCatalog>,
     drop: &DropModel,
     warned: &mut bool,
 ) -> bool {

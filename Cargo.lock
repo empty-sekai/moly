@@ -5405,6 +5405,7 @@ dependencies = [
  "bevy",
  "moly-assets",
  "moly-features",
+ "moly-harvest",
  "moly-law",
  "moly-link",
  "moly-masters",
@@ -5433,6 +5434,7 @@ dependencies = [
  "moly-delivery",
  "moly-features",
  "moly-fixture-edit",
+ "moly-harvest",
  "moly-law",
  "moly-layout",
  "moly-link",
@@ -5540,6 +5542,7 @@ dependencies = [
  "moly-devtools",
  "moly-features",
  "moly-fixture-edit",
+ "moly-harvest",
  "moly-law",
  "moly-layout",
  "moly-link",
@@ -5567,6 +5570,21 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "moly-harvest"
+version = "0.0.5"
+dependencies = [
+ "bevy",
+ "moly-assets",
+ "moly-core",
+ "moly-features",
+ "moly-law",
+ "moly-link",
+ "moly-masters",
+ "moly-protocol",
+ "serde_json",
 ]
 
 [[package]]

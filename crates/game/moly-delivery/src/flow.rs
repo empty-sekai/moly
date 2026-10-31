@@ -325,7 +325,7 @@ pub struct FlowWorld<'w, 's> {
     face: ResMut<'w, DeliveryFace>,
     link: ResMut<'w, ServerLink>,
     client: ResMut<'w, moly_features::userdata::client::birthday_party::ClientBirthdayPartyData>,
-    catalog: Option<Res<'w, moly_features::harvest::catalog::HarvestCatalog>>,
+    catalog: Option<Res<'w, moly_harvest::catalog::HarvestCatalog>>,
     navigation: Option<Res<'w, moly_features::player_fixture_action::PlayerFixtureNavigation>>,
     game_state: Option<Res<'w, DeliveryGameState>>,
     joystick_resets: MessageWriter<'w, moly_features::joystick::ForceResetJoystick>,
@@ -962,14 +962,14 @@ fn step_auto_move(
         .or(approach.corners.last())
         .copied()
         .unwrap_or(position);
-    match moly_features::harvest::law::auto_move_step(
+    match moly_harvest::law::auto_move_step(
         position,
         steering,
         approach.target,
         approach.speed,
         law::APPROACH_THRESHOLD,
     ) {
-        moly_features::harvest::law::AutoMoveStep::Arrived => {
+        moly_harvest::law::AutoMoveStep::Arrived => {
             world.states.can_intercept = true;
             world.states.change_status(PlayerActionState::Idle);
             approach.left = true;
@@ -983,7 +983,7 @@ fn step_auto_move(
                 world.states.current
             );
         }
-        moly_features::harvest::law::AutoMoveStep::Move(velocity) => {
+        moly_harvest::law::AutoMoveStep::Move(velocity) => {
             if dt <= 0.0 {
                 return;
             }

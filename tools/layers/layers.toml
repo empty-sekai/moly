@@ -25,7 +25,7 @@ order = [
     "game-media",# moly-render, moly-audio, moly-ui, moly-masters
     "world",     # moly-world
     "hub",       # moly-features
-    "domain",    # gameplay domain crates: moly-convert, moly-mission, moly-photo, moly-fixture-edit, moly-delivery
+    "domain",    # gameplay domain crates: moly-convert, moly-mission, moly-photo, moly-fixture-edit, moly-delivery, moly-harvest
     "tools",     # moly-devtools
     "assembly",  # moly-game
     "app",       # moly-app, moly-stage, moly-android, moly-launcher, moly-server-host
@@ -58,7 +58,7 @@ crates = ["moly-world"]
 crates = ["moly-features"]
 
 [layers.domain]
-crates = ["moly-convert", "moly-mission", "moly-photo", "moly-fixture-edit", "moly-delivery"]
+crates = ["moly-convert", "moly-mission", "moly-photo", "moly-fixture-edit", "moly-delivery", "moly-harvest"]
 
 [layers.tools]
 crates = ["moly-devtools"]
@@ -99,6 +99,7 @@ crates = ["moly-app", "moly-stage", "moly-android", "moly-launcher", "moly-serve
 "crates/game/moly-photo/Cargo.toml" = "domain"
 "crates/game/moly-fixture-edit/Cargo.toml" = "domain"
 "crates/game/moly-delivery/Cargo.toml" = "domain"
+"crates/game/moly-harvest/Cargo.toml" = "domain"
 "crates/game/moly-devtools/Cargo.toml" = "tools"
 "crates/game/moly-game/Cargo.toml" = "assembly"
 
@@ -152,4 +153,4 @@ dev_edges = [
 
 [domain_exceptions]
 # Domain crates allowed to depend on each other (["a -> b"]).
-allowed = []
+allowed = ["moly-delivery -> moly-harvest"]

@@ -48,7 +48,7 @@
     "clippy::collapsible_if": 1,
     "clippy::collapsible_match": 3,
     "clippy::derivable_impls": 2,
-    "clippy::doc_lazy_continuation": 10,
+    "clippy::doc_lazy_continuation": 8,
     "clippy::drop_non_drop": 2,
     "clippy::empty_line_after_doc_comments": 3,
     "clippy::excessive_precision": 3,
@@ -62,22 +62,19 @@
     "clippy::needless_borrow": 12,
     "clippy::needless_lifetimes": 6,
     "clippy::needless_return": 2,
-    "clippy::neg_cmp_op_on_partial_ord": 4,
+    "clippy::neg_cmp_op_on_partial_ord": 1,
     "clippy::option_map_or_none": 1,
     "clippy::question_mark": 2,
     "clippy::single_element_loop": 1,
     "clippy::single_match": 1,
     "clippy::unnecessary_fold": 2,
-    "clippy::unnecessary_lazy_evaluations": 2,
     "clippy::unnecessary_literal_unwrap": 1,
     "clippy::unnecessary_sort_by": 2,
     "clippy::unnecessary_to_owned": 1,
-    "clippy::unnecessary_unwrap": 1,
     "clippy::useless_conversion": 2,
     "dead_code": 15,
     "deprecated": 20,
     "private_interfaces": 6,
-    "unreachable_patterns": 1,
     "unused_imports": 6,
     "unused_mut": 5,
     "unused_variables": 2
@@ -95,6 +92,13 @@
   },
   "moly-game": {
     "unused_imports": 5
+  },
+  "moly-harvest": {
+    "clippy::doc_lazy_continuation": 2,
+    "clippy::neg_cmp_op_on_partial_ord": 3,
+    "clippy::unnecessary_lazy_evaluations": 2,
+    "clippy::unnecessary_unwrap": 1,
+    "unreachable_patterns": 1
   },
   "moly-launcher": {
     "clippy::redundant_closure": 1

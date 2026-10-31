@@ -1,4 +1,4 @@
-//! The game's features and screens built on the field: harvest, crafting, delivery, the layout editor, site moves, menus and settings.
+//! The hub of the game's features: the field flow, site moves, the menu shell, crafting, menus and settings, and the shared types and registries the gameplay domain crates install into.
 
 #[macro_use]
 extern crate moly_core;
@@ -174,8 +174,6 @@ pub mod game_state;
 pub mod gate_flow;
 pub mod get_resource;
 pub mod learn_phenomena_dialog;
-pub mod harvest;
-pub mod harvest_material;
 pub mod home_action;
 pub mod info;
 pub mod inventory;
