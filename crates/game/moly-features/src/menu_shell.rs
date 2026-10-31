@@ -323,7 +323,12 @@ impl MissionPanel {
     ) -> Option<Self> {
         // The field menu content serializes the field (a null reference puts
         // no panel on the host).
-        let root = refs.get("_sekaiMissionHomePanel")?.clone();
+        let mut root = refs.get("_sekaiMissionHomePanel")?.clone();
+        // A serialized reference names the panel by identity; its children are
+        // found below its path.
+        if root.starts_with('@') {
+            root = doc.nodes[doc.find(&root).ok()?].path.clone();
+        }
         let content = format!("{root}/Content");
         let gauge = format!("{content}/UIPartsGauge");
         // `UIPartsGauge.fillImage`.

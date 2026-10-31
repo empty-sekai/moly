@@ -139,8 +139,9 @@ const LAYOUT_ELEMENT: &str = "UnityEngine.UI.LayoutElement";
 const SCROLL_RECT_CLASS: &str = "Sekai.UI.CustomScrollRect";
 const TEXT_CLASS: &str = "Sekai.UI.CustomTextMesh";
 const LIST_VIEW_CLASS: &str = "Sekai.UI.ListView";
-/// `MysekaiMissionRewardCell`'s document, below the root's directory.
-const CELL_PATH: &str = "missioncell/MysekaiMissionRewardCell.json";
+/// The directory of the mission dialogs' cell documents, below the root's
+/// directory (`missioncell/<cell>.json`).
+pub(crate) const CELL_DIR: &str = "missioncell/";
 /// `MasterResourceBox.resourceBoxPurpose` of a mission's box rewards
 /// (`MasterDataManager.GetMasterResourceBox` in
 /// `ConvertRewardDataToDetailData`).
@@ -154,7 +155,6 @@ const BOX_EXPAND: &str = "expand";
 /// The brief name of the list's copies of the cell document (`Mysekai0`,
 /// `Mysekai1`, ...).
 const ROW_NAME: &str = "Mysekai";
-
 
 /// The dialog's nodes, on the dialog's entity.
 #[derive(Debug, Clone, Component)]
@@ -243,7 +243,9 @@ impl Bindings {
         // `listViewItemPrefab` names the cell prefab in the list's asset
         // bundle; that prefab is the document [`load_cell`] requests.
         if !names_cell(&fields["listViewItemPrefab"]) {
-            return Err(format!("{list}'s listViewItemPrefab is null, so it names no {REWARD_CELL}"));
+            return Err(format!(
+                "{list}'s listViewItemPrefab is null, so it names no {REWARD_CELL}"
+            ));
         }
         let mut list_padding = [0.0; 4];
         for (slot, part) in list_padding
@@ -462,32 +464,52 @@ fn with_height(template: &UiPrefab, height: f32) -> Result<UiPrefab, String> {
     Ok(doc)
 }
 
-/// The reward cell document and the manifest that admits it. The handles are
-/// kept here: a handle dropped at the end of a frame cancels its load.
+/// A cell document of the mission dialogs and the manifest that admits it,
+/// both read from the root the runtime draws from. The handles are kept here:
+/// a handle dropped at the end of a frame cancels its load, and each cell
+/// dialog reads its cell from its own source. A source serves one cell at a
+/// time: reading another cell's document starts that one.
 #[derive(Resource, Default)]
-pub struct RewardCellSource {
-    cell: Option<Handle<JsonAsset>>,
+pub struct CellSource {
+    /// The cell's serialized file, below [`CELL_DIR`].
+    cell: Option<(String, Handle<JsonAsset>)>,
     manifest: Option<Handle<JsonAsset>>,
 }
 
-/// The cell prefab of the dialog's list, which the top-level loader does not
-/// request: read from the root the runtime draws from and admitted through
-/// that root's manifest, as the loader admits its own documents. `Err` names
-/// what is missing or refused; `Ok(None)` while the documents load.
-fn load_cell(
+/// The detail dialog's reward cell document (`MysekaiMissionRewardCell`).
+#[derive(Resource, Default)]
+pub struct RewardCellSource(pub(crate) CellSource);
+
+/// The cell document `cell`'s serialized file under [`CELL_DIR`].
+pub(crate) fn cell_path(cell: &str) -> String {
+    format!("{CELL_DIR}{cell}.json")
+}
+
+/// The cell prefab of the dialogs' lists, which the top-level loader does not
+/// request: `cell`'s document is read from the root the runtime draws from
+/// and admitted through that root's manifest, as the loader admits its own
+/// documents. `Err` names what is missing or refused; `Ok(None)` while the
+/// documents load.
+pub(crate) fn load_cell(
     layouts: &UiLayouts,
     server: &AssetServer,
     json: &Assets<JsonAsset>,
-    source: &mut RewardCellSource,
+    cell: &str,
+    source: &mut CellSource,
 ) -> Result<Option<UiPrefab>, String> {
     let Some(root) = layouts.root().map(str::to_owned) else {
         return Err("the UI root is not chosen".into());
     };
-    let path = format!("{root}{CELL_PATH}");
-    let missing = || format!("{REWARD_CELL} document is not in the root ({path} did not load)");
+    let path = cell_path(cell);
+    let missing = || format!("{cell} document is not in the root ({root}{path} did not load)");
+    // A source that read another cell starts this cell's document.
+    if source.cell.as_ref().is_some_and(|(named, _)| named != &path) {
+        source.cell = None;
+    }
     let handle = source
         .cell
-        .get_or_insert_with(|| server.load::<JsonAsset>(path.clone()))
+        .get_or_insert_with(|| (path.clone(), server.load::<JsonAsset>(format!("{root}{path}"))))
+        .1
         .clone();
     match server.load_state(&handle) {
         LoadState::Failed(error) => {
@@ -500,12 +522,12 @@ fn load_cell(
     let Some(document) = json.get(&handle) else {
         return Ok(None);
     };
-    let mut cell = UiPrefab::parse(&document.0)
-        .map_err(|reason| format!("{REWARD_CELL} document is refused: {reason}"))?;
-    if cell.prefab != REWARD_CELL {
+    let mut prefab = UiPrefab::parse(&document.0)
+        .map_err(|reason| format!("{cell} document is refused: {reason}"))?;
+    if prefab.prefab != cell {
         return Err(format!(
-            "{path} holds the {} prefab, not {REWARD_CELL}",
-            cell.prefab
+            "{root}{path} holds the {} prefab, not {cell}",
+            prefab.prefab
         ));
     }
     // A region root admits every file it carries through its manifest.
@@ -519,14 +541,14 @@ fn load_cell(
             let Some(manifest) = json.get(&manifest) else {
                 return Ok(None);
             };
-            let identity = UiRootManifest::parse(&manifest.0, &cell.source.region.clone().unwrap_or_default())
-                .and_then(|manifest| manifest.admit_prefab(CELL_PATH, &document.0, &cell));
-            let identity = identity.map_err(|reason| {
-                format!("the root refuses the {REWARD_CELL} document: {reason}")
-            })?;
+            let identity =
+                UiRootManifest::parse(&manifest.0, &prefab.source.region.clone().unwrap_or_default())
+                    .and_then(|manifest| manifest.admit_prefab(&path, &document.0, &prefab));
+            let identity = identity
+                .map_err(|reason| format!("the root refuses the {cell} document: {reason}"))?;
             info!(
-                "mission: UI prefab {REWARD_CELL}: {} source nodes from the {} UI root {CELL_PATH}; client {} unity {}; document sha256 {}",
-                cell.nodes.len(),
+                "mission: UI prefab {cell}: {} source nodes from the {} UI root {path}; client {} unity {}; document sha256 {}",
+                prefab.nodes.len(),
                 identity.region,
                 identity.client_version,
                 identity.unity_version,
@@ -535,10 +557,11 @@ fn load_cell(
         }
         _ => return Ok(None),
     }
-    cell.rebase_images(&root);
-    cell.find(&REWARD_CELL)
-        .map_err(|_| format!("{REWARD_CELL} document has no {REWARD_CELL} root"))?;
-    Ok(Some(cell))
+    prefab.rebase_images(&root);
+    prefab
+        .find(cell)
+        .map_err(|_| format!("{cell} document has no {cell} root"))?;
+    Ok(Some(prefab))
 }
 
 /// `resourceBoxes`, which the convert screen's tables hold; `None` while
@@ -612,7 +635,7 @@ pub fn spawn_when_ready(
             return;
         }
     };
-    let cell = match load_cell(&layouts, &server, &json, &mut cell_source) {
+    let cell = match load_cell(&layouts, &server, &json, REWARD_CELL, &mut cell_source.0) {
         Ok(Some(cell)) => cell,
         Ok(None) => return,
         Err(reason) => {
@@ -1075,7 +1098,7 @@ pub fn setup(
     };
     // The cell document the list rows are copied from, read the same way the
     // view's installation reads it; a refusal here names it as it is.
-    let cell = match load_cell(&layouts, &server, &json, &mut cell_source) {
+    let cell = match load_cell(&layouts, &server, &json, REWARD_CELL, &mut cell_source.0) {
         Ok(Some(cell)) => cell,
         Ok(None) => return,
         Err(reason) => {

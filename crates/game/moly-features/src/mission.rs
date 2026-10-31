@@ -44,6 +44,7 @@ impl Plugin for MissionPlugin {
             .init_resource::<list_dialog::MissionListDialog>()
             .init_resource::<detail_dialog::MissionDetailDialog>()
             .init_resource::<detail_dialog::RewardCellSource>()
+            .init_resource::<detail_dialog::CellSource>()
             .add_message::<service::MissionReceived>()
             .add_message::<service::MissionReceiveFailed>()
             .add_message::<cell::MissionDialogRequest>()
@@ -113,6 +114,7 @@ impl Plugin for MissionPlugin {
                     detail_dialog::spawn_when_ready.before(detail_dialog::open),
                     list_dialog::setup
                         .after(ui_layers::advance)
+                        .after(list_dialog::spawn_when_ready)
                         .before(crate::ui_layout::render),
                     detail_dialog::setup
                         .after(ui_layers::advance)

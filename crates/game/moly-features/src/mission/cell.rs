@@ -37,10 +37,10 @@
 //! copy's own Mask, which [`GaugeFill`] remaps through the instance. Rows past
 //! the page's count stay hidden.
 //!
-//! The list dialog's `MysekaiMissionSheetCell` is a prefab with no document
-//! in this root: [`refuse_document`] names it once, and that list draws no
-//! row. The detail dialog's `MysekaiMissionRewardCell` has a document of its
-//! own, which that dialog reads for itself.
+//! The list dialog's `MysekaiMissionSheetCell` has a document of its own,
+//! which that dialog reads and draws for itself ([`crate::mission::list_dialog`]).
+//! The detail dialog's `MysekaiMissionRewardCell` has a document of its own,
+//! which that dialog reads for itself.
 //!
 //! Named gaps:
 //! - The reward thumbnails: neither cell's thumbnail prefab nor the reward
@@ -82,8 +82,8 @@ pub const POOL_ROWS: usize = 12;
 const COMPLETE_COLOR: [f32; 4] = [1.0, 1.0, 238.0 / 255.0, 1.0];
 /// `Color.white`, `SetCompleteLabel`'s incomplete colour.
 const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-const TEXT_CLASS: &str = "Sekai.UI.CustomTextMesh";
-const IMAGE_CLASS: &str = "Sekai.UI.CustomImage";
+pub(super) const TEXT_CLASS: &str = "Sekai.UI.CustomTextMesh";
+pub(super) const IMAGE_CLASS: &str = "Sekai.UI.CustomImage";
 const BUTTON_CLASS: &str = "Sekai.UI.CustomButton";
 const GAUGE_CLASS: &str = "Sekai.UIPartsGauge";
 const LIST_VIEW_CLASS: &str = "Sekai.UI.ListView";
@@ -105,19 +105,11 @@ pub enum MissionDialogRequest {
     Detail(i32),
     /// `MysekaiMissionSheetCell.OnClickInfoButton`:
     /// `Show2ButtonDialog<MysekaiMissionDetailDialog>(339).SetupInformation`
-    /// for this mission's master id. Its only caller is the sheet cell, whose
-    /// document the root does not carry, so nothing writes it yet.
-    #[allow(dead_code)] // Written by the sheet cell's info button once it exists.
+    /// for this mission's master id. The sheet cell's info button is
+    /// `_infoButton`, which the list dialog does not draw as a control, so
+    /// nothing writes it yet.
+    #[allow(dead_code)] // Written by the sheet cell's info button once it is drawn.
     Information(i32),
-}
-
-/// Logs a cell prefab's one named refusal: `<cell> document is not in the
-/// root`.
-pub fn refuse_document(seen: &mut BTreeSet<String>, cell: &str) {
-    let message = format!("{cell} document is not in the root");
-    if seen.insert(message.clone()) {
-        error!("mission: {message}");
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -508,6 +500,29 @@ fn cell_text(doc: &UiPrefab, path: &str, text: &str, glyphs: &std::collections::
     (keep, Some(missing))
 }
 
+/// Writes a cell node's text through [`cell_text`]: the text when the glyph
+/// set covers it, the node's own fallback otherwise; a character the set lacks
+/// is named once in `seen` as `label`.
+pub(crate) fn write_text(
+    view: &mut UiPrefabView,
+    doc: &UiPrefab,
+    path: &str,
+    text: &str,
+    glyphs: &std::collections::HashSet<char>,
+    seen: &mut BTreeSet<String>,
+    label: &str,
+) {
+    let (text, lack) = cell_text(doc, path, text, glyphs);
+    view.set_text(path, text);
+    for ch in lack {
+        if seen.insert(format!("glyph {label} {ch:?}")) {
+            warn!(
+                "mission: {label} text has the character {ch:?}, which the shared glyph atlas lacks; the cell keeps the document's text"
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -678,14 +693,10 @@ pub fn advance(
         // `SetMissionContent`: `ChangeNonBreakingSpace(sentence)`.
         let sentence = moly_law::text::custom_text_mesh::set_text(&mission.mission, false);
         let path = format!("{}{}", row.root, writes.mission);
-        let (text, lack) = cell_text(document, &path, &sentence, &glyphs);
-        missing.extend(lack);
-        view.set_text(&path, text);
+        write_text(&mut view, document, &path, &sentence, &glyphs, &mut missing, "a list");
         // `SetProgress`.
         let path = format!("{}{}", row.root, writes.progress);
-        let (text, lack) = cell_text(document, &path, &mission.progress, &glyphs);
-        missing.extend(lack);
-        view.set_text(&path, text);
+        write_text(&mut view, document, &path, &mission.progress, &glyphs, &mut missing, "a list");
         // `SetProgress`'s gauge, `UIPartsGauge.Setup(min(current, max), max)`.
         set_gauge(&mut view, row.fill.clone(), mission.fill);
         // `SetCompleteLabel`.
