@@ -28,7 +28,10 @@
 //! depth-stencil target of its own, each with its source state: the row of
 //! its shader attribute in the graphics configuration (queue, stencil id
 //! through the table, comparison, operations, depth test and depth write),
-//! or, for the character programs, the pass state they declare. Then, at the
+//! or, for the character programs, the pass state they declare. The draws
+//! that hide a character but whose source state no row carries write their
+//! depth alone, ahead of every stated draw (see the eyebrow pass below).
+//! Then, at the
 //! point the source feature runs (after the transparents), it draws the
 //! avatar's meshes with the stencil test Equal 1 and the pass's operations
 //! against that stencil, the depth test Greater against the camera's own
@@ -74,24 +77,54 @@
 //! eyebrow stencil value) with Always and Replace. Their eyebrow pass runs
 //! after the transparents with depth test Always and stencil Equal against
 //! that reference, so an eyebrow shows exactly where its own character was
-//! the last stencil writer, over its own hair and not through anyone else.
-//! After the replay, one draw per distinct reference of the shown eyebrow
-//! passes writes the reference / 255 into the mask's alpha where the
-//! stencil holds it; the eyebrow program keeps a pixel only where the alpha
-//! equals its own reference.
+//! the last stencil writer, over its own hair and not through anyone else:
+//! a character draw whose fragment lies behind the depth another draw left
+//! fails its own depth test and writes no stencil. After the replay, one
+//! draw per distinct reference of the shown eyebrow passes writes the
+//! reference / 255 into the mask's alpha where the stencil holds it; the
+//! eyebrow program keeps a pixel only where the alpha equals its own
+//! reference.
+//!
+//! # The draws replayed for their depth alone
+//!
+//! A character in front of its hair writes its reference; behind a tree it
+//! must not, though the tree writes no stencil. So the draws that hide a
+//! character but whose state no row states are replayed for their depth
+//! only: the furniture material's program variants the replay has no
+//! attribute row for (the tree program the furniture importer binds among
+//! them; rugs aside, a character stands on them), and the site material's
+//! draws outside its ground and water families (the field objects, the tree
+//! program, the Object, drop item and TreasureBox families). Their depth test is GreaterEqual in
+//! the product's reversed depth, with the depth write on. Their stencil test
+//! is Always with every operation Keep and a write mask of 0, since a
+//! fragment failing the stencil test writes no depth either; they write no
+//! colour. They are drawn in queue order, opaque queues front to back and
+//! transparent ones back to front, and all before the first stated draw:
+//! they write no stencil, and the
+//! depth a character is tested against is complete only once all of them
+//! have been drawn, including those the main pass draws after it.
 //!
 //! Draws replayed: the room door's parts and the fixtures' colourless
 //! stencil meshes (by the attribute bound on them,
 //! [`SourceStencilAttribute`]), the room shell (floor, walls, entrance), the
-//! fixtures with the fixture material, the player avatar and the NPCs.
+//! fixtures with the fixture material, the player avatar and the NPCs; and
+//! for their depth alone, the furniture and site draws above.
 //!
 //! # Cases this cannot match (named)
 //!
-//! - Draws of other programs are not replayed and are counted in the account
-//!   line (with the names of their nodes, once per room visit): canvas,
-//!   transparent-block and tree fixtures, the room's
-//!   plain background (its stencil test is Equal 0 with Keep and never
-//!   changes a 1), effects and particles.
+//! - Draws of other programs are not replayed: canvas and transparent-block
+//!   fixtures, the room's plain background (its stencil test is Equal 0 with
+//!   Keep and never changes a 1), effects and particles. They are counted in
+//!   the account line, with the names of their nodes once per room visit.
+//! - A depth-only draw's fragment program is not run: the tree program's
+//!   alpha clip and height gradient, and a canvas's own discard, do not
+//!   reach the depth. A leaf the clip discards writes depth here, and a
+//!   character behind it loses its eyebrow. Nor is the tree program's vertex
+//!   sway: a character behind an animated tree is tested against the leaves
+//!   at rest.
+//! - A depth-only draw's queue is the one its program sets, the scene's rows
+//!   carrying no furniture or site draw; a door part on the site material is
+//!   taken for a tree.
 //! - Alpha-clipped and dithered fragments are replayed whole: the source
 //!   discards them before its stencil write. An NPC whose dither alpha is 0
 //!   with its dither gate on discards every fragment and is left out.
@@ -146,6 +179,7 @@ use moly_render::source_stencil::{source_attribute, CLIP_MASK_FORMAT};
 pub use moly_render::source_stencil::{
     object_usage_attribute, SourceStencilAttribute, StencilClipMask,
 };
+use moly_render::site_material::SiteFamily;
 use serde_json::Value;
 
 use crate::avatar_material::AvatarMaterial;
@@ -367,6 +401,68 @@ const NPC_ACCESSORY_PASS: ReplayState = ReplayState {
     stencil: always(0, StencilOperation::Zero),
     ..AVATAR_PASS
 };
+// The depth-only replay of the draws that hide a character but whose state
+// this replay does not carry, see the module comment.
+//
+// Its stencil test is Always with every operation Keep and a write mask of 0:
+// a fragment that fails the stencil test is dropped before its depth write,
+// so the test must pass, and no stencil value changes. Its colour writes are
+// empty. Its depth test
+// is GreaterEqual: the product's depth is reversed, so a fragment at least as
+// near as the depth already held passes, and the fragment that lies behind
+// what another draw wrote fails and writes nothing.
+const OCCLUDER_DEPTH_COMPARE: CompareFunction = CompareFunction::GreaterEqual;
+
+fn queue_occluder_pipeline(
+    cache: &PipelineCache,
+    gpu: &SilhouetteGpu,
+    layout: &MeshVertexBufferLayoutRef,
+    topology: PrimitiveTopology,
+) -> CachedRenderPipelineId {
+    let Ok(vertex_layout) = layout.0.get_layout(&[Mesh::ATTRIBUTE_POSITION.at_shader_location(0)])
+    else {
+        return CachedRenderPipelineId::INVALID;
+    };
+    let face = StencilFaceState {
+        compare: CompareFunction::Always,
+        fail_op: StencilOperation::Keep,
+        depth_fail_op: StencilOperation::Keep,
+        pass_op: StencilOperation::Keep,
+    };
+    cache.queue_render_pipeline(RenderPipelineDescriptor {
+        label: Some("character_silhouette_occluder_pipeline".into()),
+        layout: vec![gpu.view_layout.clone(), gpu.rigid_layout.clone()],
+        vertex: VertexState {
+            constants: vec![],
+            shader: SILHOUETTE_SHADER.clone(),
+            shader_defs: Vec::new(),
+            entry_point: Some("vertex".into()),
+            buffers: vec![vertex_layout],
+        },
+        fragment: None,
+        primitive: PrimitiveState {
+            topology,
+            front_face: FrontFace::Ccw,
+            cull_mode: Some(Face::Back),
+            ..Default::default()
+        },
+        depth_stencil: Some(DepthStencilState {
+            format: DEPTH_STENCIL_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(OCCLUDER_DEPTH_COMPARE),
+            stencil: StencilState {
+                front: face,
+                back: face,
+                read_mask: 0xff,
+                write_mask: 0,
+            },
+            bias: DepthBiasState::default(),
+        }),
+        multisample: MultisampleState::default(),
+        ..Default::default()
+    })
+}
+
 /// The avatar programs' stencil-shadow pass: reference 1, Equal; pass and
 /// depth fail DecrementSaturate, fail Keep. Its depth test (Greater) runs in
 /// the fragment against the camera depth, so the pipeline's depth test
@@ -645,6 +741,41 @@ fn fixture_attribute(material: &FixtureMaterial) -> Option<u8> {
     .and_then(|a| u8::try_from(a).ok())
 }
 
+/// How a shown furniture or site draw enters the replay.
+enum Occlusion {
+    /// A mat a character stands on: not replayed.
+    None,
+    /// A furniture variant with its own attribute row: replayed with that
+    /// row's state as a stencil writer.
+    Stated,
+    /// Replayed for its depth alone, at its queue.
+    DepthOnly(u32),
+}
+
+/// Whether a draw hides a character, by its material. The surfaces a
+/// character stands on (the site ground, water, a rug) stay out; the other
+/// furniture variants, the field objects and the site material's other
+/// families hide the character and write the depth. A furniture material
+/// whose variant has an attribute row keeps its stated state.
+fn occlusion(material: Option<&FixtureMaterial>, site: Option<&SiteMaterial>) -> Occlusion {
+    if let Some(material) = material {
+        if fixture_attribute(material).is_some() {
+            return Occlusion::Stated;
+        }
+        if material.key.rug.is_none() {
+            return Occlusion::DepthOnly(material.key.render_queue);
+        }
+        return Occlusion::None;
+    }
+    let Some(site) = site else {
+        return Occlusion::None;
+    };
+    match site.key.family {
+        SiteFamily::Ground | SiteFamily::GroundBirthday | SiteFamily::Water => Occlusion::None,
+        family => Occlusion::DepthOnly(family.render_queue()),
+    }
+}
+
 /// Where a draw's vertices go: one world matrix, or its skin's palette. The
 /// value is the dynamic offset of its window.
 #[derive(Clone, Copy, Debug)]
@@ -665,6 +796,16 @@ struct ReplayDraw {
 struct SilhouetteDraw {
     mesh: AssetId<Mesh>,
     space: Space,
+    distance: f32,
+    pipeline: CachedRenderPipelineId,
+}
+
+/// A draw of another program that hides a character: its depth only, see
+/// [`occlusion`].
+struct OccluderDraw {
+    mesh: AssetId<Mesh>,
+    space: Space,
+    queue: u32,
     distance: f32,
     pipeline: CachedRenderPipelineId,
 }
@@ -695,7 +836,7 @@ struct SilhouetteTally {
     npc_discarded: usize,
     /// Door parts, shells or fixtures without a replayable attribute row.
     unstated: usize,
-    /// Shown meshes of other programs, not replayed.
+    /// Shown meshes of other programs, not replayed in any way.
     not_replayed: usize,
     palettes_refused: usize,
 }
@@ -706,6 +847,8 @@ struct SilhouetteDrawList {
     active: bool,
     colour: [f32; 4],
     replay: Vec<ReplayDraw>,
+    /// In queue order.
+    occluders: Vec<OccluderDraw>,
     silhouette: Vec<SilhouetteDraw>,
     /// In queue order.
     clips: Vec<ClipStep>,
@@ -764,6 +907,78 @@ fn draw_space(
     }
 }
 
+/// A shown mesh about to enter the replay.
+struct ShownMesh<'a> {
+    entity: Entity,
+    mesh: &'a Mesh3d,
+    transform: &'a GlobalTransform,
+    skin: Option<&'a SkinnedMesh>,
+}
+
+/// One frame's replay input as it is gathered: where the skins' joints and
+/// bind poses are read, the palettes built so far (skins that share joints
+/// and bind poses share one), the eye the draws are sorted from, and the
+/// entities replayed in any form.
+struct ReplayGather<'a, 'w, 's> {
+    joints: &'a Query<'w, 's, &'static GlobalTransform>,
+    bindposes: &'a Assets<SkinnedMeshInverseBindposes>,
+    eye: Vec3,
+    palettes: HashMap<PaletteKey, u32>,
+    replayed: HashSet<Entity>,
+}
+
+impl ReplayGather<'_, '_, '_> {
+    fn space(&mut self, list: &mut SilhouetteDrawList, shown: &ShownMesh) -> Option<Space> {
+        let space = draw_space(
+            shown.transform,
+            shown.skin,
+            self.joints,
+            self.bindposes,
+            &mut self.palettes,
+            list,
+        )?;
+        self.replayed.insert(shown.entity);
+        Some(space)
+    }
+
+    /// Adds one draw with its source state and queue; the space its vertices
+    /// go to, when its palette can be built.
+    fn stated(
+        &mut self,
+        list: &mut SilhouetteDrawList,
+        shown: ShownMesh,
+        attribute: u8,
+        state: ReplayState,
+        queue: u32,
+    ) -> Option<Space> {
+        let space = self.space(list, &shown)?;
+        *list.tally.by_attribute.entry(attribute).or_default() += 1;
+        list.replay.push(ReplayDraw {
+            mesh: shown.mesh.0.id(),
+            space,
+            state,
+            queue,
+            distance: shown.transform.translation().distance(self.eye),
+            pipeline: CachedRenderPipelineId::INVALID,
+        });
+        Some(space)
+    }
+
+    /// Adds one draw for its depth alone, at its queue.
+    fn depth_only(&mut self, list: &mut SilhouetteDrawList, shown: ShownMesh, queue: u32) {
+        let Some(space) = self.space(list, &shown) else {
+            return;
+        };
+        list.occluders.push(OccluderDraw {
+            mesh: shown.mesh.0.id(),
+            space,
+            queue,
+            distance: shown.transform.translation().distance(self.eye),
+            pipeline: CachedRenderPipelineId::INVALID,
+        });
+    }
+}
+
 /// The replay's input of this frame. Nothing is replayed while no room
 /// door's stencil mesh is shown: without a writer of 1 the stencil-shadow
 /// pass has no pixel to draw.
@@ -802,12 +1017,19 @@ fn extract_silhouette_draws(
             (
                 Entity,
                 &Mesh3d,
-                &MeshMaterial3d<FixtureMaterial>,
+                Option<&MeshMaterial3d<FixtureMaterial>>,
+                Option<&MeshMaterial3d<SiteMaterial>>,
                 &GlobalTransform,
                 Option<&SkinnedMesh>,
                 &InheritedVisibility,
             ),
-            Without<SourceInactive>,
+            (
+                Or<(
+                    With<MeshMaterial3d<FixtureMaterial>>,
+                    With<MeshMaterial3d<SiteMaterial>>,
+                )>,
+                Without<SourceInactive>,
+            ),
         >,
     >,
     characters: Extract<
@@ -843,12 +1065,14 @@ fn extract_silhouette_draws(
         Res<Assets<RoomShellMaterial>>,
         Res<Assets<FixtureMaterial>>,
         Res<Assets<CharacterMaterial>>,
+        Res<Assets<SiteMaterial>>,
     )>,
     mut named: Local<bool>,
 ) {
     let list = &mut *list;
     list.active = false;
     list.replay.clear();
+    list.occluders.clear();
     list.silhouette.clear();
     list.transform_bytes.clear();
     list.palette_bytes.clear();
@@ -877,7 +1101,7 @@ fn extract_silhouette_draws(
     }
     list.clips.sort_by_key(|step| step.queue);
     let (joints, visibility, names, cameras) = &*lookups;
-    let (bindposes, shell_materials, fixture_materials, character_materials) = &*assets;
+    let (bindposes, shell_materials, fixture_materials, character_materials, sites) = &*assets;
     // A door part hidden for writing no colour is shown when its parent is.
     let part_shown = |shown: &InheritedVisibility, parent: Option<&ChildOf>| {
         shown.get()
@@ -934,31 +1158,12 @@ fn extract_silhouette_draws(
         .next()
         .map(|camera| camera.translation())
         .unwrap_or(Vec3::ZERO);
-    let mut palettes: HashMap<PaletteKey, u32> = HashMap::new();
-    let mut replayed: HashSet<Entity> = HashSet::new();
-
-    // (entity, mesh, transform, skin, attribute for the tally, state, queue)
-    let mut push = |list: &mut SilhouetteDrawList,
-                    entity: Entity,
-                    mesh: &Mesh3d,
-                    transform: &GlobalTransform,
-                    skin: Option<&SkinnedMesh>,
-                    tally_attribute: u8,
-                    state: ReplayState,
-                    queue: u32|
-     -> Option<Space> {
-        let space = draw_space(transform, skin, joints, bindposes, &mut palettes, list)?;
-        replayed.insert(entity);
-        *list.tally.by_attribute.entry(tally_attribute).or_default() += 1;
-        list.replay.push(ReplayDraw {
-            mesh: mesh.0.id(),
-            space,
-            state,
-            queue,
-            distance: transform.translation().distance(eye),
-            pipeline: CachedRenderPipelineId::INVALID,
-        });
-        Some(space)
+    let mut gather = ReplayGather {
+        joints,
+        bindposes,
+        eye,
+        palettes: HashMap::new(),
+        replayed: HashSet::new(),
     };
 
     for (entity, mesh, attribute, transform, skin, shown, parent) in doors.iter() {
@@ -969,16 +1174,8 @@ fn extract_silhouette_draws(
             list.tally.unstated += 1;
             continue;
         };
-        push(
-            list,
-            entity,
-            mesh,
-            transform,
-            skin,
-            attribute.0,
-            rule.state,
-            rule.queue,
-        );
+        let shown = ShownMesh { entity, mesh, transform, skin };
+        gather.stated(list, shown, attribute.0, rule.state, rule.queue);
     }
     for (entity, mesh, material, transform, shown) in shells.iter() {
         if !shown.get() {
@@ -993,34 +1190,31 @@ fn extract_silhouette_draws(
             list.tally.unstated += 1;
             continue;
         };
-        push(
-            list,
-            entity,
-            mesh,
-            transform,
-            None,
-            attribute,
-            rule.state,
-            material.key.queue,
-        );
+        let shown = ShownMesh { entity, mesh, transform, skin: None };
+        gather.stated(list, shown, attribute, rule.state, material.key.queue);
     }
-    for (entity, mesh, material, transform, skin, shown) in fixtures.iter() {
+    for (entity, mesh, furniture, site, transform, skin, shown) in fixtures.iter() {
         if !shown.get() {
             continue;
         }
-        let Some(material) = fixture_materials.get(&material.0) else {
-            continue;
-        };
-        let Some((attribute, rule)) = fixture_attribute(material)
-            .and_then(|a| rules.attributes.get(&a).map(|rule| (a, rule)))
-        else {
-            list.tally.unstated += 1;
-            continue;
-        };
-        let queue = material.key.render_queue;
-        push(
-            list, entity, mesh, transform, skin, attribute, rule.state, queue,
-        );
+        let material = furniture.and_then(|material| fixture_materials.get(&material.0));
+        let site = site.and_then(|material| sites.get(&material.0));
+        let shown = ShownMesh { entity, mesh, transform, skin };
+        match occlusion(material, site) {
+            Occlusion::Stated => {
+                let Some((attribute, rule)) = material
+                    .and_then(fixture_attribute)
+                    .and_then(|a| rules.attributes.get(&a).map(|rule| (a, rule)))
+                else {
+                    list.tally.unstated += 1;
+                    continue;
+                };
+                let queue = material.map_or(rule.queue, |material| material.key.render_queue);
+                gather.stated(list, shown, attribute, rule.state, queue);
+            }
+            Occlusion::DepthOnly(queue) => gather.depth_only(list, shown, queue),
+            Occlusion::None => {}
+        }
     }
     // The character programs keep their own pass state; the queue is the
     // character attribute's.
@@ -1056,16 +1250,9 @@ fn extract_silhouette_draws(
                     npc_pass(material.params.eyebrow_stencil)
                 }
             };
-            let Some(space) = push(
-                list,
-                entity,
-                mesh,
-                transform,
-                skin,
-                attribute::CHARACTER,
-                state,
-                character_queue,
-            ) else {
+            let shown = ShownMesh { entity, mesh, transform, skin };
+            let Some(space) = gather.stated(list, shown, attribute::CHARACTER, state, character_queue)
+            else {
                 continue;
             };
             // The stencil-shadow pass has a pixel only where a door's
@@ -1091,12 +1278,24 @@ fn extract_silhouette_draws(
             }
         })
     });
+    // The depth-only replays write depth and no stencil, so only the order
+    // among themselves matters; it is the main pass's, and they stand before
+    // every stated draw.
+    list.occluders.sort_by(|a, b| {
+        a.queue.cmp(&b.queue).then_with(|| {
+            if a.queue <= OPAQUE_QUEUE_END {
+                a.distance.total_cmp(&b.distance)
+            } else {
+                b.distance.total_cmp(&a.distance)
+            }
+        })
+    });
     list.silhouette
         .sort_by(|a, b| a.distance.total_cmp(&b.distance));
 
     let mut not_replayed: BTreeMap<String, usize> = BTreeMap::new();
     for (entity, shown, parent) in others.iter() {
-        if !shown.get() || replayed.contains(&entity) {
+        if !shown.get() || gather.replayed.contains(&entity) {
             continue;
         }
         list.tally.not_replayed += 1;
@@ -1116,7 +1315,7 @@ fn extract_silhouette_draws(
             .map(|(name, count)| format!("{name} x{count}"))
             .collect();
         info!(
-            "character silhouette: replay on ({door_masks} door and {ground_clips} ground clip stencil meshes, {eyebrows} eyebrow passes shown); {} shown meshes of other programs are not replayed ({} parent nodes, first: {})",
+            "character silhouette: replay on ({door_masks} door and {ground_clips} ground clip stencil meshes, {eyebrows} eyebrow passes shown); the furniture without an attribute row (rugs aside) and the site material outside its ground and water are replayed for their depth only; {} shown meshes of other programs are not replayed ({} parent nodes, first: {})",
             list.tally.not_replayed,
             not_replayed.len(),
             shown.join(", ")
@@ -1635,6 +1834,18 @@ fn prepare_silhouette(
         let skinned = matches!(draw.space, Space::Skinned(_));
         draw.pipeline = pipeline_for(draw.mesh, skinned, PassKey::Replay(draw.state.pipeline_key()));
     }
+    let mut occluder_pipelines = HashMap::new();
+    for draw in &mut list.occluders {
+        draw.pipeline = match meshes.get(draw.mesh) {
+            Some(render_mesh) => {
+                let key = (render_mesh.layout.clone(), render_mesh.primitive_topology());
+                *occluder_pipelines.entry(key).or_insert_with_key(|(layout, topology)| {
+                    queue_occluder_pipeline(&pipeline_cache, gpu, layout, *topology)
+                })
+            }
+            None => CachedRenderPipelineId::INVALID,
+        };
+    }
     if let Some(format) = format {
         for draw in &mut list.silhouette {
             let skinned = matches!(draw.space, Space::Skinned(_));
@@ -1650,6 +1861,12 @@ fn prepare_silhouette(
         .filter(|draw| draw.pipeline == CachedRenderPipelineId::INVALID)
         .count();
     inner.silhouette_draws = list.silhouette.len();
+    inner.occluder_draws = list.occluders.len();
+    inner.occluder_invalid = list
+        .occluders
+        .iter()
+        .filter(|draw| draw.pipeline == CachedRenderPipelineId::INVALID)
+        .count();
     inner.colour = list.colour;
 }
 
@@ -1704,6 +1921,8 @@ struct AccountInner {
     replay_draws: usize,
     replay_invalid: usize,
     silhouette_draws: usize,
+    occluder_draws: usize,
+    occluder_invalid: usize,
     colour: [f32; 4],
     frames_drawn: u64,
     frames_not_ready: u64,
@@ -2042,8 +2261,9 @@ impl StencilReplayNode {
         }
         let cache = world.resource::<PipelineCache>();
         // Every replay pipeline must be ready: a draw left out would change
-        // the stencil the mask and the silhouette test. A draw without a
-        // pipeline (its mesh lacks a stream) is counted in prepare.
+        // the depth and stencil the mask and the characters' writes test. A
+        // draw without a pipeline (its mesh lacks a stream) is counted in
+        // prepare.
         let mut replay_pipelines = Vec::with_capacity(list.replay.len());
         for draw in &list.replay {
             if draw.pipeline == CachedRenderPipelineId::INVALID {
@@ -2055,6 +2275,18 @@ impl StencilReplayNode {
                 return false;
             };
             replay_pipelines.push(Some(pipeline));
+        }
+        let mut occluder_pipelines = Vec::with_capacity(list.occluders.len());
+        for draw in &list.occluders {
+            if draw.pipeline == CachedRenderPipelineId::INVALID {
+                occluder_pipelines.push(None);
+                continue;
+            }
+            let Some(pipeline) = cache.get_render_pipeline(draw.pipeline) else {
+                account.0.lock().unwrap().frames_not_ready += 1;
+                return false;
+            };
+            occluder_pipelines.push(Some(pipeline));
         }
         let mut clip_pipelines = Vec::with_capacity(list.clips.len());
         for step in &list.clips {
@@ -2083,7 +2315,7 @@ impl StencilReplayNode {
             gpu,
             frame,
         );
-        let mut recorded = 0usize;
+        let mut drawn = 0usize;
         let mut start = 0usize;
         // The draws below each clip's queue, then that clip's mask write;
         // after the last clip, the rest of the draws.
@@ -2114,6 +2346,23 @@ impl StencilReplayNode {
                             timestamp_writes: None,
                             occlusion_query_set: None,
                         });
+                // The depth of the draws that hide a character without a
+                // stated state, once this pass has cleared the depth and
+                // before every stated draw.
+                if first {
+                    for (draw, pipeline) in list.occluders.iter().zip(&occluder_pipelines) {
+                        let Some(pipeline) = pipeline else {
+                            continue;
+                        };
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(0, &view_group, &[target.view_offset]);
+                        match draw.space {
+                            Space::Rigid(offset) => pass.set_bind_group(1, &rigid_group, &[offset]),
+                            Space::Skinned(offset) => pass.set_bind_group(1, &skin_group, &[offset]),
+                        }
+                        draw_mesh!(pass, &draw.mesh, meshes, allocator);
+                    }
+                }
                 for (draw, pipeline) in list.replay[start..end]
                     .iter()
                     .zip(&replay_pipelines[start..end])
@@ -2129,7 +2378,7 @@ impl StencilReplayNode {
                         Space::Skinned(offset) => pass.set_bind_group(1, &skin_group, &[offset]),
                     }
                     if draw_mesh!(pass, &draw.mesh, meshes, allocator) {
-                        recorded += 1;
+                        drawn += 1;
                     }
                 }
             }
@@ -2214,7 +2463,7 @@ impl StencilReplayNode {
                 pass.draw(0..3, 0..1);
             }
         }
-        account.0.lock().unwrap().replayed = Some((frame, recorded));
+        account.0.lock().unwrap().replayed = Some((frame, drawn));
         true
     }
 
@@ -2400,9 +2649,11 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
     after.unmap();
     let tally = &probe.tally;
     info!(
-        "character silhouette account (replayed frame {}): door stencil meshes {}; replay draws recorded {} of {} (by shader attribute {:?}; pipelines missing {}), avatar meshes {}, NPC meshes {} and accessory meshes {} ({} left out, every fragment discarded by the dither), attribute rows missing {}, shown meshes of other programs not replayed {}, palettes refused {}; frames skipped with pipelines compiling: replay {}, silhouette {}; frames with the view at another size than the clip mask {}; stencil at the pass over {}x{} pixels: 0: {}, 1: {}, 2: {}, 3: {}, 4 and above: {}; silhouette draws recorded {} of {}, pixels drawn {} (a 1 decremented to 0), 1 left after the pass {}; colour {:?} from the graphics configuration",
+        "character silhouette account (replayed frame {}): door stencil meshes {}; depth-only draws of other programs {} (pipelines missing {}); replay draws recorded {} of {} (by shader attribute {:?}; pipelines missing {}), avatar meshes {}, NPC meshes {} and accessory meshes {} ({} left out, every fragment discarded by the dither), attribute rows missing {}, shown meshes of other programs not replayed {}, palettes refused {}; frames skipped with pipelines compiling: replay {}, silhouette {}; frames with the view at another size than the clip mask {}; stencil at the pass over {}x{} pixels: 0: {}, 1: {}, 2: {}, 3: {}, 4 and above: {}; silhouette draws recorded {} of {}, pixels drawn {} (a 1 decremented to 0), 1 left after the pass {}; colour {:?} from the graphics configuration",
         probe.frame,
         tally.door_masks,
+        inner.occluder_draws,
+        inner.occluder_invalid,
         probe.replay_recorded,
         probe.replay_draws,
         tally.by_attribute,
@@ -2438,9 +2689,11 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
 fn log_counter_line(world: &World) {
     let inner = world.resource::<SilhouetteAccount>().0.lock().unwrap();
     info!(
-        "character silhouette account (counts): replayed frames {}, door stencil meshes {}, replay draws {} (pipelines missing {}), silhouette draws {}; frames skipped with pipelines compiling: replay {}, silhouette {}; frames with the view at another size than the clip mask {}",
+        "character silhouette account (counts): replayed frames {}, door stencil meshes {}, depth-only draws {} (pipelines missing {}), replay draws {} (pipelines missing {}), silhouette draws {}; frames skipped with pipelines compiling: replay {}, silhouette {}; frames with the view at another size than the clip mask {}",
         inner.frames_drawn,
         inner.tally.door_masks,
+        inner.occluder_draws,
+        inner.occluder_invalid,
         inner.replay_draws,
         inner.replay_invalid,
         inner.silhouette_draws,

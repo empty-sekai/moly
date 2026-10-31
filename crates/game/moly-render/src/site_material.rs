@@ -388,6 +388,26 @@ pub enum SiteFamily {
     TreasureBox { rare: bool },
 }
 
+impl SiteFamily {
+    /// The family's render queue as its pipeline sets it.
+    pub fn render_queue(self) -> u32 {
+        // CN GraphicsConfig: ground=2005, drop item=2010, field object=2040,
+        // tree=2050. Transparent water keeps its separate sorted phase.
+        match self {
+            SiteFamily::Ground | SiteFamily::GroundBirthday => 2005,
+            SiteFamily::DropItem => 2010,
+            SiteFamily::FieldObject => 2040,
+            SiteFamily::Tree => 2050,
+            // Both treasure materials author renderQueue -1 (take the shader's
+            // queue) and `Mysekai/TreasureBox` declares no Queue tag (its tags
+            // are RenderType only), so the queue is the shader default,
+            // Geometry = 2000.
+            SiteFamily::TreasureBox { .. } => 2000,
+            SiteFamily::Water | SiteFamily::Object | SiteFamily::UiUber => 2065,
+        }
+    }
+}
+
 /// 管线特化键：族 + keyword 变体。作为 `AsBindGroup::Data` 进管线缓存。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SiteMaterialKey {
@@ -728,20 +748,7 @@ impl Material for SiteMaterial {
         key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         let key = key.bind_group_data;
-        // CN GraphicsConfig: ground=2005, drop item=2010, field object=2040,
-        // tree=2050. Transparent water keeps its separate sorted phase.
-        crate::material_order::set_queue(descriptor, match key.family {
-            SiteFamily::Ground | SiteFamily::GroundBirthday => 2005,
-            SiteFamily::DropItem => 2010,
-            SiteFamily::FieldObject => 2040,
-            SiteFamily::Tree => 2050,
-            // Both treasure materials author renderQueue -1 (take the shader's
-            // queue) and `Mysekai/TreasureBox` declares no Queue tag (its tags
-            // are RenderType only), so the queue is the shader default,
-            // Geometry = 2000.
-            SiteFamily::TreasureBox { .. } => 2000,
-            _ => 2065,
-        });
+        crate::material_order::set_queue(descriptor, key.family.render_queue());
         let mut defs: Vec<&str> = Vec::new();
         match key.family {
             SiteFamily::FieldObject => defs.push("SITE_FIELDOBJECT"),
