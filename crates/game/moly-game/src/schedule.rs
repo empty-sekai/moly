@@ -1227,6 +1227,7 @@ pub fn install(app: &mut App) {
     // native instruments); stamina and rank are the server model's client
     // copies, the photo permission is the active site's type.
     app.add_systems(Startup, menu_dialog::init)
+        .add_message::<menu_dialog::OpenPhoto>()
         // 铺件：图集到齐一次铺成（外壳字符集已并菜单对话框固定文案，
         // 烘制门四员到齐条件不变——菜单对话框的字随外壳成员一起进图集）。
         .add_systems(Update, menu_dialog::spawn_when_ready)

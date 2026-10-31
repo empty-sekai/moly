@@ -6,6 +6,7 @@ use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use moly_assets::json::JsonAsset;
 use serde::Deserialize;
 use std::sync::Arc;
+use crate::ui_charsets::ShellTextSources;
 
 const CAPTURE_TEXTURE: &str = "photo-captured-image";
 const SHOT_EFFECT: &str = "photo-shot/shot/shot.json";
@@ -91,10 +92,10 @@ impl Curve {
     }
 }
 
-/// Frame names and dynamically assigned labels enter the shared glyph atlas
-/// before the menu renderer bakes it.
-#[derive(Resource, Default)]
-pub struct PhotoCharset(pub Option<Vec<char>>);
+/// Name of the photo screen's text source in [`ShellTextSources`]: frame
+/// names and dynamically assigned labels enter the shared glyph atlas before
+/// the menu renderer bakes it.
+const TEXT_SOURCE: &str = "photo";
 
 #[derive(Resource)]
 struct Source {
@@ -152,7 +153,7 @@ pub(super) struct Selection {
 
 pub(super) fn install(app: &mut App) {
     app.init_resource::<crate::camera::PhotoGestureHeld>()
-        .init_resource::<PhotoCharset>()
+        .init_resource::<ShellTextSources>()
         .add_systems(
             Update,
             load_source
@@ -170,14 +171,15 @@ pub(super) fn install(app: &mut App) {
             Update,
             place.after(super::place).before(crate::ui_layout::render),
         );
+    app.world_mut().resource_mut::<ShellTextSources>().declare(TEXT_SOURCE);
 }
 
 fn load_source(world: &mut World) {
     if world.resource::<UiLayouts>().document(KEY).is_none() {
         if world.resource::<UiLayouts>().root().is_some()
-            && world.resource::<PhotoCharset>().0.is_none()
+            && !world.resource::<ShellTextSources>().is_filled(TEXT_SOURCE)
         {
-            world.resource_mut::<PhotoCharset>().0 = Some(Vec::new());
+            world.resource_mut::<ShellTextSources>().fill(TEXT_SOURCE, Vec::new());
         }
         return;
     }
@@ -346,7 +348,7 @@ fn load_source(world: &mut World) {
             chars.push('1');
             chars.sort_unstable();
             chars.dedup();
-            world.resource_mut::<PhotoCharset>().0 = Some(chars);
+            world.resource_mut::<ShellTextSources>().fill(TEXT_SOURCE, chars);
             let base = world
                 .resource::<UiLayouts>()
                 .document(KEY)

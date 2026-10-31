@@ -863,7 +863,7 @@ pub fn parse(
     handle: Option<Res<ShellNamesHandle>>,
     layouts: Res<UiLayouts>,
     stage: Option<Res<crate::browser_stage::BrowserStage>>,
-    photo: Option<Res<crate::photo_shot::PhotoCharset>>,
+    sources: Option<Res<crate::ui_charsets::ShellTextSources>>,
     bulk: Option<Res<crate::harvest::bulk::BulkHarvest>>,
     phenomena: Option<Res<crate::learn_phenomena_dialog::PhenomenonGlyphs>>,
     inventory: Option<Res<crate::inventory::InventoryGlyphs>>,
@@ -914,7 +914,15 @@ pub fn parse(
         },
         None => &[],
     };
-    if photo.as_ref().is_some_and(|photo|photo.0.is_none()) {return;}
+    // The texts of the screens that declared a source (the photo screen's
+    // frame names and labels), once every one is filled.
+    let source_chars = match sources.as_deref() {
+        Some(sources) => match sources.chars() {
+            Some(chars) => chars.collect::<Vec<char>>(),
+            None => return,
+        },
+        None => Vec::new(),
+    };
     let parsed: Value = serde_json::from_str(&asset.0).expect("site name document");
     let rows = parsed["sites"].as_array().expect("site name rows");
     if layouts.document("BulkHarvestSettings").is_some() && bulk.as_deref().is_none_or(|bulk| bulk.masters.is_none()) { return; }
@@ -922,7 +930,7 @@ pub fn parse(
     if let Some(masters) = bulk.as_deref().and_then(|bulk|bulk.masters.as_ref()) {
         for target in masters.sites.values().flatten() { chars.extend(target.name.chars()); chars.extend(target.group_name.chars()); }
     }
-    if let Some(photo)=photo.as_deref().and_then(|photo|photo.0.as_ref()) {chars.extend(photo.iter().copied());}
+    chars.extend(source_chars);
     for row in rows {
         chars.extend(row["name"].as_str().expect("site name").chars());
     }

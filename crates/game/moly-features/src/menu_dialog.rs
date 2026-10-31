@@ -184,6 +184,29 @@ pub struct RecoverStaminaRequest(pub DialogId);
 #[derive(Message, Clone, Copy, Debug)]
 pub struct RecoverFinished;
 
+/// The photo button's tap: the photo screen opens on it, and the menu closes.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct OpenPhoto;
+
+/// The screens behind menu buttons that a feature installs, each with the
+/// check that its source is loaded. A button whose screen is not registered
+/// stays greyed, like one whose source is missing.
+#[derive(Resource, Default)]
+pub struct MenuTargets {
+    available: std::collections::HashMap<MenuButton, fn(&UiLayouts) -> bool>,
+}
+
+impl MenuTargets {
+    /// Registers the screen behind `button` with its source check.
+    pub fn register(&mut self, button: MenuButton, available: fn(&UiLayouts) -> bool) {
+        self.available.insert(button, available);
+    }
+
+    fn available(&self, button: MenuButton, layouts: &UiLayouts) -> bool {
+        self.available.get(&button).is_some_and(|available| available(layouts))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 可按件：身份与屏位（我方选值）
 // ---------------------------------------------------------------------------
@@ -1083,6 +1106,7 @@ pub fn place(
     user: Option<Res<crate::userdata::client::ClientUserData>>,
     (mut screens, mut back_keys): (ResMut<ScreenManager>, MessageReader<DialogBackKeyEvent>),
     site: Option<Res<crate::site::SiteActive>>,
+    targets: Option<Res<MenuTargets>>,
 ) {
     // SubWindowDialog.OnHardwareBackKeyProcess is CloseProcess: the back key
     // the screen manager hands this dialog closes it.
@@ -1125,7 +1149,7 @@ pub fn place(
                         let inputs = SetupInputs::read(&mock, site.as_deref());
                         root.setup = Some(ALL_BUTTONS.map(|which| {
                             let mut setup=which.setup(&inputs);
-                            if which == MenuButton::PhotoShot && !crate::photo_shot::source_available(&layouts) {
+                            if which == MenuButton::PhotoShot && !targets.as_deref().is_some_and(|targets| targets.available(which, &layouts)) {
                                 setup.greyed_until=Some(Missing::ScreenSource(MenuScreenType::MysekaiPhotoShot));
                             }
                             setup
@@ -1362,7 +1386,7 @@ pub fn click(
     views: Query<(&crate::ui_layout::UiPrefabView, &MenuDialogRoot)>,
     mut sounds: ResMut<crate::audio::SeRequests>,
     mut recover_requests: MessageWriter<RecoverStaminaRequest>,
-    mut photo_requests: MessageWriter<crate::photo_shot::OpenPhoto>,
+    mut photo_requests: MessageWriter<OpenPhoto>,
     root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
     let taps: Vec<Vec2> = gestures
@@ -1428,7 +1452,7 @@ pub fn click(
                     layouts.queue_button_se(&mut sounds, view.key, which.source_path());
                     match which {
                         MenuButton::PhotoShot => {
-                            photo_requests.write(crate::photo_shot::OpenPhoto);
+                            photo_requests.write(OpenPhoto);
                             close_requested = true;
                         }
                         MenuButton::Chest => {

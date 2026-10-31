@@ -16,10 +16,9 @@ use bevy::{
 };
 use moly_assets::ui_layout::{UiComponent, UiPrefab};
 use crate::{gesture::{GestureEvent, GestureState}, ui_layers::{MenuScreenType, ScreenManager},
-    ui_layout::{UiLayouts, UiPrefabView}};
+    ui_layout::{UiLayouts, UiPrefabView}, menu_dialog::{MenuButton, MenuTargets, OpenPhoto}};
 
 mod select;
-pub use select::PhotoCharset;
 
 const SCREEN: MenuScreenType = MenuScreenType::MysekaiPhotoShot;
 const KEY: &str = "PhotoShot";
@@ -31,8 +30,6 @@ const CALL_EFFECTS: [(&str,&str);2] = [
     ("photo-shot/call-wave/call-wave.json","fx_mysekai_photo_shot_call_character_wave"),
 ];
 
-#[derive(Message)]
-pub struct OpenPhoto;
 #[derive(Message, Clone, Copy)]
 enum PhotoAction { Open, Back, Call, Capture(UVec2), Skip, Save, Frame(i32) }
 #[derive(Component)]
@@ -145,6 +142,8 @@ pub fn source_available(layouts: &UiLayouts) -> bool {
 
 pub fn install(app: &mut App) {
     select::install(app);
+    app.init_resource::<MenuTargets>();
+    app.world_mut().resource_mut::<MenuTargets>().register(MenuButton::PhotoShot, source_available);
     let readiness=CaptureReadiness::default();
     app.insert_resource(readiness.clone());
     if let Some(render)=app.get_sub_app_mut(RenderApp) {
