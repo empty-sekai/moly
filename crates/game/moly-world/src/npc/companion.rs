@@ -1,8 +1,9 @@
 //! The navigation of a companion (`crate::companion`): a walker that is not
 //! a roster member and runs no objective machine. It stands, walks and
-//! arrives on the roster's own walk cells, waypoint table and crowd agent:
-//! [`depart`] builds the route as an objective's `MoveAsync` does, and
-//! [`advance`] takes one frame of the agent step's loop body.
+//! arrives on the roster's own walk cells and crowd agent: [`depart`] builds
+//! the route from the path's corners in order (no rest points, and none of
+//! the waypoint table's radial ordering), and [`advance`] takes one frame of
+//! the agent step's loop body.
 //!
 //! What the roster keeps on its members, the companion keeps on its own
 //! walk runtime: the stuck watchdog, and the outcome of this frame's step.
@@ -71,7 +72,8 @@ impl Watch {
 }
 
 /// Builds the route of the companion of `unit` to `corner` from where it
-/// stands: the walk cells' path, the waypoint table and the first leg. The
+/// stands: the walk cells' path, its corners as check points in path order,
+/// and the first leg. The
 /// move completes within `goal_distance` of `corner`. A refusal is named.
 /// The walk's speed is the agent step's ([`advance`]).
 #[allow(clippy::too_many_arguments)]
@@ -105,8 +107,9 @@ pub fn depart(
         return Err("the navigation has no path to the target");
     }
     let unit = CharacterUnitId(unit);
-    let mut rng = crate::npc_objective::MemberRng::from_platform();
-    let phase = depart_toward(
+    // A companion walks to a point it was sent to: the path's corners in
+    // order, so the route ends on the target even where the path bends away.
+    let phase = depart_on_path(
         &unit,
         &mut state.0,
         &mut slot.0,
@@ -114,8 +117,6 @@ pub fn depart(
         walk_face,
         objective_face,
         corner,
-        None,
-        &mut rng,
         goal_distance,
     )
     .ok_or("the route has no waypoint beyond the companion")?;

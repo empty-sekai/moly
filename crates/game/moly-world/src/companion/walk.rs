@@ -165,14 +165,51 @@ pub fn step_motion(
         let Some((speed, _)) = avatar_pace(configs.as_deref(), site.as_deref()) else {
             continue;
         };
-        // A route of another navigation build is not walked on this one: the
-        // walk ends where the companion stands.
+        // A route of another navigation build is not walked on this one. As
+        // the roster's moves do, the walk departs again from where the
+        // companion stands to the same target once the objective face has
+        // the rebuilt field; with no path left it ends there.
         if !route.follows_generation(face.generation()) {
-            route.stop();
-            *phase = MotionPhase::Dwelling { remaining: None };
-            let watch = runtime.watch.map_or_else(|| Watch::at(now), |watch| watch.at_time(now));
-            runtime.end(watch, Motion::Stopped);
-            continue;
+            if objective.navigation_generation() != face.generation() {
+                continue;
+            }
+            let replanned = route.move_target().map(|(target, within)| {
+                companion::depart(
+                    companion.unit,
+                    &mut walk,
+                    &mut slot,
+                    &mut route,
+                    face,
+                    objective,
+                    target,
+                    within,
+                )
+            });
+            let departed = match replanned {
+                Some(Ok(next)) => {
+                    info!(
+                        "[companion] unit {}: the navigation was rebuilt; the walk departs again",
+                        companion.unit
+                    );
+                    *phase = next;
+                    true
+                }
+                Some(Err(reason)) => {
+                    info!(
+                        "[companion] unit {}: the navigation was rebuilt and the walk ends: {reason}",
+                        companion.unit
+                    );
+                    false
+                }
+                None => false,
+            };
+            if !departed {
+                route.stop();
+                *phase = MotionPhase::Dwelling { remaining: None };
+                let watch = runtime.watch.map_or_else(|| Watch::at(now), |watch| watch.at_time(now));
+                runtime.end(watch, Motion::Stopped);
+                continue;
+            }
         }
         let from = transform.translation;
         let mut watch = runtime.watch.map_or_else(|| Watch::at(now), |watch| watch.at_time(now));

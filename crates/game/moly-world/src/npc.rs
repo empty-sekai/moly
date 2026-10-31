@@ -925,6 +925,13 @@ impl RouteStops {
     pub fn follows_generation(&self, generation: u64) -> bool {
         self.generation == generation
     }
+
+    /// The target of the move in flight and the goal distance it completes
+    /// within, for a walker that departs again to the same target.
+    pub fn move_target(&self) -> Option<([f32; 3], f32)> {
+        self.completion
+            .map(|completion| (completion.target, completion.goal_distance))
+    }
 }
 
 /// 卡死基线（源卡死上报的跨帧状态）：上次记下的位置与时刻。`None` = 未立
@@ -1847,46 +1854,6 @@ pub fn depart(
     )
 }
 
-/// [`depart`] whose move completes at `goal_distance` from the target: an
-/// upper state tests its arrival against its own stopping distance, so its
-/// walk takes that distance as the move's goal.
-#[allow(clippy::too_many_arguments)]
-pub fn depart_toward(
-    unit: &CharacterUnitId,
-    state: &mut LawWalkState,
-    slot: &mut NpcPathWalkSlot,
-    route: &mut RouteStops,
-    walk_face: &crate::walk_face::WalkFace,
-    objective_face: &crate::npc_objective::ObjectiveFace,
-    corner: [f32; 3],
-    fit: Option<FitCandidate>,
-    rng: &mut crate::npc_objective::MemberRng,
-    goal_distance: f32,
-) -> Option<MotionPhase> {
-    route.outcome = None;
-    let start = reenter_navigation(state, route, walk_face)?;
-    let goal = [corner[0], corner[2]];
-    let polyline = if fit.is_some() {
-        let approach = walk_face.sample(goal, crate::npc_objective::SAMPLE_GATE_TOLERANCE)?;
-        walk_face.path_exact(start, approach)?
-    } else {
-        walk_face.path(start, goal)?
-    };
-    route_along(
-        unit,
-        state,
-        slot,
-        route,
-        walk_face,
-        objective_face,
-        corner,
-        fit,
-        rng,
-        polyline,
-        goal_distance,
-    )
-}
-
 /// Source `IsCompleted` judges against the talk data target itself, instead of
 /// the agent destination, once its switch distance reaches this (metres).
 const COMPLETION_DESTINATION_TOLERANCE: f32 = 0.25;
@@ -1988,8 +1955,9 @@ pub fn depart_along(
     )
 }
 
-/// [`depart_along`] whose move completes at `goal_distance` (see
-/// [`depart_toward`]).
+/// [`depart_along`] whose move completes at `goal_distance`: an upper state
+/// tests its arrival against its own stopping distance, so its walk takes
+/// that distance as the move's goal.
 #[allow(clippy::too_many_arguments)]
 pub fn depart_along_to(
     unit: &CharacterUnitId,
@@ -2068,6 +2036,52 @@ fn route_along(
             .sample(candidate, WAYPOINT_SAMPLE_DISTANCE)
             .is_some()
     });
+    begin_route(unit, state, slot, route, walk_face, objective_face, corner, fit, goal_distance)
+}
+
+/// A move to `corner` whose check points are the navigation path's own
+/// corners in path order, with no rest points: the walk follows the path to
+/// its end, which is the target. The roster's moves go through
+/// [`build_waypoints`], whose radial ordering ends a route that bends away
+/// from its target on the farthest bend rather than on the target.
+#[allow(clippy::too_many_arguments)]
+pub fn depart_on_path(
+    unit: &CharacterUnitId,
+    state: &mut LawWalkState,
+    slot: &mut NpcPathWalkSlot,
+    route: &mut RouteStops,
+    walk_face: &crate::walk_face::WalkFace,
+    objective_face: &crate::npc_objective::ObjectiveFace,
+    corner: [f32; 3],
+    goal_distance: f32,
+) -> Option<MotionPhase> {
+    route.outcome = None;
+    let start = reenter_navigation(state, route, walk_face)?;
+    let polyline = walk_face.path(start, [corner[0], corner[2]])?;
+    route.stops = lift_navigation_path(unit, objective_face, polyline)
+        .into_iter()
+        .map(|position| Waypoint {
+            position,
+            kind: WaypointKind::CheckPoint,
+        })
+        .collect();
+    begin_route(unit, state, slot, route, walk_face, objective_face, corner, None, goal_distance)
+}
+
+/// Starts the route whose stops are set: its target, completion and first
+/// leg.
+#[allow(clippy::too_many_arguments)]
+fn begin_route(
+    unit: &CharacterUnitId,
+    state: &mut LawWalkState,
+    slot: &mut NpcPathWalkSlot,
+    route: &mut RouteStops,
+    walk_face: &crate::walk_face::WalkFace,
+    objective_face: &crate::npc_objective::ObjectiveFace,
+    corner: [f32; 3],
+    fit: Option<FitCandidate>,
+    goal_distance: f32,
+) -> Option<MotionPhase> {
     route.next = 0;
     route.generation = walk_face.generation();
     route.goal = Some(corner);
