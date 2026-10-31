@@ -1,54 +1,58 @@
-//! One slot cell of the convert screen (`MysekaiConvertFurnitureSlot`): its
-//! three views (`Root/GaugeView`, `Root/ButtonView`, `Root/CountDown`), the
-//! four states their content follows, and the water-level tween it runs.
+//! One slot cell of the convert screen (`MysekaiConvertFurnitureSlotCellView`):
+//! its three views (`Root/GaugeView`, `Root/ButtonView`, `Root/CountDown`),
+//! the four states their content follows, and the water-level tween it runs.
 //!
-//! Source structure:
-//! - `MysekaiConvertFurnitureSlotCellView.Setup(model, onSelected, onShorten)`
-//!   records the model and its state, then sets up the gauge, the button and
-//!   the timer views. `UpdateSlotView()` refreshes the numbers when the state
-//!   did not change (`RefreshView`) and rebuilds all three views when it did
-//!   (`SetupView`).
-//! - `MysekaiConvertFixtureSlotCellGaugeView`: `SetupView(state)` turns on one
-//!   content per state (locked: `Lock`; ready: `ReadyContent`; processing:
-//!   `ProcessingContent` and its `ReceiveCountText`; complete:
-//!   `CompleteMessage`), hides the `Base/WaveImage` for locked and ready and
-//!   shows it at `NormalizedProgressTime` for processing and at 1 for
-//!   complete, and turns on the processing or the complete highlight root;
-//!   the cell's `Button` takes a click for locked and ready slots only.
-//!   `RefreshInProcessing` / `RefreshInComplete` write
-//!   `WORD_CONVERT_PROGRESS_FORMAT` with the completed and the remaining
-//!   converts and set the wave's progress. `SetupEffect` instantiates effect
-//!   prefabs from a bundle that is not part of the public asset root (named,
-//!   not loaded). `PlayConvertStartAsync` (the wave from 0 over the start's
-//!   seconds, halving its time), `PlayReceiveAsync(from, to)` and
-//!   `PlayShortenAsync(progress)` tween the wave and keep its tween while it
-//!   runs.
-//! - `MysekaiConvertFixtureSlotCellButtonView`: `SetupView` shows
-//!   `Off`/`On`/`UnReceive`/`Receiveable` by state and `IsReceivable`, and
-//!   enables its `Button` for a processing slot that has something to receive
-//!   and for a complete one; `PlayConvertStart` shows the processing,
-//!   nothing-to-receive look at once; `Refresh` follows a processing slot.
-//! - `MysekaiConvertFixtureSlotCellTimerView`: `SetupView` sets the count
-//!   down background's alpha to 0.1 with `WORD_THREE_HYPHEN` and hides the
-//!   skip button for every state but processing, which shows the remaining
-//!   time (`TimeSpan.ToTimeString`) and the skip button.
-//!   `SetupShortenSlotButton` enables the skip button by `IsReleasedShorten`
-//!   and shows `WORD_CONVERT_MACHINE_LEVEL` with the release level on the
-//!   button's cover while the skip is locked.
+//! Input: the cell's nodes ([`CellNodes`]); the slot model read at the
+//! frame's clock ([`SlotModel`]) and the items of its context; the wording of
+//! the layout and the glyph atlas the texts are drawn with.
+//!
+//! Output: the cell's view state ([`CellView`]), which content, wave
+//! progress, button look, timer text and skip button a state shows, and its
+//! drawing into the page's view ([`Cell::draw`]); the wave tween of a start,
+//! a receive or a skip ([`WaveTween`]); the view state the page reads to
+//! decide which node takes a press.
+//!
+//! Invariants, one per view:
+//! - The gauge shows one content per state (locked: `Lock`; ready:
+//!   `ReadyContent`; processing: `ProcessingContent` with its
+//!   `ReceiveCountText`; complete: `CompleteMessage`), hides the
+//!   `Base/WaveImage` for locked and ready, shows it at
+//!   `NormalizedProgressTime` for processing and at 1 for complete, and turns
+//!   on the processing highlight root for processing and the complete one for
+//!   complete. The gauge's `Button` takes a press for locked and ready slots
+//!   only. A processing cell's line is `WORD_CONVERT_PROGRESS_FORMAT` with
+//!   the completed and the remaining converts.
+//! - The button view shows `Off` / `On` / `UnReceive` / `Receiveable` by
+//!   state and `IsReceivable`, and enables its `Button` for a processing slot
+//!   with something to receive and for a complete one.
+//! - The timer view sets the count down background's alpha to 0.1
+//!   ([`TIMER_IDLE_ALPHA`]) with `WORD_THREE_HYPHEN` and hides the skip
+//!   button for every state but processing, which shows the remaining time
+//!   (`TimeSpan.ToTimeString`, [`to_time_string`]) and the skip button; the
+//!   skip button is enabled by `IsReleasedShorten`, and its cover carries
+//!   `WORD_CONVERT_MACHINE_LEVEL` with the release level while the skip is
+//!   locked (`SetupShortenSlotButton`).
 //!
 //! The numbers are read through the slot model at the frame's clock (its
 //! methods, not the module's free helpers), and each cell keeps the values it
 //! last set so a refresh of its numbers (`SlotChange::Numbers`) is told from
-//! a rebuild of its views (`SlotChange::State`).
+//! a rebuild of its views (`SlotChange::State`). A running tween owns the
+//! wave until it lands, so a refresh does not overwrite it.
+//!
+//! Boundaries (named, nothing drawn in their place): the three effect prefabs
+//! ([`EFFECT_PREFABS`]) load from a bundle that is not part of the public
+//! asset root, so none is drawn; the countdown background's alpha is not what
+//! the layout draws, so the cells' serialized alpha stands; the gauge's
+//! receive and skip wave duration ([`RECEIVE_SECONDS`]) is not known.
 
 use std::collections::BTreeSet;
 
 use bevy::prelude::*;
+use moly_ui::ui_inputs::BalloonArt;
+use moly_ui::ui_layout::{UiLayouts, UiPrefabView};
 
 use super::super::model::{ItemContext, SlotChange, SlotModel, SlotState};
 use super::put_text;
-use crate::ui_inputs::BalloonArt;
-use crate::ui_layout::{UiLayouts, UiPrefabView};
 
 /// `WORD_CONVERT_PROGRESS_FORMAT`: the completed and the remaining converts.
 pub const PROGRESS_FORMAT: &str = "WORD_CONVERT_PROGRESS_FORMAT";
@@ -60,19 +64,18 @@ pub const THREE_HYPHEN: &str = "WORD_THREE_HYPHEN";
 pub const MACHINE_LEVEL: &str = "WORD_CONVERT_MACHINE_LEVEL";
 /// The count down background's alpha for a slot that is not processing.
 pub const TIMER_IDLE_ALPHA: f32 = 0.1;
-/// `_receiveAnimationSeconds`: the receive and the shorten wave tween's
-/// duration. The gauge's serialized component in
-/// `screens/ScreenLayerMysekaiConvertFurniture.json` (node
-/// `.../MysekaiConvertFurnitureSlotView/Slots/MysekaiConvertFurnitureSlot/Root/GaugeView`,
-/// `Sekai.Mysekai.MysekaiConvertFixtureSlotCellGaugeView`) is `partial` in that
-/// document (`"state": "no decoder (partial; raw length kept)"`, `rawLength`
-/// 256, `fields` empty): the field's name and value are not extracted, and
-/// this product has no reader for partial MonoBehaviour bytes. No duration is
-/// pinned here; the wave is drawn as the slot's progress by the slots' read.
+/// `_receiveAnimationSeconds`: the receive and the skip wave tween's piece
+/// duration. The gauge's component in the screen document
+/// (`screens/ScreenLayerMysekaiConvertFurniture.json`, the
+/// `Sekai.Mysekai.MysekaiConvertFixtureSlotCellGaugeView` of
+/// `MysekaiConvertFurnitureSlot/Root/GaugeView`) carries no readable fields:
+/// the document keeps its raw bytes (`rawLength` 256) and this product has no
+/// reader for them, so the value is unknown. No duration is pinned here; the
+/// wave is drawn at the slot's progress by the slots' next read.
 pub const RECEIVE_SECONDS: Option<f32> = None;
-/// The three effects `SetupEffect` instantiates in the gauge's roots. The
-/// bundle they load from is not part of the public asset root: named, not
-/// loaded.
+/// The three effects the gauge's roots hold (`fx_mysekai_convert_furniture`
+/// wait, highlight light and highlight). They load from a bundle that is not
+/// part of the public asset root: named, not loaded.
 pub const EFFECT_PREFABS: [&str; 3] = [
     "fx_mysekai_convert_furniture_wait",
     "fx_mysekai_convert_furniture_highlight_light",
@@ -146,8 +149,8 @@ impl CellNodes {
         let gauge = sub(root, "Root/GaugeView");
         let button_view = sub(root, "Root/ButtonView");
         let count_down = sub(root, "Root/CountDown");
-        // `_shortenSlotLockedButton` (the comment in the source's fields
-        // names it) is the skip button's `Cover` object.
+        // The skip's lock button (`_shortenSlotLockedButton`) is the skip
+        // button's `Cover` object.
         let shorten = sub(&count_down, "ShortenSlotButton");
         let shorten_cover = sub(&shorten, "Cover");
         let lock_balloon = sub(&shorten_cover, "UIPartsCommonBalloon");
@@ -202,8 +205,9 @@ pub fn text(layouts: &UiLayouts, key: &str) -> String {
     layouts.wording(key)
 }
 
-/// `string.Format(WordingManager.Get(key), args)`; a format this reader
-/// cannot apply is named once and the line is left empty.
+/// `string.Format(WordingManager.Get(key), args)`: the wording's text with
+/// its arguments filled in. A format this reader cannot apply is named once
+/// and the line is left empty.
 pub fn format(layouts: &UiLayouts, seen: &mut BTreeSet<String>, key: &str, args: &[String]) -> String {
     let source = layouts.wording(key);
     match moly_law::text::custom_text_mesh::format_wording(&source, args) {
@@ -219,8 +223,8 @@ pub fn format(layouts: &UiLayouts, seen: &mut BTreeSet<String>, key: &str, args:
 }
 
 /// `TimeSpan.ToTimeString()`: hours, minutes and seconds as `HH:mm:ss`, the
-/// hours not folded into days. The source's extension is not in this tree:
-/// the format is unverified against the client.
+/// hours not folded into days (26:00:05, not 02:00:05); a negative time is
+/// zero. The format is unverified against the client.
 pub fn to_time_string(ms: i64) -> String {
     let total = ms.max(0) / 1000;
     let (hours, minutes, seconds) = (total / 3600, (total % 3600) / 60, total % 60);
@@ -241,10 +245,10 @@ pub fn released_shorten_level(ctx: ItemContext<'_>) -> i32 {
 }
 
 /// The water-level tween the cell runs: `DOVirtual.Float(from, to,
-/// _receiveAnimationSeconds, ...)` with the ease `SetEase` leaves unset, the
-/// DOTween default `Ease.OutQuad` (`DOTween.Init` `defaultEaseType =
-/// Ease.OutQuad`; `EaseManager.Evaluate` case 8: `num27 = t / d + -1`,
-/// `1 - num27 * num27`). It reaches `to` only at the end of its duration.
+/// _receiveAnimationSeconds, ...)` with no ease set, so the ease is the
+/// library default `Ease.OutQuad` (case 8 of `EaseManager.Evaluate`:
+/// `num27 = t / d + -1`, `1 - num27 * num27`, the same ramp as
+/// `out_quad`). It reaches `to` only at the end of its duration.
 #[derive(Debug, Clone, Copy)]
 pub struct WaveTween {
     pub from: f32,
@@ -262,14 +266,14 @@ impl WaveTween {
         } else {
             1.0
         };
-        let value = self.from + (self.to - self.from) * crate::ui_inputs::out_quad(t);
+        let value = self.from + (self.to - self.from) * moly_ui::ui_inputs::out_quad(t);
         (value.clamp(0.0, 1.0), self.elapsed >= self.seconds)
     }
 }
 
-/// One cell's view state, as the source's three sub-views hold it. The
-/// default is a cell with no state set up yet (every content off, the timer
-/// at its not-processing look).
+/// One cell's view state, as its three views (gauge, button, countdown) hold
+/// it. The default is a cell with no state set up yet (every content off, a
+/// blank timer at its not-processing look).
 #[derive(Debug, Clone)]
 pub struct CellView {
     /// `_slotState`.
@@ -390,8 +394,8 @@ impl Cell {
         self.view.item_empty = model.item_id().is_none();
     }
 
-    /// `MysekaiConvertFurnitureSlotCellView.Setup`: the slot view, then
-    /// `SetupView` of the three sub-views.
+    /// `MysekaiConvertFurnitureSlotCellView.Setup`: the slot view, then all
+    /// three views set up for the slot's state.
     pub fn setup(
         &mut self,
         model: &SlotModel<'_>,
@@ -433,9 +437,11 @@ impl Cell {
         })
     }
 
-    /// `SetupView`: all three sub-views rebuilt for the slot's state. The
-    /// wave tween runs while the state holds (`_playWaveAnimation && state
-    /// == state`), so a rebuild keeps it.
+    /// `SetupView`: all three views rebuilt for the slot's state. The wave
+    /// tween runs on while the state holds (`_playWaveAnimation && state ==
+    /// state`), so a rebuild keeps it and only sets the wave of a slot without
+    /// a tween: the progress for processing, a full wave (1) for complete, and
+    /// none shown for locked or ready at 0.
     pub fn setup_view(
         &mut self,
         model: &SlotModel<'_>,
@@ -451,9 +457,11 @@ impl Cell {
         view.state = Some(state);
         // The gauge: one content per state (`RefreshContent`); the wave only
         // while processing or complete; the highlight root of processing or
-        // complete. The gauge's `Button` takes the locked and ready cells'
-        // press (`BindSlotButton`); the button view's `Button` takes a
-        // processing cell's receive and a complete cell's press.
+        // complete, and its wave at the slot's progress for processing and at
+        // the fill's end for complete. The gauge's `Button` takes the locked
+        // and ready cells' press (`BindSlotButton`); the button view's
+        // `Button` takes a processing cell's receive and a complete cell's
+        // press.
         view.gauge_button = matches!(state, SlotState::Locked | SlotState::Ready);
         if self.tween.is_none() {
             view.wave_progress = match state {
@@ -587,10 +595,11 @@ impl Cell {
         self.view.timer_text = Some(to_time_string(model.remaining_time_to_complete_convert()));
     }
 
-    /// `Button.PlayConvertStart()`: `On` and `UnReceive` on, `Receiveable` off,
-    /// the button disabled. The source enables its off image rather than its
-    /// on image (the `Off`/`On` contents here are named by state, not by the
-    /// image fields); the cell keeps the processing look the state gives it.
+    /// `Button.PlayConvertStart()`: `On` and `UnReceive` on, `Receiveable`
+    /// off, the button disabled. The button's enabled state shows its off
+    /// face rather than its on face (the `Off` / `On` contents here follow the
+    /// state, not the image fields); the cell keeps the processing look the
+    /// state gives it.
     #[allow(dead_code)] // The start's process (U9) plays it after its request's answer.
     pub fn play_convert_start_button(&mut self) {
         self.view.on = true;
@@ -651,8 +660,8 @@ impl Cell {
         }
     }
 
-    /// `Dispose`: the wave's `Dispose` and the three effects' prefabs
-    /// destroyed (the layout draws no effect prefab, named).
+    /// `Dispose`: the wave tween and the effects dropped (the layout draws no
+    /// effect prefab, named).
     pub fn dispose(&mut self) {
         self.tween = None;
         self.view.effect = false;
@@ -718,11 +727,11 @@ impl Cell {
         view.set_visible(&nodes.receivable, self.view.receivable);
         view.set_visible(&nodes.interact, self.view.interact);
         view.set_visible(&nodes.effect, self.view.effect);
-        // The count down: the source's base image alpha (0.1 when not
-        // processing) is not what the layout draws (named); the text and the
-        // skip button are. The skip button's enabled is its face: the
-        // source's `disabledImage` cover (`ShortenSlotButton/Cover`) shows
-        // while the skip is locked, and its balloon line is that cell's
+        // The count down: its base image alpha (0.1 when not processing) is
+        // not what the layout draws (named); the text and the skip button are.
+        // The skip button's enabled state shows as its face: the
+        // `disabledImage` cover (`ShortenSlotButton/Cover`) shows while the
+        // skip is locked, and its balloon line is that cell's
         // `WORD_CONVERT_MACHINE_LEVEL` line, shown when the cover opens it.
         view.set_visible(&nodes.shorten, self.view.shorten_visible);
         view.set_visible(&nodes.shorten_icon, self.view.shorten_visible);

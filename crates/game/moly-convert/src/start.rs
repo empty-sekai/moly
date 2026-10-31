@@ -1,95 +1,80 @@
-//! The convert screen's start and skip chains (`ConfirmConvertStart` ->
-//! `ConvertStartProcess` -> `ConvertStartProcessAsync`, `OnShortenSlot` ->
-//! `OnClickOkShortenSlot` -> `ShortenSlotProcessAsync`) and the one request
-//! each sends.
+//! The convert screen's start and skip chains and the one request each
+//! sends: `ConfirmConvertStart` -> `ConvertStartProcess` ->
+//! `ConvertStartProcessAsync`, and `OnShortenSlot` -> `OnClickOkShortenSlot` ->
+//! `ShortenSlotProcessAsync`.
 //!
-//! Source structure:
-//! - `Presenter.ConfirmConvertStart(slotId, model)` shows the two-button
-//!   `MysekaiConvertStartConfirmDialog` with no body key; its OK calls
-//!   `ConvertStartProcess(slotId, model)` and its cancel is null.
-//! - `ConvertStartProcess`: for a slot the colourful pass extends,
-//!   `GetOnceConvertibleCount(slotId, model)` of 0 or less shows the
-//!   one-button `Common1ButtonDialog` with `MSG_CONVERT_NOT_EXPIRED_PASS` (its
-//!   OK, `WORD_OK`, is `ChangeView(ViewType.Slot)`, so the close button, an
-//!   outside tap and the back key do the same) and returns; a count below the
-//!   model's `ConvertCount` shows it with `MSG_CONVERT_UPPER_LIMIT_PASS` (its
-//!   OK refreshes the item select page) and returns. Any other slot goes on to
-//!   the request.
-//! - `ConvertStartProcessAsync`: `ExecuteMysekaiConvertStartAPIAsync` sends
-//!   `PostUserMysekaiConvertStartApi{ slotId, mysekaiConvertItemId,
-//!   convertCount, choiceId }`. Only the service's success answer (the API's
-//!   success state, then `UserDataManager.UpdateAll(response)`) runs the
-//!   rest: `ChangeView(ViewType.Slot)`, `SetNeedsUpdateSlot(slotId, false)`,
-//!   then `PlayConvertStartAsync(slotId)`: `SlotView` finds the cell of that
-//!   slot and calls its `PlayConvertStartAsync`, which calls the timer view's
-//!   `PlayConvertStart(model)` and the button view's `PlayConvertStart()` once
-//!   and holds the gauge's `PlayConvertStartAsync(model)`; that one reads the
-//!   model's state again, shows the processing content with the progress line
-//!   (`WORD_CONVERT_PROGRESS_FORMAT` of the completed and the remaining
-//!   converts) while the wave hides, waits `_settingAnimationSeconds` with
-//!   the cancellation swallowed, reads the state again, puts the wave at
-//!   `NormalizedProgressTime`, shows it and fades it in; then
-//!   `SetNeedsUpdateSlot(slotId, true)`. Any answer that is not the success
-//!   (a refusal, or a reply of another kind) runs nothing after the request.
-//! - `Presenter.OnShortenSlot(slot)` shows the two-button
-//!   `MysekaiConvertFurnitureShortenDialog`, whose OK calls
-//!   `OnClickOkShortenSlot(slot)`; that one sends only while the slot's state
-//!   is `Processing`, as the dialog's model reads it each frame.
-//! - `ShortenSlotProcessAsync`: `ExecuteMysekaiConvertShortenAPIAsync(slot)`
-//!   sends `PostUserMysekaiConvertShortenApi{ slotId, consumeJewelQuantity =
-//!   slot.ConsumedJewelQuantityForShorten }`, and after the success only
-//!   `SetNeedsUpdateSlot(slotId, false)`, `DisableTapScreen`, the cell's
-//!   `PlayShortenAsync(NormalizedProgressTime)` (the gauge's
-//!   `PlayShortenAsync`, which tweens the wave's progress to 1 over
-//!   `_receiveAnimationSeconds`), `EnableTapScreen` and
-//!   `SetNeedsUpdateSlot(slotId, true)`.
+//! Input: the request a dialog confirmed, waiting in [`ConvertScreen`]
+//! ([`StartIntent`] / [`ShortenIntent`]); the convert masters, the user's
+//! copies and the holdings, read again where a request is made; the frame's
+//! clock; the link and the answers the user data reader took off it.
 //!
-//! One request is in flight at a time ([`MysekaiConvertService`]): an answer
-//! of another call's number leaves the request waiting, and a `link_lost`
-//! answer of the convert call that no longer matches it finishes the request
-//! on the failure path, as the mission receive's service reads its own.
+//! Output: one start or skip request on the link ([`ConvertRequest`]:
+//! `PostUserMysekaiConvertStartApi` with the item's id, count and choice, or
+//! `PostUserMysekaiConvertShortenApi` with the slot's skip price), one in
+//! flight at a time ([`MysekaiConvertService`]); after its success, the slot
+//! page's start or skip animation ([`play_convert_start`], [`play_shorten`])
+//! and the view change onto the slot page.
 //!
-//! Product mapping, named:
-//! - The two dialogs this chain opens are the convert dialogs' unit (324 and
-//!   325), not built here: the request a dialog's OK makes waits in
+//! Invariants:
+//! - One request is in flight at a time: an answer of another call's number
+//!   leaves the request waiting, and a `link_lost` answer of the convert call
+//!   that no longer matches it finishes the request on the failure path (as
+//!   the mission receive's service reads its own).
+//! - For a slot the colourful pass extends, `GetOnceConvertibleCount` of 0 or
+//!   less, or a count below the asked `ConvertCount`, stops the start before
+//!   any request is made. Any other slot goes on to the request.
+//! - A skip is sent only while the slot's state is `Processing`, as the skip
+//!   dialog's model reads it each frame.
+//! - Only a success answer runs what follows the request: `ChangeView(Slot)`,
+//!   `SetNeedsUpdateSlot(slot, false)`, the cell's animation,
+//!   `SetNeedsUpdateSlot(slot, true)`. Any other answer (a refusal, or a reply
+//!   of another kind) runs nothing after the request.
+//! - A request written while another waits is refused by name; a request
+//!   whose dialog the screen closes is dropped with it.
+//!
+//! Boundaries (each a named line, nothing shown in its place):
+//! - The start confirm (dialog 324) and the skip dialog (325) are
+//!   [`super::dialogs`]: the request waits in
 //!   [`ConvertScreen::start_intent`] / [`ConvertScreen::shorten_intent`]
-//!   until the dialog's OK reads it and answers [`StartIntent::confirm`] /
-//!   [`ShortenIntent::confirm`]. A request written while one waits is refused
-//!   by name; a request whose dialog the screen closes is dropped with it.
-//! - The dialog's Setup holds the model the presenter passes it, which this
-//!   module cannot keep (the item model borrows the user and the master
-//!   tables): the slot, the item's id, its choice and the `ConvertCount` are
-//!   kept instead, and the model is read again where the request is made.
+//!   until the dialog reads it and answers [`StartIntent::confirm`] /
+//!   [`ShortenIntent::confirm`]. The dialog keeps the slot, the item's id, its
+//!   choice and the `ConvertCount` rather than the model (the item model
+//!   borrows the user and the master tables), and the model is read again
+//!   where the request is made.
+//! - The two one-button pass dialogs (`Common1ButtonDialog` with
+//!   `MSG_CONVERT_NOT_EXPIRED_PASS`, whose OK is `ChangeView(ViewType.Slot)`
+//!   so the close button, an outside tap and the back key do the same; and
+//!   with `MSG_CONVERT_UPPER_LIMIT_PASS`, whose OK refreshes the item select
+//!   page) are not built: which one would show is named and no request is
+//!   made.
 //! - `DisableTapScreen` / `EnableTapScreen` around the skip: the click cover
-//!   this tree has is the layout editor's (`ScreenManager`'s own note), and
-//!   the skip's wave lasts the serialized `_receiveAnimationSeconds`, which
-//!   the prefab overrides (its own seconds are unverified); the pair is
-//!   named once, and the wave is the cell's tween the slot page steps.
-//! - The start's cell animation runs on the slot page, which
-//!   `ChangeView(Slot)` closes the item select page onto. The gauge's end
-//!   state is the slot's own `NormalizedProgressTime` in any case, which the
-//!   slots' refresh draws; the gauge's processing content, its wait and its
-//!   fade are named.
-//! - The wave's curve is the source's linear `_receiveAnimationCurve`
-//!   (`AnimationCurve.Linear(0, 0, 1, 1)`) on the source's out-quad scale
-//!   curve; a prefab may carry another (unverified).
+//!   this tree has is the layout editor's; the skip's wave lasts
+//!   `_receiveAnimationSeconds`, whose value the prefab overrides (unverified);
+//!   the pair is named once, and the wave is the cell's tween the slot page
+//!   steps (the skip's wave runs the progress up to 1).
+//! - The gauge's start animation: its processing content, its wait
+//!   `_settingAnimationSeconds` and its fade are named. The wave ends at the
+//!   slot's own `NormalizedProgressTime`, which the slots' refresh draws.
+//! - The wave's curve: the linear `_receiveAnimationCurve`
+//!   (`AnimationCurve.Linear(0, 0, 1, 1)`) on the out-quad scale curve a
+//!   prefab may override (unverified).
 
 use std::collections::BTreeSet;
 
 use bevy::prelude::*;
+use moly_features::userdata::convert::ClientConvertSlots;
+use moly_features::userdata::inventory::ClientMysekaiInventory;
+use moly_features::userdata::{Answered, ClientUserData, SentCalls, ServerPending};
 use moly_link::ServerLink;
 use moly_masters::load::MasterTables;
 use moly_protocol::api::{
     ConvertPost, UserMysekaiConvertShortenRequest, UserMysekaiConvertStartRequest,
 };
 use moly_protocol::{Call, CallKind, Reply};
+use moly_ui::ui_layout::UiLayouts;
 
 use super::model::{ItemContext, ItemModel, SlotModel, SlotState};
 use super::screen::{note_once, not_built, now_ms, read_user, ConvertScreen, ViewType};
-use crate::ui_layout::UiLayouts;
-use crate::userdata::client::inventory::ClientMysekaiInventory;
-use crate::userdata::convert::ClientConvertSlots;
-use crate::userdata::{Answered, ClientUserData, SentCalls, ServerPending};
 
 /// `ShowConvertNotExpiredPassDialog`'s body (`Common1ButtonDialog`).
 pub const NOT_EXPIRED_PASS: &str = "MSG_CONVERT_NOT_EXPIRED_PASS";
@@ -109,9 +94,10 @@ const LINK_LOST: &str = "link_lost";
 // What a dialog's OK asks of this chain
 // ---------------------------------------------------------------------------
 
-/// The start confirm dialog's view model
-/// (`new MysekaiConvertStartConfirmViewModel(model)`): the model, and its
-/// `ConvertCount`, both as the dialog was set up.
+/// What the start confirm dialog holds of the item
+/// (`MysekaiConvertStartConfirmViewModel`): the item, its choice and its
+/// `ConvertCount`, as the dialog was set up. The model itself is not held (it
+/// borrows the user and the master tables).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StartItem {
     /// `model.Id` (`GetMasterMysekaiConvertItem`'s row).
@@ -278,7 +264,7 @@ pub fn confirm_convert_start(screen: &mut ConvertScreen, ctx: ItemContext<'_>) {
         );
     }
     info!(
-        "[convert] ConfirmConvertStart(slot {slot_id}, item {item_id}, count {count}): Show2ButtonDialog(MysekaiConvertStartConfirmDialog, onOK: _ => ConvertStartProcess, onCancel: null).Setup(new MysekaiConvertStartConfirmViewModel(model))"
+        "[convert] ConfirmConvertStart(slot {slot_id}, item {item_id}, count {count}): the start confirm dialog opens; its OK continues with the start, its cancel closes it"
     );
     not_built(
         seen,
@@ -302,7 +288,7 @@ pub fn on_shorten_slot(screen: &mut ConvertScreen, ctx: ItemContext<'_>, slot_id
         screen.shorten_intent = Some(ShortenIntent { slot_id, pass_slot });
     }
     info!(
-        "[convert] OnShortenSlot(slot {slot_id}): Show2ButtonDialog(MysekaiConvertFurnitureShortenDialog, onOK: _ => OnClickOkShortenSlot, onCancel: null).Setup(slot)"
+        "[convert] OnShortenSlot(slot {slot_id}): the skip dialog opens over the slot; its OK continues with the skip, its cancel closes it"
     );
     not_built(
         screen.seen_mut(),
@@ -332,11 +318,11 @@ pub fn convert_start_process(screen: &mut ConvertScreen, ctx: ItemContext<'_>, i
     let step = start_step(ctx, intent.slot_id, item, screen.seen_mut());
     match step {
         StartStep::NotExpired => {
-            info!("[convert] ShowConvertNotExpiredPassDialog: Show1ButtonDialog(Common1ButtonDialog, {NOT_EXPIRED_PASS}, {OK}, onOK: _ => ChangeView(ViewType.Slot), Layer_Dialog, {DIALOG_SIZE})");
+            info!("[convert] ShowConvertNotExpiredPassDialog: Show1ButtonDialog(Common1ButtonDialog, {NOT_EXPIRED_PASS}, {OK}, onOK: _ => ChangeView(ViewType.Slot), Layer_Dialog, {DIALOG_SIZE}) is not built; no start is sent");
             not_built(screen.seen_mut(), "the one-button dialog (Common1ButtonDialog)");
         }
         StartStep::UpperLimit => {
-            info!("[convert] ShowConvertUpperLimitPassDialog: Show1ButtonDialog(Common1ButtonDialog, {UPPER_LIMIT_PASS}, {OK}, onOK: _ => ItemSelectView.Refresh, Layer_Dialog, {DIALOG_SIZE})");
+            info!("[convert] ShowConvertUpperLimitPassDialog: Show1ButtonDialog(Common1ButtonDialog, {UPPER_LIMIT_PASS}, {OK}, onOK: _ => ItemSelectView.Refresh, Layer_Dialog, {DIALOG_SIZE}) is not built; no start is sent");
             not_built(screen.seen_mut(), "the one-button dialog (Common1ButtonDialog)");
         }
         StartStep::Send => {
@@ -452,7 +438,8 @@ pub struct ConvertSent {
     pub sent: ServerPending,
 }
 
-/// The chain's one request (each of the source's two API services holds one).
+/// The chain's one request (the two API services of the screen each hold
+/// one, here one resource).
 #[derive(Resource, Debug, Default)]
 pub struct MysekaiConvertService {
     in_flight: Option<ConvertSent>,

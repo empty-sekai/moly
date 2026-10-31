@@ -1,43 +1,50 @@
 //! The convert screen's item select page (`MysekaiConvertFurnitureItemSelectView`,
-//! `MysekaiConvertFurnitureItemSelectState`) and its list.
+//! `MysekaiConvertFurnitureItemSelectState`) and its list: the item to convert
+//! is chosen here, per tab, with the detail panel beside the list.
 //!
-//! The source's structure:
-//! - `ItemSelectState.Setup(slotId)` runs `ItemSelectView.Setup(slotId,
-//!   onConvertStart)`: the tab cells come from
-//!   `CreateItemSelectTabListCellDataList` (one per `mysekaiConvertItemTabs`
-//!   row, in `seq` order, the first selected), the models from
-//!   `CreateMysekaiConvertItemModels`. `OnEnter` then runs `Refresh()` and
-//!   `Show()`; a tab list with no row hides the page.
-//! - `Refresh()`: `GetValidConvertItemModels` (displayable and of the
-//!   selected tab, in `CompareTo` order), the first selected,
-//!   `RefreshListView(..., resetContentPosition: true)` and the detail view
-//!   refreshed.
-//! - `OnSelectTab(vd)`: the tab id, then `Refresh()`.
-//! - `OnSelectedConvertItem(item)`: the item becomes the selected one, the
-//!   list is refreshed with `resetContentPosition: false` (the scroll stays)
-//!   and the detail view refreshed.
-//! - A list cell (`MysekaiConvertFurnitureItemSelectListCell`): its thumbnail
-//!   (`SetupObtainedItemThumbnail`), `SetupInfo`'s one-of-three badge (locked
-//!   with its balloon, sold out, not enough consumed resource),
-//!   `RefreshFrame`'s selected frame, and `SetupSelectedButton`'s press: a
-//!   released or not-yet-selected cell selects the item, and a long press
-//!   opens `MysekaiConvertItemDetailDialog`.
+//! Input: the composed document ([`compose`]: the screen's document with the
+//! page's tab cells, its cell pool and the detail panel's consumption rows);
+//! the tab rows of the convert masters (`CreateItemSelectTabListCellDataList`:
+//! one tab per `mysekaiConvertItemTabs` row, in `seq` order) and the item
+//! models the list offers at the frame's clock (`GetValidConvertItemModels`);
+//! the pointer's presses, moves, wheel and long press.
 //!
-//! The source's tab cell (`MysekaiConvertFixtureItemSelectTab`) and list cell
-//! (`MysekaiConvertFurnitureItemSelectListCell`) prefabs are not part of the
-//! public asset root: the screen's scroller names the list cell by an external
-//! pointer, and no document is named after either class. This page
-//! instantiates both from documents the root does carry: the tab cell from the
-//! shared left tab list cell, the list cell from the shared item thumbnail
-//! cell whose `UIPartsItemThumbnail` is the one the source's cell also holds,
-//! and each cell's three badges from the detail panel's own badge subtrees
-//! (the nodes the source's detail view uses), so every drawn image is the
-//! document's.
+//! Output: the page's drawing each frame ([`ItemSelectPage::draw`]): the tab
+//! backs, the list cells with their thumbnail, badge and selected frame, the
+//! empty line and the detail panel; the action a press asks the screen for
+//! ([`ItemAction`]): another tab (then a refresh), another item, or the item
+//! detail dialog.
 //!
-//! Named: the tab master's `name` and `assetbundleName` columns (the convert
-//! master reader keeps only each tab's id and `seq`), so a tab draws its
-//! selected and unselected backs without a label or icon; the list's inertia,
-//! its bar handle and the cells' tap effects.
+//! Invariants: the page opens on the slot whose gauge was pressed
+//! (`Setup(slotId)`), with the tab in `seq` order first selected; `Refresh()`
+//! selects the first item of the tab and puts the list back at its top;
+//! selecting an item keeps the scroll where it is. A tab list with no row
+//! hides the page. A press keeps the node it started on, so a release acts
+//! only on that same control; a press that moves past the drag threshold
+//! scrolls the list instead, and a press held for the long-press threshold
+//! opens the detail instead of selecting.
+//!
+//! A list cell shows one of three badges (`SetupInfo`): locked with its
+//! balloon (the item is not released at the machine's level), sold out (it has
+//! no convert left) or not enough consumed resource (its consumption box is
+//! not held). A press on a locked, already selected cell opens that balloon
+//! rather than selecting again (`SetupSelectedButton`).
+//!
+//! Boundaries (each a named line, nothing drawn in its place):
+//! - The tab cell (`MysekaiConvertFixtureItemSelectTab`) and list cell
+//!   (`MysekaiConvertFurnitureItemSelectListCell`) prefabs are not part of the
+//!   public asset root: the screen's scroller names the list cell by an
+//!   external pointer, and no document is named after either class. This page
+//!   instantiates both from documents the root does carry: the tab cell from
+//!   the shared left tab list cell, the list cell from the shared item
+//!   thumbnail cell whose `UIPartsItemThumbnail` is the one the cell holds,
+//!   and each cell's three badges from the detail panel's own badge subtrees,
+//!   so every drawn image is the document's.
+//! - The tab master's `name` and `assetbundleName` columns (the convert master
+//!   reader keeps only each tab's id and `seq`): a tab draws its selected and
+//!   unselected backs without a label or icon.
+//! - The list's inertia, its bar handle and the cells' tap effects are not
+//!   run.
 
 pub mod list;
 
@@ -45,13 +52,13 @@ use std::collections::BTreeSet;
 
 use bevy::prelude::*;
 use moly_assets::ui_layout::UiPrefab;
+use moly_ui::ui_inputs::BalloonArt;
+use moly_ui::ui_layout::{UiLayouts, UiPrefabView};
 
 use super::detail::{DetailNodes, DetailPanel, Masters};
 use super::model::{ItemContext, ItemModel};
 use super::screen::note_once;
 use super::slot::put_text;
-use crate::ui_inputs::BalloonArt;
-use crate::ui_layout::{UiLayouts, UiPrefabView};
 use list::{Grid, Scroll};
 
 /// The tab cell document (a shared left tab list cell).
@@ -379,7 +386,7 @@ pub enum ItemAction {
     SelectTab(i32),
     /// `OnSelectedConvertItem(item)`.
     SelectItem(i32),
-    /// `ShowDetailDialog` (a later unit).
+    /// `ShowDetailDialog`: the item detail dialog.
     Detail(i32),
 }
 

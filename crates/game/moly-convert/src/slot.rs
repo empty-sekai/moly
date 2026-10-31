@@ -1,54 +1,44 @@
 //! The convert screen's slot page (`MysekaiConvertFurnitureSlotView`) and
-//! its state (`MysekaiConvertFurnitureSlotStatusState`).
+//! its state (`MysekaiConvertFurnitureSlotStatusState`): one cell per machine
+//! slot, its gauge, receive look, countdown and skip button.
 //!
-//! Source structure:
-//! - `SlotView.Setup(models, onSelected, onShorten)`: `HideAll()`, then per
-//!   cell of the layout `cell.Setup(models[i], onSelected, onShorten)` and
-//!   `cell.Show()`. The layout carries three cells and the machine three
-//!   slots, so one cell is one slot and nothing is reordered. The title icon
-//!   is the system fixture type's icon (`SystemFixtureIcon.Setup(convert)`);
-//!   the base images are the package's textures (named, not bound).
-//! - `SlotView.SetupAnimation` / `PlayAnimation` / `PauseAnimation` drive the
-//!   Animator `fx_mysekai_convert_furniture` (not in the public asset root:
-//!   named, not played).
-//! - `SlotView.ShowUnlockSlotBalloon(onTransition)`: the slot page's
-//!   `UIPartsReleaseConditionsBalloon` takes
-//!   `MSG_RELEASING_AT_MYSEKAI_COLORFUL_PASS_PURCHASE`, shows, and is
-//!   centred over the locked cells it spans by a Canvas scaler-aware layout
-//!   pass; the balloon's base shows its right image when the text is wider
-//!   than the base's left part (the layout's horizontal group decides here).
-//!   Its transition button pushes the crystal shop screen
-//!   (`MenuScreenType.CrystalShop`) on the colourful pass page, which this
-//!   product does not carry (named once, nothing pushed).
-//! - `ShowShortenLockedBalloon`: the skip's cover shows
-//!   `WORD_CONVERT_MACHINE_LEVEL` with the released level in the cell's
-//!   `UIPartsCommonBalloon`.
-//! - `SlotStatusState.OnEnter`: `SlotView.Setup`, `Show()`, every slot marked
-//!   for update, `_isProcessingBefore = IsProcessing`. `OnUpdate`: every slot
-//!   marked for update is re-read (`slotModel.UpdateSlot()`), its view
-//!   updated (`SlotView.UpdateSlotView` -> `cell.UpdateSlotView`), then the
-//!   processing flag's change starts or stops the animation and the trading
-//!   SE (the screen's). `OnExit`: `SlotView.Hide()`. `Dispose`:
-//!   `SlotView.Dispose()` (the three effects' prefabs destroyed, the wave
-//!   disposed).
-//! - `Presenter.OnSelectedSlot(slot)`:
-//!   - locked: `ShowUnlockSlotBalloon`; its transition button pushes the
-//!     crystal shop;
-//!   - ready: `ItemSelectState.Setup(slotId)` and
-//!     `ChangeView(ViewType.ItemSelect)`;
-//!   - processing or complete: `ConvertReceiveProcessAsync(slot)`; a
-//!     processing cell whose completed converts are all received presses the
-//!     button view's `Button` only when `IsReceivable` holds, so that press
-//!     is not taken at all (the source's `_selectedButton.enabled`).
-//! - The skip button: `OnShortenSlot(slot)`.
+//! Input: the page's nodes and cells read from the screen document
+//! ([`bind_page`]); the user's convert state, the convert masters and the
+//! frame's clock on every read ([`SlotCells::setup`] once, then
+//! [`SlotCells::update_views`]); the request a press makes, answered by
+//! [`SlotCells::click`].
 //!
-//! Every call into a later unit's code stands as one named line
+//! Output: each cell's content, texts and tweens drawn into the page's view
+//! ([`SlotCells::draw`]); the lock balloon of a slot the pass would extend
+//! ([`SlotCells::show_unlock_slot_balloon`]) and the skip's lock balloon of a
+//! cell ([`SlotCells::show_shorten_locked_balloon`]); the action a press asks
+//! the presenter for ([`SlotAction`]): a page change, a balloon, or a skip
+//! request for the screen to hold.
+//!
+//! Invariants: the layout carries three cells and the machine three slots, so
+//! one cell is one slot and nothing is reordered. A cell is drawn while its
+//! CanvasGroup shows; the page's `Show` / `Hide` alpha is not what the layout
+//! draws, so the cell's group keeps its serialized state. Only a press on a
+//! live button is taken ([`SlotCells::live_button`]): a processing cell whose
+//! converts are all received has nothing to receive, so its button view's
+//! press is not taken at all (the source's `_selectedButton.enabled`).
+//!
+//! Boundaries (each a named line, nothing played or pushed in its place):
+//! - The animator `fx_mysekai_convert_furniture` and the three effects'
+//!   prefabs are not in the public asset root: neither is loaded, so the
+//!   processing animation is not played and the effects are not drawn. The
+//!   screen's trading sound plays while a slot processes.
+//! - The title icon (the system fixture type's `convert` icon,
+//!   `SystemFixtureIcon.Setup(convert)`) and the base images are the
+//!   package's textures, which the screen document does not name.
+//! - The crystal shop screen (`MenuScreenType.CrystalShop`) that the lock
+//!   balloon's transition button pushes is not carried: the press is named
+//!   and nothing is pushed.
+//! - The receive of a finished slot (`ConvertReceiveProcessAsync`) is not
+//!   built: its press is named and nothing is sent.
+//!
+//! Every call into code that is not built stands as one named line
 //! (`"convert: <what> is not built yet"`) and does nothing else.
-//!
-//! Product mapping, named: a cell is drawn while its CanvasGroup shows; the
-//! source's `Show` / `Hide` alpha is not what the layout draws (the cell's
-//! group is left to its serialized state). The effects and the animation
-//! prefabs are not loaded.
 
 mod cell;
 
@@ -57,23 +47,18 @@ use std::collections::BTreeSet;
 use bevy::prelude::*;
 use moly_assets::ui_layout::UiPrefab;
 use moly_masters::convert::ConvertMasters;
+use moly_ui::ui_inputs::BalloonArt;
+use moly_ui::ui_layout::{UiLayouts, UiPrefabView};
 
 use super::model::{ConvertUserState, ItemContext, Machine, SlotModel, SlotState};
 use super::screen::{not_built, note_once, ViewType};
-use crate::ui_inputs::BalloonArt;
-use crate::ui_layout::{UiLayouts, UiPrefabView};
 
 // The cells' texts draw through the screen's glyph check.
 pub use super::screen::put_text;
 
-// The units after this one (U6's detail gauge, U7 and U9) read the cell's
-// texts and release helpers; the item-select page's cells (U5) reuse the
-// node layout of `CellNodes::of` under their own paths.
-pub use cell::{
-    format as format_wording, is_released_shorten, released_shorten_level,
-    text as wording, to_time_string, Cell, CellNodes, CellView, MACHINE_LEVEL, PROGRESS_FORMAT,
-    SLOT_NO_FORMAT, THREE_HYPHEN,
-};
+// The detail panel and the dialogs read the cell's texts; the item select
+// page's cells reuse the node layout of `CellNodes::of` under their own paths.
+pub use cell::{format as format_wording, to_time_string, Cell, CellNodes, MACHINE_LEVEL, SLOT_NO_FORMAT};
 
 /// The slot page's class and the cell's.
 const PAGE_CLASS: &str = "MysekaiConvertFurnitureSlotView";
@@ -270,8 +255,9 @@ impl SlotCells {
         self.page_shown
     }
 
-    /// `SlotStatusState.OnEnter`: `SlotView.Setup`, `Show()`, every slot
-    /// marked for update, the processing flag read.
+    /// `SlotStatusState.OnEnter`: each cell built for its slot at the clock
+    /// (`SlotView.Setup`), the page shown, every slot marked for the next
+    /// read, the processing flag read.
     pub fn setup(
         &mut self,
         user: &ConvertUserState,
@@ -349,8 +335,8 @@ impl SlotCells {
         self.shorten_balloon_shown = false;
     }
 
-    /// `SlotView.Dispose`: each cell's three effects' prefabs destroyed and
-    /// its wave disposed; the page is hidden for the next boot.
+    /// `SlotView.Dispose`: each cell's wave tween and effects dropped; the
+    /// page is hidden for the next boot.
     pub fn dispose(&mut self) {
         self.hide_slot_page();
         self.needs_update.clear();
@@ -553,7 +539,7 @@ impl SlotCells {
                 Some(SlotAction::ChangeView(ViewType::ItemSelect))
             }
             // `ConvertReceiveProcessAsync(slot)`: the receivable count, the
-            // receive request, the wave and the reward window (U8).
+            // receive request, the wave and the reward window are not built.
             SlotState::Processing | SlotState::Complete => {
                 not_built(&mut self.seen, "the receive process");
                 None
@@ -561,7 +547,9 @@ impl SlotCells {
         }
     }
 
-    /// `SlotView.ShowUnlockSlotBalloon`.
+    /// `SlotView.ShowUnlockSlotBalloon`: the page's release-conditions
+    /// balloon takes `MSG_RELEASING_AT_MYSEKAI_COLORFUL_PASS_PURCHASE` and
+    /// shows over the locked cells.
     pub fn show_unlock_slot_balloon(&mut self, layouts: &UiLayouts) {
         let line = layouts.wording(RELEASE_BALLOON);
         self.balloon_shown = true;

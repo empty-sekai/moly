@@ -5353,6 +5353,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "moly-convert"
+version = "0.0.5"
+dependencies = [
+ "bevy",
+ "moly-assets",
+ "moly-audio",
+ "moly-core",
+ "moly-features",
+ "moly-law",
+ "moly-link",
+ "moly-masters",
+ "moly-protocol",
+ "moly-ui",
+ "moly-world",
+ "serde_json",
+]
+
+[[package]]
 name = "moly-core"
 version = "0.0.5"
 dependencies = [
@@ -5485,6 +5503,7 @@ dependencies = [
  "libc",
  "moly-assets",
  "moly-audio",
+ "moly-convert",
  "moly-core",
  "moly-devtools",
  "moly-features",

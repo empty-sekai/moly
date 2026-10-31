@@ -9,8 +9,8 @@
 //! `convertLimit` and `onceConvertLimit` the document does not hold), and a
 //! response that carries them replaces the client's list.
 //!
-//! The pure rules over these rows live in [`crate::convert::model`]; this
-//! copy only holds and applies them.
+//! The pure rules over these rows live in the `moly-convert` crate's model
+//! module; this copy only holds and applies them.
 
 use bevy::prelude::*;
 use serde_json::Value;

@@ -354,7 +354,7 @@ pub fn app(
         companion_cues::CompanionCuePlugin,
     ));
     app.add_plugins(delivery::DeliveryPlugin);
-    app.add_plugins(moly_features::convert::ConvertPlugin);
+    app.add_plugins(moly_convert::ConvertPlugin);
     app.add_plugins(moly_features::mission::MissionPlugin);
     app.add_plugins(ui_particle::UiParticlePlugin);
     common_dialog::install(&mut app);

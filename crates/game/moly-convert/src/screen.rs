@@ -1,69 +1,54 @@
-//! `ScreenLayerMysekaiConvertFurniture` (screen 627): the convert screen's
-//! shell, its presenter and the two pages it switches between.
+//! The convert screen's shell (screen layer 627,
+//! `ScreenLayerMysekaiConvertFurniture`): the layer's presenter, the two pages
+//! it switches between ([`super::slot`] and [`super::item_select`]) and the
+//! pointer, back key and frame order of both.
 //!
-//! Source structure:
-//! - `OnBoot` -> `BootProcess`: `Presenter.Initialize` (`SetupViewStateMachine`
-//!   registers the slot status state as `ViewType.Slot` and the item select
-//!   state as `ViewType.ItemSelect`), `Presenter.LoadAssetBundle`
-//!   (`"mysekai/ui/mysekai_convert_furniture"`), then `ScreenBootDone`.
-//! - `OnInitComponent`: `Presenter.Setup` (`HideAll()`, then
-//!   `ChangeView(ViewType.Slot)`), `SoundManager.PlaySEOneShot("se_enter_converter")`,
-//!   and the tutorial slide (`TutorialUtility.ShowTutorialSlideByType`).
-//! - `ChangeView(ViewType.Slot)`: `ChangeTo(Slot)` and
-//!   `ClearOnBackUIScreenOverride()` (the back key pops the screen).
-//!   `ChangeView(ViewType.ItemSelect)`: `OnBackUIScreenOverride = _ =>
-//!   ChangeView(ViewType.Slot)` (the back key returns to the slot page and
-//!   does not pop). `HideAll` hides both pages; each state's `OnExit` hides
-//!   its own page.
-//! - `OnWillExit`: `ScreenWillExitDone` (the exit never waits). `OnExited` ->
-//!   `Presenter.Dispose`: the back override cleared, both states disposed,
-//!   `UnloadAssetBundle`. `Update`: the view state machine's `Update` (the
-//!   slot status state's per-frame refresh in [`super::slot`], the item select
-//!   state's in [`super::item_select`]).
-//! - `MysekaiConvertUtility.MoveScreenLayerMysekaiConvert` pushes the screen;
-//!   the action button path already sends `LayerCommand::Push(MysekaiConvert)`.
+//! Input: the screen manager's layer hooks and state; the screen document
+//! ([`KEY`]), the item select page's cell documents ([`super::item_select`]'s
+//! `TAB_CELL` and `ITEM_CELL`, [`super::detail::COST_DOCUMENT`]); the convert
+//! master tables and the user's convert data ([`read_user`]); the item icon
+//! index; the clock ([`now_ms`]).
 //!
-//! The two pages (`MysekaiConvertFurnitureSlotView` and
-//! `MysekaiConvertFurnitureItemSelectView`) are exclusive. `Show` / `Hide`
-//! set a page CanvasGroup's alpha, `interactable` and `blocksRaycasts`; this
-//! view draws a page while it shows and hides it, with its subtree, while it
-//! does not (the CanvasGroup's alpha is not what the layout draws).
+//! Output: the screen root with its prefab view and the item select page's
+//! composed document ([`ITEM_SELECT_RUNTIME`]) spawned into the world; the
+//! layer's hooks followed ([`follow_screen`]: boot, setup, exit); each frame's
+//! drawing of the current page, the back key's navigation ([`back_key`]), the
+//! pointer's taps on the pages ([`input`]), the sound requests of the layer
+//! and the pop of a push the root could not draw.
 //!
-//! The item select page composes its own document: the screen's document with
-//! the page's tab cells, its cell pool and the detail panel's consumption rows
-//! instantiated into it. It is drawn from [`ITEM_SELECT_RUNTIME`], a second
-//! view, because its cells only exist in that composition.
+//! Invariants: the two pages (`MysekaiConvertFurnitureSlotView` and
+//! `MysekaiConvertFurnitureItemSelectView`) are exclusive. The slot page is
+//! one view and the item select page another, and each draws while it shows
+//! and hides with its subtree while it does not. Nothing spawns until the
+//! screen document, the convert master tables and the user's convert data
+//! are all in, and each waits by name until then. The item select page
+//! composes its own document from the screen's: its tab cells, its cell pool
+//! and the detail panel's consumption rows exist only in that composition, so
+//! the page is drawn from [`ITEM_SELECT_RUNTIME`], not from [`KEY`].
 //!
-//! Product mapping, named:
-//! - The boot waits for the convert master tables, the screen document, the
-//!   item select page's composition (which needs the tab and list cell
-//!   documents) and the user's convert data (slots, histories, items, pass,
-//!   machine level and the holdings a consumption box is paid from); the
-//!   source's data manager holds all of them when it boots.
-//! - The back key: `OnBackUIScreenOverride` is the screen manager's, and its
-//!   override list (`BackOverride`) is another module's. This view answers the
-//!   back key itself (Escape, the desktop form of the header's back button):
-//!   on the item select page it returns to the slot page (the source's
-//!   delegate, no pop); on the slot page it asks for `BackUIScreen`
-//!   (`LayerCommand::Pop`). Until the manager carries a convert override of
-//!   its own, its own back-key path (the header's button) pops on either page
-//!   (named).
-//! - `LoadAssetBundle` / `UnloadAssetBundle` load and free prefabs from a
-//!   bundle that is not part of the public asset root (the effects, the
-//!   lottery animations, the slot page's animation): nothing is loaded or
-//!   freed here (named once).
+//! Boundaries (each a named line, nothing drawn or loaded in its place):
+//! - The back key. This layer answers the back key itself (Escape, the
+//!   desktop form of the header's back button): on the item select page it
+//!   returns to the slot page (no pop); on the slot page it asks for the
+//!   layer's pop (`LayerCommand::Pop`). The screen manager's own back-key path
+//!   (the header's button) is not told about the pages, so until it carries a
+//!   convert override it pops on either page.
+//! - The asset bundle `mysekai/ui/mysekai_convert_furniture` (the effects, the
+//!   lottery animations and the slot page's animation) is not part of the
+//!   public asset root: nothing is loaded or freed.
 //! - The environment SE `se_trading` (`StartTradingSE`, `StopEnvironmentSE(0)`)
 //!   has no environment channel in this tree's SE queue: it is queued as an
-//!   in-game one-shot on a stand-in period while a slot processes (named,
-//!   unverified against the cue's length).
-//! - The tutorial slide (`MYSEKAI_CONVERT`) is not carried (named once).
-//! - The item select page's long press opens `MysekaiConvertItemDetailDialog`
-//!   (the convert dialogs' unit: one named line); its start button makes
-//!   `ConfirmConvertStart`'s request and the slot page's skip button
-//!   `OnShortenSlot`'s, both for the dialog of the convert dialogs' unit to
-//!   answer, and [`super::start`] sends and completes the request after it.
+//!   in-game one-shot on a stand-in period while a slot processes (unverified
+//!   against the cue's length).
+//! - The tutorial slide (`MYSEKAI_CONVERT`) is not carried.
+//! - The action button path pushes the screen with
+//!   `LayerCommand::Push(MysekaiConvert)`.
+//! - The item select page's long press and start button and the slot page's
+//!   skip button leave their request in [`ConvertScreen`]; [`super::dialogs`]
+//!   opens the dialog that answers it and [`super::start`] sends and
+//!   completes the request after it.
 //! - The item select page's cells draw the client's item icons as runtime
-//!   textures (the raw images need no Sprite metrics).
+//!   textures (the raw images need no sprite metrics).
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -74,25 +59,25 @@ use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use moly_assets::ui_layout::{UiComponent, UiPrefab};
+use moly_audio::audio::{SeClass, SeRequest, SeRequests};
+use moly_core::canvas::RootCanvas;
+use moly_features::userdata::convert::ClientConvertSlots;
+use moly_features::userdata::inventory::ClientMysekaiInventory;
+use moly_features::userdata::ClientUserData;
 use moly_protocol::rows::ColorfulPass;
+use moly_ui::gesture::{UiPointerEvent, UiPointerPhase};
+use moly_ui::item_icon::ItemIcons;
+use moly_ui::ui_inputs::{event_pointer, to_canvas, BalloonArt, ShellDialogState, SCREEN_UI_LAYER};
+use moly_ui::ui_layers::{
+    LayerCommand, MenuScreenType, ScreenHook, ScreenLayerEvent, ScreenLayerState, ScreenManager,
+};
+use moly_ui::ui_layout::{UiLayouts, UiPrefabView};
+use moly_world::clock::device_now_ms;
 
 use super::detail::Masters;
 use super::item_select::{self, ItemAction, ItemSelectPage, PageBindings};
 use super::model::{ConvertUserState, Holdings, ItemContext, PassState};
 use super::slot::{self, SlotAction, SlotCells};
-use crate::audio::{SeClass, SeRequest, SeRequests};
-use crate::canvas::RootCanvas;
-use crate::gesture::{UiPointerEvent, UiPointerPhase};
-use crate::item_icon::ItemIcons;
-use crate::menu_shell::ShellDialogState;
-use crate::ui_inputs::{event_pointer, to_canvas, BalloonArt, SCREEN_UI_LAYER};
-use crate::ui_layers::{
-    LayerCommand, MenuScreenType, ScreenHook, ScreenLayerEvent, ScreenLayerState, ScreenManager,
-};
-use crate::ui_layout::{UiLayouts, UiPrefabView};
-use crate::userdata::client::inventory::ClientMysekaiInventory;
-use crate::userdata::client::ClientUserData;
-use crate::userdata::convert::ClientConvertSlots;
 
 /// The screen layer's document key
 /// (`screens/ScreenLayerMysekaiConvertFurniture.json`).
@@ -240,7 +225,7 @@ pub fn read_user(
 pub fn now_ms(client: Option<&ClientUserData>, realtime: f32) -> i64 {
     match client {
         Some(client) => client.current_timestamp(realtime),
-        None => crate::userdata::clock::device_now_ms(),
+        None => device_now_ms(),
     }
 }
 
@@ -336,9 +321,11 @@ pub struct ConvertScreen {
     absent: Option<String>,
     /// The view is spawned.
     spawned: bool,
-    /// `OnBoot` set the page up (`Initialize` and `ScreenBootDone`).
+    /// The layer's boot ran (the page state machine is set up and the boot
+    /// is done).
     booted: bool,
-    /// `OnInitComponent` ran (`Setup`).
+    /// The layer's component setup ran, so the screen's page is up and its
+    /// dialogs may open.
     set_up: bool,
     /// The item select page shows (`ViewType.ItemSelect`); the back key then
     /// returns to the slot page instead of popping.
@@ -350,7 +337,7 @@ pub struct ConvertScreen {
     /// The screen answered its refused push with a pop.
     refusal_popped: bool,
     /// `ConfirmConvertStart`'s request, waiting for the start confirm
-    /// dialog's OK ([`super::start`]).
+    /// dialog's OK ([`super::dialogs`]).
     pub start_intent: Option<super::start::StartIntent>,
     /// `ConvertStartProcess`'s request, sent when the dialog's OK passed the
     /// pass checks.
@@ -1045,7 +1032,7 @@ pub fn input(
     mut screen: ResMut<ConvertScreen>,
     mut press: ResMut<ConvertPress>,
     mut sounds: ResMut<SeRequests>,
-    mut consumed: ResMut<crate::action_button::ActionTapConsumed>,
+    mut consumed: ResMut<moly_ui::ui_inputs::ActionTapConsumed>,
 ) {
     let events: Vec<UiPointerEvent> = pointers.read().copied().collect();
     let scrolls: Vec<MouseWheel> = wheel.read().copied().collect();
@@ -1193,7 +1180,7 @@ fn input_item_select(
     screen: &mut ConvertScreen,
     press: &mut ConvertPress,
     sounds: &mut SeRequests,
-    consumed: &mut crate::action_button::ActionTapConsumed,
+    consumed: &mut moly_ui::ui_inputs::ActionTapConsumed,
 ) {
     let Ok(view) = item_roots.single() else {
         return;

@@ -1,13 +1,26 @@
 //! The convert screen's model: the slots as the machine shows them, the items
-//! the select list offers, and the values a start or a receive asks for.
+//! the select list offers, and the values a start or a receive asks for. It is
+//! the pure rule set the pages and the dialogs draw from.
 //!
-//! Every rule is named after the source method it follows:
+//! Input: the convert masters ([`ConvertMasters`]: items, tabs, slot counts,
+//! release rows, consumption and obtain boxes, pass rate, skip price and the
+//! master calendar), the user side ([`ConvertUserState`]: slot rows, item
+//! histories, item rows, the pass, the machine level and the holdings) and the
+//! frame's clock ([`ItemContext::now`]).
+//!
+//! Output: the slot's state and its counts ([`SlotModel`]), the item models
+//! the list offers ([`ItemModel::all`], [`ItemModels`]), the detail panel's
+//! values ([`DetailModel`]), the tabs ([`tabs`], [`first_tab`]) and the
+//! change a cell tells from the last frame ([`SlotChange`]).
+//!
+//! Invariants, one per rule:
 //!
 //! - A slot (`MysekaiConvertFurnitureSlotModel`) is locked, ready, processing
 //!   or complete (`MysekaiConvertSlotState`), in that order. A row the server
 //!   sent is read through its own status and clock (`SetupSlotState`): the
 //!   converts completed are the elapsed time over the slot's per-convert
-//!   minutes (`GetObtainResourcesDictionary`), at most the row's count.
+//!   minutes (`GetObtainResourcesDictionary`), at most the row's count. A
+//!   pass slot is locked without the pass.
 //! - An item (`MysekaiConvertItemModelBase` and its three subclasses) is
 //!   released when the machine level reaches its `requiredConvertFixtureLevel`
 //!   (`IsReleased`), converts at most `onceConvertLimit` a request, and at
@@ -31,6 +44,7 @@ use moly_protocol::rows::{
     ConvertItemHistory, ConvertSlot, UserMysekaiConvertItem, UserResource,
     CONVERT_SLOT_COMPLETE,
 };
+use moly_world::clock::device_utc_offset_ms;
 
 /// `MysekaiConvertSlotState`, in the order the source's enum declares.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -80,8 +94,8 @@ impl PassState {
 pub struct ConvertUserState {
     pub slots: Vec<ConvertSlot>,
     pub histories: Vec<ConvertItemHistory>,
-    /// `mysekaiConvertItems` as the server carries them (see
-    /// `userdata::convert::ClientConvertSlots`).
+    /// `mysekaiConvertItems` as the server carries them (the hub's
+    /// `ClientConvertSlots` holds the copy this is read from).
     pub items: Vec<UserMysekaiConvertItem>,
     pub pass: PassState,
     /// `UserMysekaiGamedata.mysekaiConvertFixtureLevel`.
@@ -156,7 +170,7 @@ impl<'a> ItemContext<'a> {
 
     /// The local offset the calendar rules read the clock in.
     pub fn utc_offset_ms(&self) -> i64 {
-        crate::userdata::clock::device_utc_offset_ms(self.now)
+        device_utc_offset_ms(self.now)
     }
 }
 
@@ -619,19 +633,23 @@ impl<'a> ItemModel<'a> {
     /// four steps, and `Id` is the last. `ChoiceId` is not one of them (only
     /// `Equals` reads it, and the sort never calls it).
     ///
-    /// Written out of the decompiled method's labels:
-    /// - `IL_00bd` (`return 1`) is "I come after";
-    /// - `IL_010b` (`return -1`) is "I come before";
-    /// - `IL_000f` is the step from `ConvertibleCount` to `IsReleased`;
-    /// - `IL_005b` is the step from `IsReleased` to `EnoughConsumedResources`.
+    /// `IComparable<IMysekaiConvertItemModel>.CompareTo`
+    /// (`MysekaiConvertItemModelBase`) for the list's `OrderBy(x => x)`
+    /// (`MysekaiConvertFurnitureItemSelectView.GetValidConvertItemModels`):
+    /// four steps, and `Id` is the last. `ChoiceId` is not one of them (only
+    /// `Equals` reads it, and the sort never calls it).
     ///
-    /// Step by step, where `HasConvertibleCount` is `ConvertibleCount >= 1`
-    /// (`IL_00bd` from a model whose `ConvertibleCount <= 0` when `other` has
-    /// one, and `IL_010b` from one that has it when `other`'s is `<= 0`),
-    /// then `IsReleased` and then `EnoughConsumedResources`, each by the same
-    /// "I lack it after, I have it before"; equal by all of them, `Id`.
-    /// A model's own half of a step is decided before `other`'s is read, as
-    /// the `goto`s do.
+    /// The three steps before the id compare, in order,
+    /// `HasConvertibleCount` (`ConvertibleCount >= 1`), `IsReleased` and
+    /// `EnoughConsumedResources`. Each puts the model that has the property
+    /// first: one without a convert left (`ConvertibleCount <= 0`) comes after
+    /// one that has one, one not released after one that is, one short of its
+    /// consumption box after one that is not. Equal by all three, the id
+    /// orders the two. A model's own half of a step is decided before
+    /// `other`'s is read. The comparison answers "come before" (-1) or "come
+    /// after" (1); equal steps fall through to the id. A model with a
+    /// `ConvertibleCount` of 0 or less (`<= 0`) thus comes after one that has
+    /// at least 1.
     pub fn compare(&self, other: &Self, ctx: ItemContext<'a>) -> std::cmp::Ordering {
         use std::cmp::Ordering;
         // `ConvertibleCount` then `HasConvertibleCount`, then `IsReleased`,

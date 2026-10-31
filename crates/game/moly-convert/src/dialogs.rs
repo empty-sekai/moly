@@ -1,53 +1,49 @@
-//! The convert screen's own dialogs: the start confirm (324), the skip (325)
-//! and the item detail (284).
+//! The convert screen's three dialogs: the start confirm (`DialogType`
+//! 324, `MysekaiConvertStartConfirmDialog`), the skip (325,
+//! `MysekaiConvertFurnitureShortenDialog`) and the item detail (284,
+//! `MysekaiConvertItemDetailDialog`).
 //!
-//! Source structure:
-//! - `MysekaiConvertStartConfirmDialog` (`Common2ButtonDialog`): `Setup(new
-//!   MysekaiConvertStartConfirmViewModel(model))` writes the converted item's
-//!   thumbnail and `ObtainedItemName`, the view model's `ConvertTimeString`,
-//!   and the joined-pass balloon (`Enable = HasMysekaiColorfulPass()`,
-//!   `MessageText = string.Format(FORMAT_CONVERT_SHORTEN_TIME_HAVE_JOINED_PASS,
-//!   GetConvertTimeDecreaseRate() * 100)`); every `Update` sets
-//!   `_passExpirationWarningText` active by `IsShowsPassExpirationWarning()`.
-//!   The class writes no body: `Content/ConfirmText` is the body for the
-//!   ruling's `MSG_CONVERT_START_CONFIRM`. `positiveButton` (`OnClickOK`)
-//!   runs `ConvertStartProcess`; the second footer button and the window's
-//!   close button cancel, and the hardware back key cancels.
-//! - `MysekaiConvertFurnitureShortenDialog` (`Common2ButtonDialog`): every
-//!   frame `Refresh` -> `_slotModel.UpdateSlot()` -> `RefreshView` formats
-//!   `MSG_CONVERT_SLOT_SHORTEN_CONFIRM` with the skip's price and the item's
-//!   name, the remaining time, the price and the crystals held, tints the
-//!   price (`FONT_COLOR_PINK2` over the total, `FONT_COLOR_BLACK` otherwise),
-//!   turns `NotEnoughJewelText` and `_toJewelShopButton` on only when the
-//!   total cannot pay, and `positiveButton` (the skip) only when it can. Its
-//!   OK is `OnClickOkShortenSlot`; the second footer button is the cancel.
-//!   `_specifiedCommercialTransactionLawArticleButton` opens
-//!   `CommonWebviewDialog`; `_toJewelShopButton` closes and pushes
-//!   `MenuScreenType.CrystalShop`.
-//! - `MysekaiConvertItemDetailDialog` (`Common1ButtonDialog`): `Setup(model)`
-//!   sets the thumbnail, `Name = ObtainedItemName` and
-//!   `Description/Text = ObtainedItemDescription`. Its OK, the window's close
-//!   button and the back key close it (its callback is null).
+//! Input: the documents of the three (`START_KEY`, `SHORTEN_KEY`,
+//! `DETAIL_KEY`), installed once each as a runtime copy (`START_VIEW`,
+//! `SHORTEN_VIEW`, `DETAIL_VIEW`); the request a dialog answers, which the
+//! screen's own tap left in [`ConvertScreen`] ([`super::start::StartIntent`]
+//! and [`super::start::ShortenIntent`] for the confirm and the skip, the long
+//! press's `detail_request` for the detail); the convert masters and the
+//! user's copies ([`DialogData`]); the wording and palette of the layout.
 //!
-//! Host mapping: each dialog installs its document once as a runtime copy
-//! (`*_VIEW`), is drawn while its slot is up, takes its taps in [`click`]
-//! (before the shell's) and its back key in [`back_key`] (after the manager's
-//! reader). A dialog opens from the request the screen's own tap wrote
-//! ([`super::start::StartIntent`] / [`super::start::ShortenIntent`], the long
-//! press's [`ConvertScreen::detail_request`]), only while the layer is
-//! playing and no other dialog is up. Its `Setup`
-//! runs on every frame it shows (the source's `RefreshView`, and the skip's
-//! own `Update`). The start chain's send is ordered after [`open_start`], so
-//! the OK's request is sent in the frame it is read.
+//! Output: each dialog's nodes written every frame it shows ([`setup_start`],
+//! [`setup_shorten`], [`setup_detail`]) and its visibility with the canvas
+//! scale ([`place`]); a close on the footer's OK ([`click`]) or on the
+//! hardware back key ([`back_key`]), and the sound of the tapped button. The
+//! OK does not send anything itself: it closes the dialog and lets
+//! [`super::start`] read the waiting request, which is sent only after
+//! [`open_start`] in the same frame, so a request is never sent before its
+//! dialog answered.
 //!
-//! Named refusals:
+//! Invariants: a dialog opens (only while the layer plays, the screen is set
+//! up and no other convert dialog is up) when its document is installed;
+//! exactly one convert dialog is up at a time; every frame's setup reads the
+//! masters, the copies and the clock again, so a value the server changed
+//! while a dialog was open shows on the next frame. What each dialog shows:
+//! - The start confirm: the item's thumbnail and name, its convert time at
+//!   the asked count (`FORMAT_CONVERT_SHORTEN_TIME_HAVE_JOINED_PASS`'s rate
+//!   is `GetConvertTimeDecreaseRate() * 100`), the `MSG_CONVERT_START_CONFIRM`
+//!   body and, while the pass runs, its joined-pass balloon. The pass
+//!   expiration warning shows when `IsShowsPassExpirationWarning` holds.
+//! - The skip: `MSG_CONVERT_SLOT_SHORTEN_CONFIRM` with the skip's price and
+//!   the item's name, and the remaining time.
+//! - The item detail: the thumbnail, the name and
+//!   `MysekaiConvertItemModelBase.GetObtainedItemDescription`.
+//!
+//! Boundaries (each a line named once, nothing drawn or sent in its place):
 //! - The account's crystal wallet (`CurrentTotalJewel`, `CurrentPaidJewel`) is
 //!   not in the user document: the skip hides `HavetRoot/Cost` and
 //!   `HavetRoot/UIPartsPaidLabel (1)/CustomText (1)` instead of drawing an
 //!   owned amount, no price is compared against it (so the skip button stays
 //!   the document's, `NotEnoughJewelText` hidden), and the price keeps the
-//!   document's colour. The price line (`CostRoot/Cost`,
-//!   `MSG_CONVERT_SLOT_SHORTEN_CONFIRM`) stays.
+//!   document's colour (`FONT_COLOR_PINK2` over the whole total and
+//!   `FONT_COLOR_BLACK` otherwise are the entries it would use). The price
+//!   line (`CostRoot/Cost`, `MSG_CONVERT_SLOT_SHORTEN_CONFIRM`) stays.
 //! - The skip's confirm line is hidden when the item's name cannot be read
 //!   (the line formats it as `{1}`).
 //! - `CommonWebviewDialog` has no prefab: the law button's press is named and
@@ -60,6 +56,8 @@
 //!   track type only: that description stays empty (named once).
 //! - The `DialogBase` scale tween is not drawn; the entity's canvas scale
 //!   stands.
+//! - Without the client config panel the pass expiration warning is refused
+//!   rather than defaulted (see [`PASS_WARNING_DAYS_KEY`]).
 
 use std::collections::BTreeSet;
 
@@ -67,26 +65,24 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use moly_assets::ui_layout::UiPrefab;
+use moly_audio::audio::SeRequests;
+use moly_core::canvas::RootCanvas;
+use moly_core::client_config::ClientConfigs;
+use moly_features::userdata::convert::ClientConvertSlots;
+use moly_features::userdata::inventory::ClientMysekaiInventory;
+use moly_features::userdata::ClientUserData;
 use moly_masters::convert::ConvertMasters;
-
-use super::detail::Masters;
-use super::model::{ItemContext, ItemModel, PassState, RecordKind, SlotModel};
-use super::screen::{note_once, now_ms, read_user, ConvertScreen};
-use crate::action_button::ActionTapConsumed;
-use crate::audio::SeRequests;
-use crate::client_config::ClientConfigs;
-use crate::canvas::RootCanvas;
-use crate::convert::model::ConvertUserState;
-use crate::gesture::{GestureEvent, GestureState};
-use crate::item_icon::ItemIcons;
-use crate::ui_inputs::{BalloonArt, SITEMAP_LAYER};
-use crate::ui_layers::{
+use moly_ui::gesture::{GestureEvent, GestureState};
+use moly_ui::item_icon::ItemIcons;
+use moly_ui::ui_inputs::{ActionTapConsumed, BalloonArt, SITEMAP_LAYER};
+use moly_ui::ui_layers::{
     DialogBackKey, DialogBackKeyEvent, DialogId, DialogType, DisplayLayerType, ScreenManager,
 };
-use crate::ui_layout::{UiLayouts, UiPrefabView};
-use crate::userdata::client::inventory::ClientMysekaiInventory;
-use crate::userdata::convert::ClientConvertSlots;
-use crate::userdata::ClientUserData;
+use moly_ui::ui_layout::{UiLayouts, UiPrefabView};
+
+use super::detail::Masters;
+use super::model::{ConvertUserState, ItemContext, ItemModel, PassState, RecordKind, SlotModel};
+use super::screen::{note_once, now_ms, read_user, ConvertScreen};
 
 // ---------------------------------------------------------------------------
 // Documents, keys and values
@@ -116,17 +112,22 @@ pub const START_CALLER: &str = "MysekaiConvertFurniturePresenter.ConfirmConvertS
 pub const SHORTEN_CALLER: &str = "MysekaiConvertFurniturePresenter.OnShortenSlot";
 /// `MysekaiConvertFurnitureItemSelectListCell.ShowDetailDialog`'s caller.
 pub const DETAIL_CALLER: &str = "MysekaiConvertFurnitureItemSelectListCell.ShowDetailDialog";
-/// The start confirm's body key (the ruling's; the document keeps no key).
+/// The start confirm's body key (the document itself keeps no key).
 pub const START_CONFIRM: &str = "MSG_CONVERT_START_CONFIRM";
-/// The pass warning's line.
+/// The pass warning's line (`MSG_CONVERT_START_ATTENTION_EXPIRED_PASS`).
 pub const PASS_WARNING: &str = "MSG_CONVERT_START_ATTENTION_EXPIRED_PASS";
-/// `ClientConfig.Mysekai.ConvertStartConfirmRemainingDaysUntilPassExpirationWarning`:
-/// `ClientConfigs`'s `IntConfigs` key 160
+/// The days before the pass ends at which the start confirm warns
+/// (`MSG_CONVERT_START_ATTENTION_EXPIRED_PASS`): the client config's
+/// `ConvertStartConfirmRemainingDaysUntilPassExpirationWarning`, the
+/// `IntConfigs` entry of the client config panel under key 160
 /// (`ClientConfig.Mysekai.get_ConvertStartConfirmRemainingDaysUntilPassExpirationWarning`
-/// does `IntConfigs.TryGetValue(160)`, logging and returning 0 when it is
-/// missing; that dictionary is built from the master `clientConfigs` rows).
+/// reads `IntConfigs.TryGetValue(160)`, logging and returning 0 when the key
+/// is missing; the panel is built from the master `clientConfigs` rows).
+/// This crate reads the key only while the panel is loaded: without it the
+/// warning is refused rather than read as 0 days.
 pub const PASS_WARNING_DAYS_KEY: i32 = 160;
-/// `FORMAT_CONVERT_SHORTEN_TIME_HAVE_JOINED_PASS` (`{0}` is the rate).
+/// `FORMAT_CONVERT_SHORTEN_TIME_HAVE_JOINED_PASS` (`{0}` is the rate as a
+/// percentage).
 pub const PASS_SHORTEN: &str = "FORMAT_CONVERT_SHORTEN_TIME_HAVE_JOINED_PASS";
 /// `MSG_CONVERT_SLOT_SHORTEN_CONFIRM` (`{0}` the price, `{1}` the name).
 pub const SHORTEN_CONFIRM: &str = "MSG_CONVERT_SLOT_SHORTEN_CONFIRM";
@@ -134,11 +135,12 @@ pub const SHORTEN_CONFIRM: &str = "MSG_CONVERT_SLOT_SHORTEN_CONFIRM";
 pub const SHORTEN_DECIDE: &str = "WORD_CONVERT_SLOT_SHORTEN_DECIDE";
 /// `MSG_CONVERT_RECORD_RANDOM_BOX_CHOICE_DESCRIPTION` (`{0}` the category).
 pub const RECORD_CHOICE_DESCRIPTION: &str = "MSG_CONVERT_RECORD_RANDOM_BOX_CHOICE_DESCRIPTION";
-/// `ColorUtility.FONT_COLOR_PINK2`'s palette entry (`ColorEntry.text_rd`,
-/// value 17, read by `PaletteUtility.GetColorCode(ColorEntry.text_rd)`; the
-/// `ui-jp` palette numbers its entries from 0 in `ColorEntry` order).
+/// The palette entry `ColorUtility.FONT_COLOR_PINK2` reads: `ColorEntry.text_rd`,
+/// ordinal 17 (the layout's `ui-jp` palette numbers its entries from 0 in
+/// `ColorEntry` declaration order).
 pub const PINK2_ENTRY: usize = 17;
-/// `ColorUtility.FONT_COLOR_BLACK`'s palette entry (`ColorEntry.text_dbl`, 14).
+/// The palette entry `ColorUtility.FONT_COLOR_BLACK` reads: `ColorEntry.text_dbl`,
+/// ordinal 14.
 pub const BLACK_ENTRY: usize = 14;
 const DAY_MS: i64 = 86_400_000;
 const DIALOG_Z: f32 = 100.0;
@@ -316,8 +318,11 @@ pub fn jewel_color(layouts: &UiLayouts, entry: usize) -> Option<[f32; 4]> {
     layouts.palette_color(entry)
 }
 
-/// `MysekaiConvertItemModelBase.GetObtainedItemDescription`, or `None` where
-/// the master row it needs is not read here.
+/// `MysekaiConvertItemModelBase.GetObtainedItemDescription`: a normal item's
+/// single obtained resource's name or, with no single resource, its obtain
+/// box's description; a blueprint's or record's wording. `None` where the row
+/// it needs is not held (a record category's name, which the convert master
+/// reader does not load).
 pub fn item_description(
     layouts: &UiLayouts,
     ctx: ItemContext<'_>,
@@ -469,7 +474,7 @@ fn close(by: &str, dialogs: &mut ConvertDialogs, screens: &mut ScreenManager, wh
         Which::Shorten => dialogs.shorten_data = None,
         Which::Detail => dialogs.detail_item = None,
     }
-    info!("[convert] {which:?} dialog {id:?}: {by}; DialogBase.Close, the dialog is destroyed");
+    info!("[convert] {which:?} dialog {id:?}: {by}; the dialog is closed and destroyed");
     screens.close_dialog(id);
     screens.dialog_destroyed(id);
 }
@@ -501,7 +506,7 @@ pub fn open_start(
     };
     if !screen.is_set_up()
         || screens.current_screen() != Some(super::screen::SCREEN)
-        || screens.current_state() != crate::ui_layers::ScreenLayerState::Playing
+        || screens.current_state() != moly_ui::ui_layers::ScreenLayerState::Playing
     {
         return;
     }
@@ -520,7 +525,7 @@ pub fn open_start(
                 item_id: intent.item.map_or(0, |item| item.item_id),
                 convert_count: intent.item.map_or(0, |item| item.convert_count),
             });
-            info!("[convert] MysekaiConvertStartConfirmDialog: Show2ButtonDialog(324) is open for slot {}", intent.slot_id);
+            info!("[convert] MysekaiConvertStartConfirmDialog (324) is open for slot {}", intent.slot_id);
         }
         Err(reason) => error!("[convert] {reason}"),
     }
@@ -539,7 +544,7 @@ pub fn open_shorten(
     };
     if !screen.is_set_up()
         || screens.current_screen() != Some(super::screen::SCREEN)
-        || screens.current_state() != crate::ui_layers::ScreenLayerState::Playing
+        || screens.current_state() != moly_ui::ui_layers::ScreenLayerState::Playing
     {
         return;
     }
@@ -557,7 +562,7 @@ pub fn open_shorten(
                 slot_id: intent.slot_id,
                 pass_slot: intent.pass_slot,
             });
-            info!("[convert] MysekaiConvertFurnitureShortenDialog: Show2ButtonDialog(325) is open for slot {}", intent.slot_id);
+            info!("[convert] MysekaiConvertFurnitureShortenDialog (325) is open for slot {}", intent.slot_id);
         }
         Err(reason) => error!("[convert] {reason}"),
     }
@@ -576,7 +581,7 @@ pub fn open_detail(
     };
     if !screen.is_set_up()
         || screens.current_screen() != Some(super::screen::SCREEN)
-        || screens.current_state() != crate::ui_layers::ScreenLayerState::Playing
+        || screens.current_state() != moly_ui::ui_layers::ScreenLayerState::Playing
     {
         return;
     }
@@ -591,7 +596,7 @@ pub fn open_detail(
         Ok(id) => {
             dialogs.detail = Some(id);
             dialogs.detail_item = Some(item);
-            info!("[convert] MysekaiConvertItemDetailDialog: Show1ButtonDialog(284) is open for item {item}");
+            info!("[convert] MysekaiConvertItemDetailDialog (284) is open for item {item}");
         }
         Err(reason) => error!("[convert] {reason}"),
     }
@@ -732,12 +737,10 @@ pub fn setup_start(
         let shows = put_text(&mut view, &nodes.pass_text, &line, art, &mut seen);
         view.set_visible(&nodes.pass_text, shows);
     }
-    // `RefreshPassExpirationWarning`:
-    // `ClientConfig.Mysekai.ConvertStartConfirmRemainingDaysUntilPassExpirationWarning`
-    // is `ClientConfigs`'s int key [`PASS_WARNING_DAYS_KEY`]. The client
-    // config panel is the one source of the value: without it the warning
-    // path refuses by name (it is never defaulted to "no warning", which
-    // would hide a pass about to end).
+    // `RefreshPassExpirationWarning`: the days are the client config panel's
+    // int key [`PASS_WARNING_DAYS_KEY`]. The panel is the one source of the
+    // value: without it the warning is refused by name (it is never
+    // defaulted to "no warning", which would hide a pass about to end).
     match configs.as_deref() {
         Some(configs) => {
             let show = shows_pass_warning(&ctx.user.pass, ctx.now, configs.int(PASS_WARNING_DAYS_KEY));
@@ -759,7 +762,9 @@ pub fn setup_start(
     dialogs.seen = seen;
 }
 
-/// Update: the skip's `Refresh` each frame: `UpdateSlot()` then `RefreshView`.
+/// Update: the skip's `Refresh` each frame while it shows: the slot read at
+/// the frame's clock (`UpdateSlot()`), then its price, the remaining time and
+/// the item's name written (`RefreshView`).
 pub fn setup_shorten(
     mut layouts: ResMut<UiLayouts>,
     mut dialogs: ResMut<ConvertDialogs>,
@@ -1076,7 +1081,7 @@ pub fn place(
             Visibility::Hidden
         });
         if let (Ok(window), Some(canvas)) = (windows.single(), root_canvas.as_deref()) {
-            crate::canvas::set_scale(&mut transform, canvas.scale(window));
+            moly_core::canvas::set_scale(&mut transform, canvas.scale(window));
         }
     }
 }
@@ -1102,7 +1107,7 @@ mod value_checks {
     }
 
     /// The palette entries the two font colours read (`ColorEntry.text_dbl`
-    /// 14 and `text_rd` 17 in the dumped enum).
+    /// 14 and `text_rd` 17 in the palette's `ColorEntry` order).
     #[test]
     fn the_price_colour_entries() {
         assert_eq!(BLACK_ENTRY, 14);

@@ -544,8 +544,9 @@ fn track_join(
 }
 
 /// PreUpdate: the arrived sections are applied to the copies in the server's
-/// order, then each answer is published to the features.
-pub(crate) fn apply_arrivals(
+/// order, then each answer is published to the features. Feature systems that
+/// read an answer order themselves after this system.
+pub fn apply_arrivals(
     mut commands: Commands,
     time: Res<Time<Real>>,
     mut arrived: MessageReader<ServerArrived>,

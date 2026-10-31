@@ -1,47 +1,58 @@
 //! The item select page's detail panel (`MysekaiConvertFurnitureItemSelectDetailView`,
-//! `MysekaiConvertFurnitureItemSelectDetailViewModel`).
+//! `MysekaiConvertFurnitureItemSelectDetailViewModel`): the chosen item, how
+//! many converts, what they cost and the start button.
 //!
-//! The view model's numbers are [`super::model::DetailModel`]; this module
-//! binds the document's nodes to them and draws them.
+//! Input: the nodes the panel binds from the screen document ([`compose`]);
+//! the selected item, the slot and the convert count ([`DetailPanel`]); the
+//! view model's numbers, which are [`super::model::DetailModel`]'s, read at
+//! the frame's clock; the material and item master rows whose names and icons
+//! the panel draws ([`Masters`]).
 //!
-//! `DetailView.SetupView` order: `slotView.Setup`, `SetupObtainedResource`,
-//! `SetupConsumedResource`, `SetupSelectConvertCount`,
-//! `SetupConvertTimeString`, `SetupConvertStartButton`,
-//! `SetupRemainingCount`, `SetupResetAt`, `SetupEndAt`, `SetupInfo`,
-//! `SetupBalloon`. `SetupEmpty` (no model) turns the gauge, the count and the
-//! start button off.
+//! Output: the panel's nodes each frame ([`DetailPanel::draw`]): the item's
+//! name and thumbnail, the possession count, the consumption rows at the
+//! count, the count selector's number and fill, the convert time, the start
+//! button's enabled cover, the remaining count with its reset and end lines,
+//! one badge of three (locked, sold out, not enough consumed resource) and the
+//! resource or pass balloon. What a press on the panel asks for
+//! ([`Action`]): one convert fewer or more, the start, or the lock balloon.
 //!
-//! The count selector is `UIPartsSelectCost`: its `ViewData(ConvertCount, 1,
-//! GetOnceConvertibleCount(), OnChangedConvertCount)` bounds the count to one
-//! convert at least and `GetOnceConvertibleCount` at most; `max <= 1` puts
-//! the slider at its one-value maximum (`SetSliderPositionOneValueMax`). This
-//! panel answers the minus and plus buttons, the number and the slider's
-//! fill; the numeric input field and the slider's own drag are named, not
-//! run.
+//! Invariants:
+//! - While the panel has no model (`SetupEmpty`) the gauge, the count selector
+//!   and the start button are off.
+//! - The count selector (`UIPartsSelectCost`) keeps the count at least 1 and
+//!   at most `GetOnceConvertibleCount()` at the slot
+//!   (`ViewData(ConvertCount, 1, GetOnceConvertibleCount(),
+//!   OnChangedConvertCount)`); with a bound of at most 1 the slider sits at
+//!   its one-value maximum (`SetSliderPositionOneValueMax`).
+//! - The remaining count shows only for an item with a `convertLimit` that
+//!   has a convert left; the reset line only for a row that resets (weekly or
+//!   monthly), and the end line only for a row with an end.
+//! - The resource balloon shows before the pass balloon (`SetupBalloon`).
+//! - The time lines print `MM/dd HH:mm` in the local offset
+//!   ([`month_day_time`]).
 //!
-//! The consumption rows: the source instantiates
-//! `MysekaiConvertFurnitureConsumedResourceCell` under a prefab the document
-//! does not carry (no extracted document is named after that class, and its
-//! fields are not on this root). The panel's required-material group
-//! (`NeedsMaterialView`, a `UIPartsGroupVerticalListView` whose content is
-//! empty) is the list the view fills, so this panel instantiates the craft
-//! screen's `MaterialCostCell` (a thumbnail, a needed count and a held count)
-//! under that content. A held count is white while the requirement is met and
-//! `ColorUtility.FONT_COLOR_PINK2` otherwise; this layout has no text-colour
-//! override, so the count keeps its authored colour (named once).
+//! Boundaries (each a named line, nothing drawn in its place): the numeric
+//! input field and the slider's own drag are not run; the panel answers the
+//! minus and plus buttons, the number and the slider's fill. The consumption
+//! cell (`MysekaiConvertFurnitureConsumedResourceCell`) has no document on the
+//! root, so the panel instantiates the craft screen's `MaterialCostCell` (a
+//! thumbnail, a needed count and a held count) under the required-material
+//! group's content instead. A held count is white while the requirement is met
+//! and `ColorUtility.FONT_COLOR_PINK2` otherwise; this layout has no
+//! text-colour override, so the count keeps its authored colour.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use moly_assets::ui_layout::UiPrefab;
 use moly_masters::convert::BoxDetail;
+use moly_ui::ui_inputs::BalloonArt;
+use moly_ui::ui_layout::{UiLayouts, UiPrefabView};
 use serde_json::Value;
 
 use super::model::{DetailModel, ItemContext, ItemModel};
 use super::screen::note_once;
 use super::slot::{format_wording, put_text, to_time_string};
-use crate::ui_inputs::BalloonArt;
-use crate::ui_layout::{UiLayouts, UiPrefabView};
 
 /// `WORD_CONVERT_ITEM_REMAINING_COUNT`.
 pub const REMAINING_KEY: &str = "WORD_CONVERT_ITEM_REMAINING_COUNT";
@@ -486,10 +497,11 @@ impl DetailPanel {
         );
         view.set_visible(&nodes.possession, held.is_some());
 
-        // `SetupConsumedResource`. The cell's held count is white while the
+        // `SetupConsumedResource`. A held count would be white while the
         // requirement is met and `ColorUtility.FONT_COLOR_PINK2` otherwise;
-        // this layout has no text-colour override (a text draws its serialized
-        // `m_fontColor`), so the count keeps its authored colour (named once).
+        // this layout has no text-colour override (a text draws its
+        // serialized `m_fontColor`), so the count keeps its authored colour
+        // (named once).
         let rows = consumed_rows(ctx, &item, self.count);
         let details = ctx.machine().consumption(item.master());
         view.set_visible(&nodes.needs_none, rows.is_empty());
