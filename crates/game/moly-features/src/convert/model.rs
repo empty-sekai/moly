@@ -1338,6 +1338,7 @@ mod tests {
                 ResourceBox {
                     id: 10001,
                     purpose: BOX_CONSUMPTION.to_owned(),
+                    box_type: None,
                     name: None,
                     description: None,
                     details: vec![detail("mysekai_material", 5, 2), detail("coin", 0, 1000)],
@@ -1345,6 +1346,7 @@ mod tests {
                 ResourceBox {
                     id: 30003,
                     purpose: BOX_OBTAIN.to_owned(),
+                    box_type: None,
                     name: Some("box".to_owned()),
                     description: Some("box description".to_owned()),
                     details: vec![detail("mysekai_material", 7, 1), detail("mysekai_item", 9, 2)],
