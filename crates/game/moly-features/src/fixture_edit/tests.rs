@@ -154,6 +154,7 @@ fn invalid_candidate_save_preserves_storage() {
     });
     world.init_resource::<EditView>();
     put_effect::insert_test_tables(&mut world, &[]);
+    super::layout_rules::insert_test_site(&mut world);
     world.insert_resource(super::layout_rules::empty_zone_table());
 
     // A drag is clamped into the grid (FloorEditState.ClampPosition), so it

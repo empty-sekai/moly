@@ -982,6 +982,7 @@ mod tests {
             &mut world,
             &[(1, moly_layout::validate::Traits::from_row("normal", "road", "none", "road"))],
         );
+        super::super::layout_rules::insert_test_site(&mut world);
         let mut session = EditSession {
             content: EditContentType::Road,
             phase: super::super::EditPhase::Browsing,

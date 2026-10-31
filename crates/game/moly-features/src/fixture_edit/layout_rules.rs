@@ -34,6 +34,25 @@ pub fn empty_zone_table() -> ZoneTable {
     }
 }
 
+/// Test hook: an active site with the free layout mode held off, so [`rules`]
+/// reads the switch without the settings document.
+#[cfg(test)]
+pub fn insert_test_site(world: &mut World) {
+    const SITE: u32 = 1;
+    world.insert_resource(crate::site::SiteActive {
+        site_id: SITE,
+        level: 1,
+        site_type: String::new(),
+        category: String::new(),
+        scene: String::new(),
+        env_site: String::new(),
+        position: [0.0; 3],
+        room: None,
+        nav_face: None,
+    });
+    world.insert_resource(crate::free_layout::FreeLayout::read(&serde_json::Value::Null, SITE));
+}
+
 pub fn request_zones(mut commands: Commands, server: Res<AssetServer>) {
     commands.insert_resource(ZoneTable {
         handle: Some(server.load(ZONES)),
