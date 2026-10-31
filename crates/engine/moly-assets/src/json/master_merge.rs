@@ -150,9 +150,10 @@ fn ordered_row(mut row: Map<String, Value>, fields: &[&str], region: &str) -> Ma
 /// The merged text of `table`: its JP text and the texts of
 /// [`merged_regions`] in order.
 ///
-/// `Ok((None, Merged::JpOnly))` is the JP text unchanged: no region besides
-/// JP is enabled, the regions given add no row JP lacks, or the JP document
-/// is not an array of rows. A JP row's key is required only when the table
+/// `Ok((None, Merged::JpOnly))` is the JP text unchanged: `regions` holds no
+/// text of a region besides JP (the caller passes the [`merged_regions`] it
+/// read), the regions given add no row JP lacks, or the JP document is not an
+/// array of rows. A JP row's key is required only when the table
 /// merges with another region's rows. `Err` names rows of the JP text that
 /// are not objects, a non-JP text that is not an array of rows, or rows (JP
 /// or not) that lack their key: the table is then the JP text as well.
@@ -165,7 +166,7 @@ pub fn merge_table(
     let Some(jp_rows) = rows_of(jp)? else {
         return Ok((None, Merged::JpOnly));
     };
-    if merged_regions().is_empty() {
+    if regions.iter().all(|entry| matches!(entry, TableText::Jp(_))) {
         return Ok((None, Merged::JpOnly));
     }
     let mut keys: HashSet<String> = HashSet::with_capacity(jp_rows.len());

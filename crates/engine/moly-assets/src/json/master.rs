@@ -1126,7 +1126,7 @@ mod merge_tests {
     fn merged(table: &str, jp: &str, others: &[TableText<'_>]) -> (Vec<Value>, Merged) {
         let (text, outcome) = merge_table(table, jp, others).expect("a table of rows");
         match outcome {
-            Merged::JpOnly => (rows(jp).unwrap_or_default(), outcome),
+            Merged::JpOnly => (super::rows(jp).unwrap_or_default(), outcome),
             other => match text {
                 Some(text) => (rows(&text), other),
                 None => panic!("a merged table without its text"),
@@ -1309,12 +1309,10 @@ mod merge_tests {
         let error = merge_table("t", jp, &[TableText::Region(Region::Cn, cn)])
             .expect_err("a jp row without its key");
         assert!(error.contains("jp"));
-        // Without another region enabled the JP rows are the table as they
+        // Without another region's text the JP rows are the table as they
         // are, key or no key.
-        if merged_regions().is_empty() {
-            let (text, outcome) = merge_table("t", jp, &[]).expect("the jp text");
-            assert_eq!((text, outcome), (None, Merged::JpOnly));
-        }
+        let (text, outcome) = merge_table("t", jp, &[]).expect("the jp text");
+        assert_eq!((text, outcome), (None, Merged::JpOnly));
         // A key only JP has is JP's row.
         let jp = r#"[{"id": 1}, {"id": 1}]"#;
         let cn = r#"[{"id": 1}]"#;

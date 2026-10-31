@@ -8,7 +8,7 @@ license.workspace = true
 default = ["render"]
 # The renderer-side asset types: glTF scenes, images and shader programs. A
 # headless consumer (the server) builds this crate without it.
-render = ["bevy/bevy_gltf", "bevy/bevy_image", "bevy/bevy_scene", "bevy/bevy_shader"]
+render = ["bevy/bevy_camera", "bevy/bevy_gltf", "bevy/bevy_image", "bevy/bevy_scene", "bevy/bevy_shader"]
 
 [dependencies]
 moly-law = { path = "../../base/moly-law" }
