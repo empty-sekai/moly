@@ -49,6 +49,11 @@ struct ToolFiles {
 #[derive(Component)]
 pub struct ToolMaterialsSwapped;
 
+/// A tool model in another body's hand (see [`spawn_in_hand`]): the tool id
+/// whose document its materials are read with.
+#[derive(Component)]
+pub struct HandToolModel(pub i64);
+
 #[derive(Resource, Default)]
 pub struct HarvestToolModels {
     index_request: Option<Handle<JsonAsset>>,
@@ -210,20 +215,7 @@ pub fn apply(
     let Ok(driver) = players.single() else {
         return;
     };
-    let mount = names.iter().find_map(|(entity, name)| {
-        if name.as_str() != MOUNT {
-            return None;
-        }
-        let mut cursor = entity;
-        while let Ok(parent) = parents.get(cursor) {
-            cursor = parent.parent();
-            if cursor == driver.visual_root || cursor == driver.player {
-                return Some(entity);
-            }
-        }
-        None
-    });
-    let Some(mount) = mount else {
+    let Some(mount) = hand_mount(driver, &names, &parents) else {
         return;
     };
     let scene_handle =
@@ -245,6 +237,87 @@ pub fn apply(
     );
 }
 
+/// The right hand of the body `driver` drives (`FindDeep(avatarRoot,
+/// "Penlight_R")`).
+fn hand_mount(
+    driver: &AvatarDriver,
+    names: &Query<(Entity, &Name)>,
+    parents: &Query<&ChildOf>,
+) -> Option<Entity> {
+    names.iter().find_map(|(entity, name)| {
+        if name.as_str() != MOUNT {
+            return None;
+        }
+        let mut cursor = entity;
+        while let Ok(parent) = parents.get(cursor) {
+            cursor = parent.parent();
+            if cursor == driver.visual_root || cursor == driver.player {
+                return Some(entity);
+            }
+        }
+        None
+    })
+}
+
+/// The model of tool `tool_id` (`mysekai/tool/<assetbundle>`) put in the
+/// right hand of the body `driver` drives, a body other than the player's
+/// (the player's tool goes through [`ToolModelRequest`]): `Ok(None)` while
+/// the index, the model or the hand is not in yet; its materials are swapped
+/// as the player's are.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_in_hand(
+    commands: &mut Commands,
+    server: &AssetServer,
+    gltfs: &Assets<Gltf>,
+    models: &mut HarvestToolModels,
+    tool_id: i64,
+    assetbundle: &str,
+    driver: &AvatarDriver,
+    names: &Query<(Entity, &Name)>,
+    parents: &Query<&ChildOf>,
+) -> Result<Option<Entity>, String> {
+    if models.absent {
+        return Err(format!("no tool model index {INDEX}"));
+    }
+    let Some(index) = models.index.as_ref() else {
+        return Ok(None);
+    };
+    let Some(files) = index.get(assetbundle) else {
+        return Err(format!("no model {assetbundle} in the tool index"));
+    };
+    let (glb, scene, document) = (files.glb.clone(), files.scene, files.document.clone());
+    models.documents.entry(tool_id).or_insert_with(|| {
+        server.load(bevy::asset::AssetPath::from(format!("moly://avatar/tools/{document}")))
+    });
+    let handle = models
+        .gltfs
+        .entry(tool_id)
+        .or_insert_with(|| server.load(bevy::asset::AssetPath::from(format!("moly://avatar/tools/{glb}"))))
+        .clone();
+    if let LoadState::Failed(error) = server.load_state(&handle) {
+        return Err(format!("tool model {assetbundle} failed to load: {error:?}"));
+    }
+    let Some(gltf) = gltfs.get(&handle) else {
+        return Ok(None);
+    };
+    let Some(mount) = hand_mount(driver, names, parents) else {
+        return Ok(None);
+    };
+    let Some(scene_handle) = gltf.scenes.get(scene).cloned() else {
+        return Err(format!("tool model {assetbundle}: prefab scene {scene} out of range"));
+    };
+    let entity = commands
+        .spawn((
+            WorldAssetRoot(scene_handle),
+            Transform::IDENTITY,
+            Visibility::Inherited,
+            HandToolModel(tool_id),
+            ChildOf(mount),
+        ))
+        .id();
+    Ok(Some(entity))
+}
+
 /// Update: a tool model's `Mysekai/Avatar-Tool` materials take the tool
 /// program once its scene and document are in; the document's material of
 /// the same name gives `_UsePhenomenaLighting`, the glb material its main
@@ -256,6 +329,7 @@ pub fn swap_materials(
     json: Res<Assets<JsonAsset>>,
     models: Res<HarvestToolModels>,
     roots: Query<(), Without<ToolMaterialsSwapped>>,
+    hands: Query<(Entity, &HandToolModel), Without<ToolMaterialsSwapped>>,
     children: Query<&Children>,
     parts: Query<(
         Entity,
@@ -265,8 +339,13 @@ pub fn swap_materials(
     standard: Res<Assets<StandardMaterial>>,
     mut tools: ResMut<Assets<HarvestToolMaterial>>,
 ) {
-    let source_models: Vec<_> = models.instances.iter().filter_map(|(id, root)|
-        models.documents.get(id).map(|document| (*id, *root, document.clone()))).collect();
+    let source_models: Vec<_> = models
+        .instances
+        .iter()
+        .map(|(id, root)| (*id, *root))
+        .chain(hands.iter().map(|(root, tool)| (tool.0, root)))
+        .filter_map(|(id, root)| models.documents.get(&id).map(|document| (id, root, document.clone())))
+        .collect();
     for (tool_id, root, document) in source_models {
         if roots.get(root).is_err() {
             continue;

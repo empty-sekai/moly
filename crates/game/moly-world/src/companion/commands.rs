@@ -25,6 +25,7 @@ fn not_spawned(command: &crate::companion::CompanionCommand, unit: u32) {
         CompanionCommand::WalkTo { .. } => "walk",
         CompanionCommand::Face { .. } => "face",
         CompanionCommand::Build { .. } => "build",
+        CompanionCommand::Gather { .. } => "gather",
         CompanionCommand::Motion { .. } => "motion",
         CompanionCommand::Use { .. } => "use",
         CompanionCommand::Spawn { .. } => "spawn",
@@ -232,6 +233,57 @@ pub(super) fn build_command(
         commands.entity(entity).insert(build::BuildPlan {
             seq,
             uid: uid.clone(),
+            work: build::Work::Fixture,
+            at: *at,
+            swings,
+            phase: build::BuildPhase::Navigation,
+            waited: 0.0,
+        });
+    }
+}
+
+/// Update: every gather, in arrival order.
+pub(super) fn gather_command(
+    mut commands: Commands,
+    mut requests: MessageReader<crate::companion::CompanionCommand>,
+    builds: Query<&build::BuildPlan>,
+    mut companions: Query<(Entity, &Companion, &mut CompanionStatus)>,
+) {
+    for command in requests.read() {
+        let crate::companion::CompanionCommand::Gather { unit, at, reach, clip, swings, tag } = command else {
+            continue;
+        };
+        let unit = *unit;
+        let Some((entity, _, mut status)) = companions.iter_mut().find(|(_, body, _)| body.unit == unit)
+        else {
+            not_spawned(command, unit);
+            continue;
+        };
+        if status.state == CompanionState::Spawned {
+            status.refuse("the body is still loading");
+            error!(
+                "[companion] unit {unit} gather {} refused: the body is still loading",
+                status.seq
+            );
+            continue;
+        }
+        if builds.get(entity).is_ok() {
+            status.refuse("a build is already in flight");
+            error!("[companion] unit {unit} gather refused: a build is already in flight");
+            continue;
+        }
+        let seq = status.accept();
+        let swings = (*swings).clamp(1, build::MAX_GATHER_SWINGS);
+        status.state = CompanionState::Walking;
+        info!("[companion] unit {unit} gather {seq}: {tag} at {at:?}, {swings} swings of {clip}");
+        commands.entity(entity).insert(build::BuildPlan {
+            seq,
+            uid: String::new(),
+            work: build::Work::Gather {
+                clip: clip.clone(),
+                tag: *tag,
+                reach: *reach,
+            },
             at: *at,
             swings,
             phase: build::BuildPhase::Navigation,

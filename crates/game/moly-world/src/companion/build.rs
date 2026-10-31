@@ -14,8 +14,13 @@
 //! A build is one command ([`super::CompanionCommand::Build`]): the
 //! companion waits for the navigation baked with the fixture in it, walks
 //! to the nearest walkable point beside the fixture, turns to it and swings.
+//!
+//! A gather ([`super::CompanionCommand::Gather`]) is the same walk and swing
+//! at a harvest object: the clip is the caller's, nothing is ghosted, no
+//! hammer is held (the caller may put its own tool in the hand with
+//! [`hold_tool`]), and the hits are written as [`GatherCue`]s.
 
-use super::{faces, turn_to, Companion, CompanionState, CompanionStatus, BuildCue, Gait, Walker};
+use super::{faces, turn_to, BuildCue, Companion, CompanionState, CompanionStatus, Gait, GatherCue, Walker};
 use crate::fixture::FixtureInstanceSeed;
 use crate::fixture_material::{FixtureMaterial, FixtureMaterialsSwapped};
 use crate::npc::{MotionPhase, PathSlot, RouteStops, WalkState};
@@ -41,6 +46,11 @@ const STAND_RINGS: (f32, f32, f32) = (0.5, 4.0, 0.25);
 const STAND_ANGLES: usize = 16;
 /// How close to its stand point a stopped walk still swings from.
 const STAND_REACH: f32 = 0.8;
+/// The share of a harvest object's contact radius a gather stands at, the
+/// first ring searched.
+const GATHER_CONTACT: f32 = 0.6;
+/// The most swings a gather takes.
+pub const MAX_GATHER_SWINGS: u32 = 40;
 
 /// Fixture instances drawn as ghosts, by layout uid, with how solid each
 /// stands (0 not drawn, 1 solid). An instance not listed is drawn as it is.
@@ -160,11 +170,23 @@ pub fn apply_ghosts(
     }
 }
 
-/// A build in flight on a companion.
+/// What a swing works on.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Work {
+    /// A layout fixture drawn as a ghost until built (`uid`).
+    Fixture,
+    /// A harvest object: the swing clip, the caller's tag, its contact
+    /// radius.
+    Gather { clip: String, tag: u64, reach: f32 },
+}
+
+/// A build or a gather in flight on a companion.
 #[derive(Component, Clone, Debug)]
 pub struct BuildPlan {
     pub seq: u64,
+    /// The fixture's layout uid; empty for a gather.
     pub uid: String,
+    pub work: Work,
     /// The fixture's position, which the companion turns to.
     pub at: Vec3,
     pub swings: u32,
@@ -193,11 +215,43 @@ pub(super) struct Hammering {
     started: bool,
 }
 
-/// The tool model in a companion's right hand.
+/// The tool model in a companion's right hand; it is despawned when the
+/// build or gather that holds it ends or is given up.
 #[derive(Component)]
-pub(super) struct HeldTool(pub(super) Entity);
+pub struct HeldTool(pub(super) Entity);
+
+/// Puts `tool`, an entity already parented to the companion's hand, in the
+/// hand of the companion `companion` for its gather in flight: the tool goes
+/// with the gather.
+pub fn hold_tool(commands: &mut Commands, companion: Entity, tool: Entity) {
+    commands.entity(companion).insert(HeldTool(tool));
+}
 
 impl BuildPlan {
+    /// The swing clip.
+    fn clip(&self) -> &str {
+        match &self.work {
+            Work::Fixture => BUILD_CLIP,
+            Work::Gather { clip, .. } => clip,
+        }
+    }
+
+    /// The state the swings show.
+    fn swinging(&self) -> CompanionState {
+        match self.work {
+            Work::Fixture => CompanionState::Building,
+            Work::Gather { .. } => CompanionState::Gathering,
+        }
+    }
+
+    /// What the log calls the work.
+    fn what(&self) -> String {
+        match &self.work {
+            Work::Fixture => format!("build {}", self.seq),
+            Work::Gather { tag, .. } => format!("gather {} of {tag}", self.seq),
+        }
+    }
+
     /// How solid the fixture stands after `hits` of the build's swings.
     fn alpha(&self, hits: u32) -> f32 {
         GHOST_ALPHA + (1.0 - GHOST_ALPHA) * hits as f32 / self.swings.max(1) as f32
@@ -212,8 +266,9 @@ fn stand_point(
     objective: &crate::npc_objective::ObjectiveFace,
     from: Vec3,
     at: Vec3,
+    first: f32,
 ) -> Option<Vec3> {
-    let (first, last, step) = STAND_RINGS;
+    let (_, last, step) = STAND_RINGS;
     let mut radius = first;
     while radius <= last {
         let mut best: Option<(f32, Vec3)> = None;
@@ -274,8 +329,12 @@ pub(super) fn approach(
             continue;
         }
         let unit = companion.unit;
-        let ready = faces(site.as_deref(), epoch.as_deref(), face.as_deref(), objective.as_deref())
-            .filter(|(face, _)| revision.as_deref().is_some_and(|revision| face.layout_revision() == revision.0));
+        // A build waits for the walk cells baked with its fixture; a gather
+        // walks on the cells as they are.
+        let gather = matches!(plan.work, Work::Gather { .. });
+        let ready = faces(site.as_deref(), epoch.as_deref(), face.as_deref(), objective.as_deref()).filter(
+            |(face, _)| gather || revision.as_deref().is_some_and(|revision| face.layout_revision() == revision.0),
+        );
         let Some((face, objective)) = ready else {
             plan.waited += time.delta_secs();
             if plan.waited > NAVIGATION_WAIT_SECS {
@@ -290,19 +349,31 @@ pub(super) fn approach(
             continue;
         };
         let from = transform.translation;
-        let Some(stand) = stand_point(face, objective, from, plan.at) else {
+        // A harvest object is reached inside its contact circle, as the
+        // player's own harvest contact is.
+        let first = match plan.work {
+            Work::Fixture => STAND_RINGS.0,
+            Work::Gather { reach, .. } => (reach * GATHER_CONTACT).max(STAND_RINGS.0),
+        };
+        let Some(stand) = stand_point(face, objective, from, plan.at, first) else {
             ghosts.clear(&plan.uid);
-            status.fail("no walkable point beside the fixture");
+            status.fail(if gather {
+                "no walkable point beside the harvest object"
+            } else {
+                "no walkable point beside the fixture"
+            });
             error!(
-                "[companion] unit {unit} build {}: no walkable point beside fixture {} at {:?}",
-                plan.seq, plan.uid, plan.at
+                "[companion] unit {unit} {}: no walkable point beside {:?}",
+                plan.what(),
+                plan.at
             );
             commands.entity(entity).remove::<BuildPlan>();
             continue;
         };
         info!(
-            "[companion] unit {unit} build {}: fixture {} at {:?}; stands at {stand:?}",
-            plan.seq, plan.uid, plan.at
+            "[companion] unit {unit} {}: target at {:?}; stands at {stand:?}",
+            plan.what(),
+            plan.at
         );
         if stand.distance(from) <= STAND_REACH {
             plan.phase = BuildPhase::Swing;
@@ -332,8 +403,9 @@ pub(super) fn approach(
                 ghosts.clear(&plan.uid);
                 status.fail(reason);
                 error!(
-                    "[companion] unit {unit} build {}: the walk to fixture {} was refused: {reason}",
-                    plan.seq, plan.uid
+                    "[companion] unit {unit} {}: the walk to {:?} was refused: {reason}",
+                    plan.what(),
+                    plan.at
                 );
                 commands.entity(entity).remove::<BuildPlan>();
             }
@@ -360,9 +432,9 @@ pub(super) fn walk_ended(
     ghosts.clear(&plan.uid);
     status.fail(crate::npc::companion::WALK_STOPPED);
     error!(
-        "[companion] build {}: the walk to fixture {} stopped {:.2} m from its stand point",
-        plan.seq,
-        plan.uid,
+        "[companion] {}: the walk to {:?} stopped {:.2} m from its stand point",
+        plan.what(),
+        plan.at,
         at.distance(stand)
     );
     false
@@ -376,6 +448,7 @@ pub(super) fn swing(
     mut commands: Commands,
     time: Res<Time>,
     mut cues: MessageWriter<BuildCue>,
+    mut gather_cues: MessageWriter<GatherCue>,
     server: Res<AssetServer>,
     gltfs: Res<Assets<Gltf>>,
     view: Res<AvatarItemView>,
@@ -403,7 +476,7 @@ pub(super) fn swing(
             continue;
         }
         let unit = companion.unit;
-        if held.is_none() {
+        if held.is_none() && plan.work == Work::Fixture {
             match avatar_item::create(
                 &view,
                 Hand::Right,
@@ -425,10 +498,13 @@ pub(super) fn swing(
             }
         }
         let Some(mut hammering) = hammering else {
-            let Some(clip) = driver.clips().get(BUILD_CLIP) else {
+            let Some(clip) = driver.clips().get(plan.clip()) else {
                 ghosts.clear(&plan.uid);
-                status.fail("the motion group has no build swing");
-                error!("[companion] unit {unit} build {}: no clip {BUILD_CLIP}", plan.seq);
+                match plan.work {
+                    Work::Fixture => status.fail("the motion group has no build swing"),
+                    Work::Gather { .. } => status.fail(&format!("the motion group has no clip {}", plan.clip())),
+                }
+                error!("[companion] unit {unit} {}: no clip {}", plan.what(), plan.clip());
                 commands.entity(entity).remove::<BuildPlan>();
                 continue;
             };
@@ -441,7 +517,10 @@ pub(super) fn swing(
             if let Some(turned) = turn_to(transform.translation, plan.at) {
                 transform.rotation = turned;
             }
-            status.state = CompanionState::Building;
+            status.state = plan.swinging();
+            if let Work::Gather { tag, .. } = plan.work {
+                gather_cues.write(GatherCue::Swinging { unit, tag });
+            }
             commands.entity(entity).insert(Hammering {
                 elapsed: 0.0,
                 length,
@@ -450,18 +529,23 @@ pub(super) fn swing(
                 started: false,
             });
             info!(
-                "[companion] unit {unit} build {}: {} swings of {BUILD_CLIP} ({length:.3} s, hit at {hit:.3} s)",
-                plan.seq, plan.swings
+                "[companion] unit {unit} {}: {} swings of {} ({length:.3} s, hit at {hit:.3} s)",
+                plan.what(),
+                plan.swings,
+                plan.clip()
             );
             continue;
         };
         if !hammering.started {
-            let node = match driver.node(BUILD_CLIP, &mut graphs) {
+            let node = match driver.node(plan.clip(), &mut graphs) {
                 Ok((node, _)) => node,
                 Err(error) => {
                     ghosts.clear(&plan.uid);
-                    status.fail("the build swing cannot play");
-                    error!("[companion] unit {unit} build {}: {BUILD_CLIP}: {error}", plan.seq);
+                    status.fail(match plan.work {
+                        Work::Fixture => "the build swing cannot play",
+                        Work::Gather { .. } => "the swing cannot play",
+                    });
+                    error!("[companion] unit {unit} {}: {}: {error}", plan.what(), plan.clip());
                     commands.entity(entity).remove::<(BuildPlan, Hammering)>();
                     continue;
                 }
@@ -486,10 +570,26 @@ pub(super) fn swing(
         };
         while hammering.hits < due {
             hammering.hits += 1;
-            let alpha = plan.alpha(hammering.hits);
-            ghosts.set(&plan.uid, alpha);
             // Where the body stands as it swings.
             let from = transform.translation;
+            if let Work::Gather { tag, .. } = plan.work {
+                gather_cues.write(GatherCue::Hit {
+                    unit,
+                    tag,
+                    hit: hammering.hits,
+                    of: plan.swings,
+                    from,
+                });
+                info!(
+                    "[companion] unit {unit} {}: hit {}/{}",
+                    plan.what(),
+                    hammering.hits,
+                    plan.swings
+                );
+                continue;
+            }
+            let alpha = plan.alpha(hammering.hits);
+            ghosts.set(&plan.uid, alpha);
             cues.write(BuildCue::Hit {
                 unit,
                 uid: plan.uid.clone(),
@@ -509,11 +609,19 @@ pub(super) fn swing(
                 commands.entity(*tool).despawn();
             }
             commands.entity(entity).remove::<(BuildPlan, Hammering, HeldTool)>();
-            cues.write(BuildCue::Built { unit, uid: plan.uid.clone() });
+            match plan.work {
+                Work::Fixture => {
+                    cues.write(BuildCue::Built { unit, uid: plan.uid.clone() });
+                    info!("[companion] unit {unit} build {}: fixture {} built", plan.seq, plan.uid);
+                }
+                Work::Gather { tag, .. } => {
+                    gather_cues.write(GatherCue::Ended { unit, tag });
+                    info!("[companion] unit {unit} {}: swings done", plan.what());
+                }
+            }
             // The clip driver takes the companion back to its idle.
             gait.hammer_played = false;
             status.state = CompanionState::Done;
-            info!("[companion] unit {unit} build {}: fixture {} built", plan.seq, plan.uid);
         }
     }
 }

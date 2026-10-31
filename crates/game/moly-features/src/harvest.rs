@@ -46,6 +46,7 @@ mod bulk_notice;
 mod airplane;
 mod arrival;
 pub mod catalog;
+pub mod companion_gather;
 mod clips;
 pub(crate) mod damage;
 mod drops;
@@ -790,6 +791,7 @@ impl Plugin for HarvestPlugin {
             .init_resource::<stamina_hud::HarvestStaminaHud>()
             .init_resource::<HarvestStaminaRefresh>()
             .init_resource::<tool_model::HarvestToolModels>()
+            .init_resource::<companion_gather::CompanionGathers>()
             .init_resource::<tool_model::ToolModelRequests>()
             .init_resource::<queue::HarvestLogQueue>()
             .init_resource::<pickup::HarvestDropManager>()
@@ -866,6 +868,15 @@ impl Plugin for HarvestPlugin {
                     .chain()
                     .in_set(HarvestActionSet)
                     .after(arrival::bind_views),
+            )
+            // A companion's hits join the harvest's own before its action
+            // loop; its tool goes in its hand once it swings.
+            .add_systems(
+                Update,
+                (companion_gather::hits, companion_gather::tools)
+                    .chain()
+                    .before(HarvestActionSet)
+                    .after(tool_model::parse),
             )
             .add_systems(
                 Update,

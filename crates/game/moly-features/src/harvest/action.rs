@@ -126,21 +126,18 @@ impl HarvestPlayerModel {
         self.tools.iter().find(|tool| tool.tool_id == id)
     }
 
-    /// `SetAppropriateToolData(fixtureType)`: the last used tool of the
-    /// type while its quantity is at least one, else the first tool of the
-    /// type with a quantity above zero (user list order), else none; stored
-    /// back as the used tool of the type.
-    fn set_appropriate_tool(&mut self, catalog: &HarvestCatalog, fixture_type: i32) -> Option<i64> {
-        let Some(tool_type) = tool_type_for(fixture_type) else {
-            self.selected = None;
-            return None;
-        };
+    /// The tool `SetAppropriateToolData(fixtureType)` would choose: the last
+    /// used tool of the type while its quantity is at least one, else the
+    /// first tool of the type with a quantity above zero (user list order),
+    /// else none.
+    pub fn appropriate_tool(&self, catalog: &HarvestCatalog, fixture_type: i32) -> Option<i64> {
+        let tool_type = tool_type_for(fixture_type)?;
         let last = self
             .used
             .get(&tool_type)
             .copied()
             .filter(|id| self.tool(*id).is_some_and(|tool| tool.quantity >= 1));
-        let choice = last.or_else(|| {
+        last.or_else(|| {
             self.tools
                 .iter()
                 .filter(|tool| tool.quantity > 0)
@@ -150,7 +147,17 @@ impl HarvestPlayerModel {
                         .is_some_and(|def| def.tool_type == tool_type)
                 })
                 .map(|tool| tool.tool_id)
-        });
+        })
+    }
+
+    /// `SetAppropriateToolData(fixtureType)`: [`Self::appropriate_tool`],
+    /// stored back as the used tool of the type.
+    fn set_appropriate_tool(&mut self, catalog: &HarvestCatalog, fixture_type: i32) -> Option<i64> {
+        let Some(tool_type) = tool_type_for(fixture_type) else {
+            self.selected = None;
+            return None;
+        };
+        let choice = self.appropriate_tool(catalog, fixture_type);
         match choice {
             Some(id) => {
                 self.used.insert(tool_type, id);

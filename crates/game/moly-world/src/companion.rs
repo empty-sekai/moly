@@ -12,6 +12,9 @@
 //! Build   { unit: u32, uid: String, at: Vec3, swings: u32 }
 //!                                              hammer the placed fixture `uid` (standing at `at`)
 //!                                              from a ghost to solid in `swings` hits
+//! Gather  { unit: u32, at: Vec3, reach: f32, clip: String, swings: u32, tag: u64 }
+//!                                              swing the harvest clip `clip` `swings` times at
+//!                                              the harvest object at `at` (radius `reach`)
 //! Motion  { unit: u32, motion: String }        play the motion-library motion `motion` once
 //!                                              on the body's own skeleton, then its idle
 //! Despawn { unit: u32 }                        remove it
@@ -25,7 +28,7 @@
 //!
 //! ```text
 //! CompanionStatus { seq: u64, state: CompanionState }
-//! CompanionState: Spawned | Idle | Walking | Turning | Building | Acting | Done | Failed(String)
+//! CompanionState: Spawned | Idle | Walking | Turning | Building | Gathering | Acting | Done | Failed(String)
 //! ```
 //!
 //! The spawn is `seq` 1 and `Spawned` while its body loads; then the
@@ -48,6 +51,13 @@
 //! editor's own put search and save); the companion only draws it as a ghost
 //! and builds it. A walk command gives a build in flight up, and its fixture
 //! is drawn solid.
+//!
+//! A gather walks the companion beside a harvest object the same way and
+//! swings the clip it was given, writing a [`GatherCue`] on each hit and one
+//! at its end. The harvest itself (the damage, the tool in the hand, the
+//! drops) is the caller's: the companion knows only the point, the clip and
+//! the count. A tool model the caller puts in the companion's hand
+//! ([`hold_tool`]) leaves with the gather.
 //!
 //! A motion ([`act`]) plays one motion of the shared motion library on the
 //! companion's own body: the motion's start segment, its loop segment once
@@ -72,6 +82,10 @@
 //!          the body has no own motion | the motion library is not loaded |
 //!          the motion library has no start segment <motion>_S | the navigation
 //!          state is in use
+//! gather:  not spawned | the body is still loading | a build is already in flight |
+//!          no navigation on this site | no walkable point beside the harvest object |
+//!          a walk's refusal on the way there | the motion group has no clip <clip> |
+//!          the swing cannot play
 //! build:   not spawned | the body is still loading | a build is already in flight |
 //!          the navigation with the fixture in it was not baked | no walkable point beside the
 //!          fixture | a walk's refusal on the way there | the motion group has no build swing |
@@ -158,6 +172,10 @@ pub enum CompanionCommand {
     /// as a ghost until the companion has walked beside it and hammered it
     /// `swings` times (see [`build`]).
     Build { unit: u32, uid: String, at: Vec3, swings: u32 },
+    /// Swing the body clip `clip` `swings` times at the harvest object at
+    /// `at`, whose contact radius is `reach`, standing beside it; each hit
+    /// is written as a [`GatherCue`] carrying `tag`.
+    Gather { unit: u32, at: Vec3, reach: f32, clip: String, swings: u32, tag: u64 },
     /// Play the motion-library motion `motion` once on the body's own
     /// skeleton, then its idle (see [`act`]).
     Motion { unit: u32, motion: String },
@@ -218,6 +236,8 @@ pub enum CompanionState {
     Turning,
     /// Hammering a build.
     Building,
+    /// Swinging at a harvest object.
+    Gathering,
     /// Playing a motion on the body's own skeleton.
     Acting,
     /// Playing a fixture's action on the body's own skeleton.
@@ -234,6 +254,7 @@ impl CompanionState {
             Self::Walking => "walking",
             Self::Turning => "turning",
             Self::Building => "building",
+            Self::Gathering => "gathering",
             Self::Acting => "acting",
             Self::Using => "using",
             Self::Done => "done",
@@ -251,6 +272,21 @@ pub enum BuildCue {
     /// The build's last hit: the fixture `uid` is solid.
     Built { unit: u32, uid: String },
 }
+
+/// A step of a companion's gather, for whoever turns its swings into a
+/// harvest.
+#[derive(Message, Clone, Debug, PartialEq)]
+pub enum GatherCue {
+    /// The swing has started: a tool may be put in the hand now.
+    Swinging { unit: u32, tag: u64 },
+    /// The `hit`th of `of` swings has hit; `from` is the companion at the
+    /// hit.
+    Hit { unit: u32, tag: u64, hit: u32, of: u32, from: Vec3 },
+    /// The last swing is over.
+    Ended { unit: u32, tag: u64 },
+}
+
+pub use build::{hold_tool, HeldTool};
 
 /// A companion body, by the unit whose character it wears.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
@@ -351,6 +387,7 @@ impl Plugin for CompanionPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<CompanionCommand>()
             .add_message::<BuildCue>()
+            .add_message::<GatherCue>()
             .init_resource::<FixtureGhosts>()
             .init_resource::<crate::player_avatar::oc::own::OnceMotions>()
             // Companions stay on the site they were spawned on: they leave
@@ -375,6 +412,7 @@ impl Plugin for CompanionPlugin {
                     commands::walk,
                     commands::face_command,
                     commands::build_command,
+                    commands::gather_command,
                     commands::motion,
                     commands::use_command,
                     commands::despawn,
