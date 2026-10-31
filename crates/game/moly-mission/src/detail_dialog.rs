@@ -81,7 +81,7 @@
 //! layout groups take the content root's new preferred height; the footer
 //! close label is the document's serialized text.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use bevy::asset::LoadState;
 use bevy::camera::visibility::RenderLayers;
@@ -164,8 +164,6 @@ pub(crate) struct Bindings {
     pub(crate) mission_text: String,
     /// `ProgressInformation/ProgressText` (`_progressText`).
     pub(crate) progress_text: String,
-    /// `ProgressInformation/UIPartsGauge` (`_progresGauge`).
-    pub(crate) gauge: String,
     /// `ContentRoot/Content/MissionInformation` (`_infomationContent`).
     pub(crate) info_content: String,
     /// `MissionInformation/MissionText` (`_infoMissionText`).
@@ -181,8 +179,6 @@ pub(crate) struct Bindings {
     pub(crate) list: String,
     /// `ListView/Viewport/Content`.
     pub(crate) list_content: String,
-    /// `ListView/Viewport`, the list's clip.
-    pub(crate) list_viewport: String,
     /// `RewardBg/ScrollbarVertical` (the vertical scrollbar's object).
     pub(crate) scrollbar: String,
     /// `ListView`'s `CustomScrollRect`, whose `enabled` the source sets.
@@ -191,11 +187,9 @@ pub(crate) struct Bindings {
     pub(crate) list_pivot_y: f32,
     pub(crate) list_height: f32,
     /// The list's `padding` (left, right, top, bottom) and
-    /// `verticalSpacing`, as `ListView` lays its rows out, and the cell
-    /// prefab's name.
+    /// `verticalSpacing`, as `ListView` lays its rows out.
     pub(crate) list_padding: [f32; 4],
     pub(crate) list_spacing: f32,
-    pub(crate) list_cell: String,
     /// The Mask above the gauge's `fillImage`, the node a fill is drawn on.
     pub(crate) gauge_mask: String,
     /// `WindowRoot/FooterButtons/UIPartsCommonButton_close` (`OnClickCancel`).
@@ -257,13 +251,11 @@ impl Bindings {
         Ok(Self {
             list_padding,
             list_spacing: fields["verticalSpacing"].as_f64().unwrap_or(0.0) as f32,
-            list_cell: REWARD_CELL.to_owned(),
             mission_text: path(format!("{progress}/MissionText"))?,
             progress_text: path(format!("{progress}/ProgressText"))?,
             info_mission: path(format!("{info}/MissionText"))?,
             info_clear: path(format!("{info}/Clear"))?,
             list_content: format!("{list}/Viewport/Content"),
-            list_viewport: format!("{list}/Viewport"),
             scrollbar: path(format!("{content}/RewardBg/ScrollbarVertical"))?,
             footer_close: path(format!("{window}/FooterButtons/UIPartsCommonButton_close"))?,
             to_screen: path(format!("{window}/FooterButtons/UIPartsCommonButton_ToScreen"))?,
@@ -274,7 +266,6 @@ impl Bindings {
             gauge_mask,
             progress_content: progress,
             info_content: info,
-            gauge,
             reward_label,
             reward_label_bg,
             list,
@@ -681,7 +672,7 @@ pub fn spawn_when_ready(
 pub struct DialogWorld<'w, 's> {
     pub windows: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
     pub root_canvas: Option<Res<'w, RootCanvas>>,
-    pub views: Query<'w, 's, (&'static Bindings, &'static UiPrefabView), With<MissionDetailDialogRoot>>,
+    pub(crate) views: Query<'w, 's, (&'static Bindings, &'static UiPrefabView), With<MissionDetailDialogRoot>>,
 }
 
 /// Update: the dialog's entity visibility and canvas scale while it is up.
@@ -927,7 +918,7 @@ fn draw_rows(
 /// `SetupProgress` / `SetupInformation` on the dialog's own view: the copy
 /// with `SetupContentElement`'s height and its reward row copies is installed,
 /// then the mode's nodes, label, list top, rows and scrollbar are written.
-pub fn setup_view(
+pub(crate) fn setup_view(
     view: &mut UiPrefabView,
     layouts: &mut UiLayouts,
     server: &AssetServer,
@@ -939,7 +930,7 @@ pub fn setup_view(
 ) -> Result<(), String> {
     let mut document = with_height(template, content_height_for(data.mode, data.count))?;
     compose_rows(&mut document, cell, &bindings.list_content, data.count)?;
-    layouts.replace_runtime_document(VIEW, document, &server)?;
+    layouts.replace_runtime_document(VIEW, document, server)?;
     // The glyph set covers the documents installed before the copy went in,
     // so it is read here, after the rows' copy.
     let glyphs = layouts.text_chars().into_iter().collect();
@@ -1063,7 +1054,7 @@ fn put_text(
 
 /// Update: `Setup` on the dialog's own view, once its slot is open: the
 /// mission's `SetupProgress` / `SetupInformation` node by node.
-pub fn setup(
+pub(crate) fn setup(
     mut dialog: ResMut<MissionDetailDialog>,
     mut layouts: ResMut<UiLayouts>,
     server: Res<AssetServer>,

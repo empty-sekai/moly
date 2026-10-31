@@ -236,7 +236,7 @@ pub fn remember_levels(
 ) {
     *before = MissionLevelsBefore {
         gamedata: client.as_deref().map(|client| client.gamedata),
-        inventory: inventory.as_deref().map(|inventory| inventory.gamedata()).flatten(),
+        inventory: inventory.as_deref().and_then(|inventory| inventory.gamedata()),
     };
 }
 

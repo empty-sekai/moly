@@ -95,7 +95,6 @@ const COMPLETE_COLOR: [f32; 4] = [1.0, 1.0, 238.0 / 255.0, 1.0];
 const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 pub(super) const TEXT_CLASS: &str = "Sekai.UI.CustomTextMesh";
 pub(super) const IMAGE_CLASS: &str = "Sekai.UI.CustomImage";
-const BUTTON_CLASS: &str = "Sekai.UI.CustomButton";
 const GAUGE_CLASS: &str = "Sekai.UIPartsGauge";
 const LIST_VIEW_CLASS: &str = "Sekai.UI.ListView";
 
@@ -189,11 +188,10 @@ pub(crate) fn widen_to_text(
     }
 }
 
-/// One gauge's fill in a composed document: the Mask's `GameObject` identity
-/// and the selector that names it.
+/// One gauge's fill in a composed document: the selector (`@<id>`) of the
+/// Mask's `GameObject`.
 #[derive(Debug, Clone)]
 pub(crate) struct GaugeFill {
-    pub node: i64,
     pub path: String,
 }
 
@@ -201,10 +199,9 @@ impl GaugeFill {
     /// The fill of the `CustomImage` at `path` of `doc`, by its `GameObject`.
     pub fn of_image(doc: &UiPrefab, path: &str) -> Option<Self> {
         let path = object_at(doc, path, IMAGE_CLASS)?;
-        Some(Self {
-            node: path[1..].parse().ok()?,
-            path,
-        })
+        // The selector names the object by its identity.
+        path[1..].parse::<i64>().ok()?;
+        Some(Self { path })
     }
 }
 
@@ -264,7 +261,6 @@ pub(crate) fn gauge_fills(
     for instance in instances {
         let node = instance.identity(mask)?;
         fills.push(Some(GaugeFill {
-            node,
             path: format!("@{node}"),
         }));
     }
@@ -361,7 +357,7 @@ fn list_view<'a>(doc: &'a UiPrefab, list: &str) -> Option<&'a UiComponent> {
 }
 
 /// The cell root above a `MissionCellView` path.
-fn cell_root_of<'a>(cell_view: &'a str) -> Option<&'a str> {
+fn cell_root_of(cell_view: &str) -> Option<&str> {
     let (root, _) = cell_view.split_once("/MissionCellView")?;
     Some(root)
 }
@@ -525,7 +521,7 @@ pub(crate) fn write_text(
 ) {
     let (text, lack) = cell_text(doc, path, text, glyphs);
     view.set_text(path, text);
-    for ch in lack {
+    if let Some(ch) = lack {
         if seen.insert(format!("glyph {label} {ch:?}")) {
             warn!(
                 "mission: {label} text has the character {ch:?}, which the shared glyph atlas lacks; the cell keeps the document's text"

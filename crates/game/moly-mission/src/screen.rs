@@ -549,9 +549,15 @@ pub fn refresh_page(
 // The turn
 // ---------------------------------------------------------------------------
 
-/// `TurnPage`: the next page set to the user's current sheet and refreshed,
-/// the current page's stamp hidden, then the turn's steps.
-pub fn turn_page(screen: &mut MissionScreen, masters: &MissionMasters, user: &ClientMission) {
+/// `TurnPage`: the next page set to the user's current sheet and refreshed
+/// (its list starts at the top), the current page's stamp hidden, then the
+/// turn's steps.
+pub fn turn_page(
+    screen: &mut MissionScreen,
+    cells: &mut super::cell::MissionCells,
+    masters: &MissionMasters,
+    user: &ClientMission,
+) {
     if screen.turn.is_some() {
         info!("[mission] TurnPage is called while a turn runs; the turn continues");
         return;
@@ -559,6 +565,7 @@ pub fn turn_page(screen: &mut MissionScreen, masters: &MissionMasters, user: &Cl
     let next = screen.next_page();
     screen.sheet = current_sheet(masters, user);
     refresh_page(screen, masters, user, next);
+    cells.shown(next);
     screen.pages[screen.current].stamp = false;
     screen.offsets[next] = PAGE_TURN_X;
     screen.turn = Some(Turning {
@@ -689,7 +696,7 @@ pub fn follow_screen(
     mut events: MessageReader<ScreenLayerEvent>,
     tables: Option<Res<moly_masters::load::MasterTables>>,
     user: Option<Res<ClientMission>>,
-    mut screens: ResMut<ScreenManager>,
+    screens: ResMut<ScreenManager>,
     mut layer_commands: MessageWriter<LayerCommand>,
     mut screen: ResMut<MissionScreen>,
 ) {
@@ -964,7 +971,7 @@ pub struct InputWrites<'w> {
 pub fn input(
     mut pointers: MessageReader<UiPointerEvent>,
     windows: Query<&Window, With<PrimaryWindow>>,
-    mut world: InputWorld,
+    world: InputWorld,
     mut writes: InputWrites,
     root_canvas: Option<Res<RootCanvas>>,
 ) {

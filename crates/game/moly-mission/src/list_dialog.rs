@@ -62,7 +62,7 @@ use moly_assets::ui_layout::{UiComponent, UiPrefab};
 use serde_json::Value;
 
 use super::cell::{
-    component_at, write_text, MissionDialogRequest, IMAGE_CLASS, SHEET_CELL, TEXT_CLASS,
+    write_text, MissionDialogRequest, IMAGE_CLASS, SHEET_CELL, TEXT_CLASS,
 };
 use super::detail_dialog::{load_cell, CellSource};
 use super::screen;
@@ -462,7 +462,7 @@ pub struct MissionListDialog {
     /// Whether the list refused its documents; the refusal is final.
     pub(crate) refused: bool,
     /// The two documents' row writes, once installed.
-    pub(crate) writes: Option<SheetWrites>,
+    writes: Option<SheetWrites>,
     pub(crate) seen: BTreeSet<String>,
 }
 
@@ -625,7 +625,7 @@ pub fn open(
 /// Update: `Setup` on the dialog's own view, once its slot is open: the
 /// runtime copy is installed again with one `MysekaiMissionSheetCell` copy per
 /// sheet row, and each copy runs the cell's `Setup` on its row.
-pub fn setup(
+pub(crate) fn setup(
     mut dialog: ResMut<MissionListDialog>,
     mut layouts: ResMut<UiLayouts>,
     server: Res<AssetServer>,
@@ -722,7 +722,7 @@ pub struct DialogWorld<'w, 's> {
     pub layouts: Res<'w, UiLayouts>,
     pub windows: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
     pub root_canvas: Option<Res<'w, RootCanvas>>,
-    pub views: Query<'w, 's, (&'static Bindings, &'static UiPrefabView), With<MissionListDialogRoot>>,
+    pub(crate) views: Query<'w, 's, (&'static Bindings, &'static UiPrefabView), With<MissionListDialogRoot>>,
 }
 
 /// A tap is the control of `path` of the dialog's view.
@@ -821,7 +821,7 @@ pub fn back_key(
 
 /// Update: the dialog's entity visibility, canvas scale and drawn root while
 /// it is up.
-pub fn place(
+pub(crate) fn place(
     dialog: Res<MissionListDialog>,
     windows: Query<&Window, With<PrimaryWindow>>,
     root_canvas: Option<Res<RootCanvas>>,

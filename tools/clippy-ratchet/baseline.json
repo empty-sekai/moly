@@ -129,16 +129,6 @@
   "moly-link": {
     "clippy::large_enum_variant": 1
   },
-  "moly-mission": {
-    "clippy::map_flatten": 1,
-    "clippy::needless_borrow": 1,
-    "clippy::needless_lifetimes": 1,
-    "dead_code": 4,
-    "for_loops_over_fallibles": 1,
-    "private_interfaces": 8,
-    "unused_imports": 2,
-    "unused_mut": 2
-  },
   "moly-plugin": {
     "clippy::manual_pattern_char_comparison": 1,
     "clippy::unnecessary_sort_by": 1
