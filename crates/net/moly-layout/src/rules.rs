@@ -110,10 +110,20 @@ pub struct Rules {
     pub owned: HashMap<(i32, u32), OwnedCount>,
     /// Packages the player cannot store (the house and the gates).
     pub cleanup_protected: HashSet<String>,
+    /// Free layout: the player's own mode for the site. On, a placement does
+    /// not need an owned copy and the house and the gates can be stored.
+    pub free_layout: bool,
 }
 
 impl Rules {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether the player may store the package: every floor row but a house
+    /// and a gate, and those too under the free layout mode. A site whose
+    /// free layout is off stores none of them.
+    pub fn can_clean_up(&self, package: &str) -> bool {
+        self.free_layout || !self.cleanup_protected.contains(package)
     }
 }

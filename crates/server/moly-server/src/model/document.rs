@@ -174,6 +174,10 @@ pub(crate) struct ServerDocument {
     /// `userMysekaiNormalMissionSheet` and `userMysekaiNormalMissions`
     /// ([`super::normal_mission`]).
     pub(crate) normal_mission: super::normal_mission::NormalMissionDoc,
+    /// `molyExtensions`, verbatim: the mock's own extensions the source
+    /// server has no row for (`freeLayout` names the sites it lays out with
+    /// the free layout mode). Empty when the document states none.
+    pub(crate) extensions: Value,
 }
 
 /// Which migration a schemaVersion 1 slice takes.
@@ -195,6 +199,33 @@ pub(crate) const DEFAULT_TOTAL_EXP: i32 = 180_000;
 // ---------------------------------------------------------------------------
 
 pub(super) use moly_protocol::json::{array, boolean, field, int32, int64, object, only};
+
+/// The mock's own extensions: `molyExtensions` in the document.
+pub(crate) const EXTENSIONS_KEY: &str = "molyExtensions";
+
+/// The extensions section, checked: an object whose entries are objects;
+/// `freeLayout`, when stated, maps site ids to booleans.
+pub(crate) fn extensions_value(value: Option<&Value>) -> Result<Value, String> {
+    let Some(value) = value else {
+        return Ok(Value::Null);
+    };
+    let object = value
+        .as_object()
+        .ok_or("molyExtensions is not an object")?;
+    if let Some(free) = object.get("freeLayout") {
+        let sites = free
+            .as_object()
+            .ok_or("molyExtensions.freeLayout is not an object")?;
+        for (site, on) in sites {
+            site.parse::<u32>()
+                .map_err(|_| format!("molyExtensions.freeLayout names {site}, not a site id"))?;
+            if !on.is_boolean() {
+                return Err(format!("molyExtensions.freeLayout.{site} is not true or false"));
+            }
+        }
+    }
+    Ok(value.clone())
+}
 
 /// The schemaVersion of a document text, refused by name when absent.
 pub(crate) fn schema_version(value: &Value, what: &str) -> Result<u64, String> {
@@ -560,6 +591,7 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         .chain(std::iter::once(&super::phenomena::SECTION))
         .chain(super::convert::DOCUMENT_KEYS.iter())
         .chain(super::normal_mission::DOCUMENT_KEYS.iter())
+        .chain(std::iter::once(&EXTENSIONS_KEY))
         .copied()
         .collect();
     only(doc, &allowed, "the server document")?;
@@ -681,6 +713,7 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         convert,
         normal_mission,
         harvest: super::harvest::HarvestDoc::parse(doc)?,
+        extensions: extensions_value(doc.get(EXTENSIONS_KEY))?,
     };
     document.check_structure()?;
     Ok((document, pending))
@@ -821,6 +854,7 @@ pub(crate) fn migrate_v1(text: &str, migration: Migration) -> Result<ServerDocum
         stamina_recovery: Default::default(),
         convert: Default::default(),
         normal_mission: Default::default(),
+        extensions: Value::Null,
     };
     document.check_structure()?;
     Ok(document)
@@ -1012,6 +1046,11 @@ impl ServerDocument {
                 .and_then(Value::as_object_mut)
             {
                 write_convert_level(gamedata, self.gamedata.mysekai_convert_fixture_level);
+            }
+            // The mock's extensions go out only when the document states one,
+            // so a document without them is written as it was read.
+            if !self.extensions.is_null() {
+                top.insert(EXTENSIONS_KEY.into(), self.extensions.clone());
             }
             top.insert("policies".into(), Value::Object(policies));
         }

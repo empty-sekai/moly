@@ -23,7 +23,13 @@
 //! put_either; `IsPutBase` = put type put_base or put_either; `IsJoint` =
 //! handle type fence or road.
 //!
-//! **`CanPutFloor(layout, fixture)`**:
+//! **Tiles**: a grid's tile dictionary is the site level's layout row's whole
+//! box, one cell per level in y (`GridData.SetupGridData` allocates every cell
+//! and nothing outside), and `GetTileData` answers a cell outside the box with
+//! `TileData.Null` — a fixture is put, or placed, when its whole box is inside
+//! it, however tall it stands.
+//!
+//! **`CanPutFloor(layout, fixture)`**, its box inside the tiles first:
 //! - a plant: for the floor and the rug grid, `CanPutFloorGridSize` and
 //!   `CanPutFloorAddUsingBoundList`;
 //! - a rug (`CanPutFloorCaseRug`): every bottom cell is a tile of the floor
@@ -231,6 +237,8 @@ pub enum Missing {
     FloorGrid,
     /// A row's footprint does not fit the signed grid (or the mirror).
     Footprint,
+    /// The document's free layout switch for the site is malformed.
+    FreeLayoutSwitch,
 }
 
 /// Why a cell fails the per-tile check (`CanPutFloor(target)`).
@@ -260,6 +268,9 @@ pub enum Refusal {
     NotStackable { cell: GridPosition },
     /// The fixture's top above this cell leaves the grid.
     NoHeadroom { cell: GridPosition },
+    /// The fixture's own box leaves the grid: a corner below the tiles' box
+    /// on y, or a cell, below or above its floor, outside the box.
+    FootprintOutside { cell: GridPosition },
     /// An unavailable zone of the site layout contains the cell.
     UnavailableZone { cell: GridPosition, zone: i64 },
     /// A rug over a rug or a plant.
@@ -283,7 +294,7 @@ impl Refusal {
                 CellFail::NotATile => Some(RefusalCode::OutOfBounds),
                 CellFail::Occupied | CellFail::Joint => Some(RefusalCode::Overlap),
             },
-            Self::NoHeadroom { .. } => Some(RefusalCode::OutOfBounds),
+            Self::NoHeadroom { .. } | Self::FootprintOutside { .. } => Some(RefusalCode::OutOfBounds),
             Self::NoBase { .. } | Self::NotStackable { .. } => Some(RefusalCode::StackNotAllowed),
             Self::UnavailableZone { .. } => Some(RefusalCode::UnavailableZone),
             Self::RugOverRugOrPlant { .. } => Some(RefusalCode::Overlap),
@@ -300,6 +311,7 @@ impl Refusal {
             | Self::NoBase { cell }
             | Self::NotStackable { cell }
             | Self::NoHeadroom { cell }
+            | Self::FootprintOutside { cell }
             | Self::UnavailableZone { cell, .. }
             | Self::RugOverRugOrPlant { cell, .. }
             | Self::StackedChild { cell } => Some(*cell),
@@ -343,6 +355,9 @@ pub fn refusal_label(refusal: Refusal) -> String {
         Refusal::NoHeadroom { cell: c } => {
             format!("the fixture's top above {} leaves the grid", cell(c))
         }
+        Refusal::FootprintOutside { cell: c } => {
+            format!("the fixture's box above {} leaves the grid", cell(c))
+        }
         Refusal::UnavailableZone { cell: c, zone } => {
             format!("cell {} is in unavailable zone {zone}", cell(c))
         }
@@ -361,9 +376,11 @@ pub fn refusal_label(refusal: Refusal) -> String {
     }
 }
 
-/// The tiles `GridData.SetupGridData` allocates for a layout's grid: the
-/// floor layout's box, or (rug, road) the same width and depth with height 1,
-/// as the site layout rows are. `x / 2` plus one for a positive odd count.
+/// The tiles `GridData.SetupGridData` allocates for a site's grid: the site
+/// level's layout row's whole box (one cell per level in y: the source
+/// allocates a tile for every cell of the box and nothing outside it), for
+/// every layout, the rug and road grids too. `x / 2` plus one for a positive
+/// odd count.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TileBox {
     pub min: [i32; 3],
@@ -374,14 +391,10 @@ pub struct TileBox {
 }
 
 impl TileBox {
-    pub fn of<G: GridLike>(floor: G, layout: u8) -> Self {
+    pub fn of<G: GridLike>(floor: G) -> Self {
         let floor = floor.site_grid();
         let half = |n: i32| n / 2 + i32::from(n % 2 == 1);
-        let height = if layout == layout_type::FLOOR {
-            floor.height
-        } else {
-            1
-        };
+        let height = floor.height;
         let (hx, hz) = (half(floor.width), half(floor.depth));
         Self {
             min: [-hx, 0, -hz],
@@ -617,7 +630,7 @@ impl Board {
         let mut joints = std::collections::HashSet::new();
         let mut joint_occupants: HashMap<_, Vec<usize>> = HashMap::new();
         for (index, piece) in pieces.iter().enumerate() {
-            let tiles = TileBox::of(grid, piece.layout);
+            let tiles = TileBox::of(grid);
             let mut add = |p: GridPosition| {
                 if tiles.contains(p) {
                     occupant.entry((piece.layout, p)).or_insert(index);
@@ -758,8 +771,11 @@ impl Board {
         true
     }
 
+    /// The tiles of any of the site's grids: every one is the site level's
+    /// grid box, so the layout names none ([`TileBox::of`]).
     pub fn tiles(&self, layout: u8) -> TileBox {
-        TileBox::of(self.grid, layout)
+        let _ = layout;
+        TileBox::of(self.grid)
     }
 
     /// `GetTileData`: `None` for `TileData.Null`.
@@ -814,6 +830,29 @@ impl Board {
         let top = cell + GridPosition::new(0, (fixture.current_size().y - 1) as i8, 0);
         if self.tile(layout, top).is_none() {
             return Err(Refusal::NoHeadroom { cell });
+        }
+        Ok(())
+    }
+
+    /// The whole box of a fixture against the tiles: its lowest corner at y 0
+    /// or above, and its footprint a tile of its grid on every floor it
+    /// stands through. The tile dictionary holds a tile for every cell of the
+    /// grid's box, so only the box decides; a fixture the box holds shares
+    /// the cells with anything raised beside it, the way the source checks
+    /// the grid and the cells it stands on separately.
+    fn box_inside(&self, fixture: &Piece) -> Result<(), Refusal> {
+        // The box a fixture stands in is the grid of the layout it is put as.
+        let tiles = self.tiles(fixture.layout);
+        if fixture.min.y < 0 {
+            return Err(Refusal::FootprintOutside { cell: fixture.min });
+        }
+        for cell in fixture.bottom_cells() {
+            for y in 0..fixture.current_size().y {
+                let at = GridPosition::new(cell.x, (i32::from(cell.y) + y) as i8, cell.z);
+                if !tiles.contains(at) {
+                    return Err(Refusal::FootprintOutside { cell: cell });
+                }
+            }
         }
         Ok(())
     }
@@ -907,6 +946,7 @@ impl Board {
     /// draft place, with the fixtures stacked on it at theirs.
     pub fn can_put_floor(&self, fixture: &Piece, stacked: &[Piece]) -> Result<(), Refusal> {
         if fixture.traits.plant {
+            self.box_inside(fixture)?;
             for layout in [layout_type::FLOOR, layout_type::RUG] {
                 self.grid_size(layout, fixture)?;
                 self.add_using(layout, fixture)?;
@@ -914,9 +954,11 @@ impl Board {
             return Ok(());
         }
         if fixture.traits.rug {
+            self.box_inside(fixture)?;
             return self.case_rug(fixture);
         }
         let layout = fixture.layout;
+        self.box_inside(fixture)?;
         self.grid_size(layout, fixture)?;
         self.add_using(layout, fixture)?;
         let ignore: Vec<&str> = stacked.iter().map(|piece| piece.uid.as_str()).collect();

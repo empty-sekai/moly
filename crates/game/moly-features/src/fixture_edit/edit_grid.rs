@@ -1417,7 +1417,7 @@ fn spawn(world: &mut World, grid: &mut EditGrid) {
         return waiting(grid, "the edit session is not published yet".into());
     };
     let revision = session.revision;
-    let tiles = TileBox::of(floor, layout_type::FLOOR);
+    let tiles = TileBox::of(floor);
     let origin = super::put_effect::site_origin(world);
     let offset = Vec3::new(0.0, 2.0 * doc.position_y, 0.0);
     let transform = Transform::from_translation(origin + offset);

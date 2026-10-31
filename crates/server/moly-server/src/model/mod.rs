@@ -57,6 +57,21 @@
 //! instrument is read through [`instrument_env`], which is silent unless the
 //! process runs as a developer build.
 
+/// The document schema's section for the mock's own extensions: the sites
+/// the server serves with the free layout mode on (`molyExtensions`, live).
+pub(crate) fn free_layout_schema() -> serde_json::Value {
+    serde_json::json!({
+        "key": document::EXTENSIONS_KEY,
+        "title": "Extensions",
+        "delivery": "live",
+        "fields": [{
+            "path": "molyExtensions",
+            "type": "object",
+            "object": {"freeLayout": "object"},
+        }],
+    })
+}
+
 pub(crate) mod avatar;
 pub(crate) mod clock;
 pub(crate) mod convert;

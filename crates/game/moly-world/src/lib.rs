@@ -102,6 +102,7 @@ pub mod door_law;
 pub mod emoticon;
 pub mod clock;
 pub mod field_modes;
+pub mod free_layout;
 pub mod fixture;
 pub mod fixture_collision;
 pub mod fixture_activity_data;

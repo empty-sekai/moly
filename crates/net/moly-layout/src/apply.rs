@@ -326,6 +326,11 @@ fn result_of(piece: Piece, row: &HousingLayoutFixture) -> OpResult {
 }
 
 fn owned_available(layout: &Layout, rules: &Rules, fixture: i32, texture: u32) -> i32 {
+    if rules.free_layout {
+        // The free layout mode lifts the owned check: any master row may be
+        // placed.
+        return i32::MAX;
+    }
     let placed = layout
         .rows
         .iter()
@@ -535,6 +540,7 @@ mod tests {
             zones: Some(Vec::new()),
             owned: HashMap::new(),
             cleanup_protected: std::collections::HashSet::new(),
+            free_layout: false,
         }
     }
 

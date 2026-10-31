@@ -281,6 +281,10 @@ fn edit_path(
         doc.gamedata.mysekai_convert_fixture_level = Some(level);
         return Ok(Delivery::NextResponse(SECTION_GAMEDATA));
     }
+    if parts.as_slice() == [document::EXTENSIONS_KEY] {
+        doc.extensions = document::extensions_value(Some(value))?;
+        return Ok(Delivery::Live);
+    }
     match parts.as_slice() {
         ["clock"] => {
             doc.clock = document::parse_clock(value)?;
@@ -790,7 +794,7 @@ fn masters_value(masters: &Tables<'_>) -> Value {
 fn sections(masters: &Tables<'_>) -> Value {
     let max = masters.stamina_max();
     let ranks = masters.ranks.as_ref();
-    json!([
+    let mut rows = json!([
         {
             "key": "clock",
             "title": "Server clock",
@@ -862,7 +866,12 @@ fn sections(masters: &Tables<'_>) -> Value {
                 field("mysekaiPhenomenaSchedules.<index>.mysekaiPhenomenaId", "phenomenon", json!({"when": {"phenomenaSchedulePolicy.kind": "stated"}})),
             ],
         },
-    ])
+    ]);
+    // The extensions the source server has no row for go last.
+    if let Value::Array(entries) = &mut rows {
+        entries.push(super::free_layout_schema());
+    }
+    rows
 }
 
 fn actions() -> Value {
@@ -884,6 +893,7 @@ fn actions() -> Value {
 
 fn policies() -> Value {
     json!([
+        {"name": "free layout mode", "key": "molyExtensions.freeLayout.<siteId>", "rule": "an extension the source server has no row for: a site the client lays out with the free layout mode, which lifts the home site's house, the house and gates' store rule, the count of houses and gates, and the owned-copy check of a placement"},
         {"name": document::REFILL_POLICY_TEXT, "key": "policies.staminaRefresh", "rule": "when the server clock enters a master refresh window (phenomena index refreshTimePeriods, device local time) later than refreshedAt, the server stamps refreshedAt with its clock, sets the normal pool to the master normal maxStamina, and the response says isRefreshed"},
         {"name": "site level releases", "key": "policies.siteLevelReleases", "rule": "the released site levels are the mysekaiRankReleases rows (rankReleases, the default: what the source server serves); with everyAuthoredLevel — an extension this mock adds, the source server sends no such policy — the server appends a mysekai_site_level row for every authored level of a housing site above the level that site's rows release, one rank each with the highest level at the highest master rank, and the client reads the rows alone"},
         {"name": "initial stamina", "rule": "a document without stamina gets normal at the master maximum, enhance 0 and boost of one recovery grant"},
@@ -939,6 +949,7 @@ pub(crate) fn schema(model: &ServerModel, masters: &Tables<'_>) -> Value {
         "policies": concat(concat(concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())), concat(concat(concat(super::inventory::schema_policies(), super::craft::schema_policies()), concat(super::system_fixture_action::schema_policies(), super::tools::schema_policies())), super::recycle::schema_policies())), concat(concat(super::phenomena::schema_policies(), super::convert::schema_policies()), super::normal_mission::schema_policies())),
         "masters": masters_value(masters),
         "joined": model.joined,
+        "extensions": document::EXTENSIONS_KEY,
     })
 }
 
@@ -953,5 +964,6 @@ pub(crate) fn schema_without_model() -> Value {
         "policies": concat(concat(concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())), concat(concat(concat(super::inventory::schema_policies(), super::craft::schema_policies()), concat(super::system_fixture_action::schema_policies(), super::tools::schema_policies())), super::recycle::schema_policies())), concat(concat(super::phenomena::schema_policies(), super::convert::schema_policies()), super::normal_mission::schema_policies())),
         "masters": null,
         "joined": false,
+        "extensions": document::EXTENSIONS_KEY,
     })
 }

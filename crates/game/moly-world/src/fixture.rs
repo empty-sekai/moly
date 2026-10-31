@@ -762,6 +762,31 @@ fn full_starter_rows(
     region::resolve_rows(rows, source_region)
 }
 
+/// A home site layout whose rows hold a house keeps it: the house rows go to
+/// the end of the row list, and the UIDs with them, as a house the layout did
+/// not store would be appended there. `accepts` names a house package.
+fn take_home_rows(
+    layout: &mut FixturePlacements,
+    accepts: impl Fn(&str) -> bool,
+    pending: &mut Vec<(PlacementMock<String>, String)>,
+) {
+    if layout.rows.len() != layout.instance_uids.len() {
+        // Rows and UIDs come in pairs; a layout whose columns differ is
+        // refused by the checks that follow.
+        return;
+    }
+    let pairs: Vec<(PlacementMock<String>, String)> = std::mem::take(&mut layout.rows)
+        .into_iter()
+        .zip(std::mem::take(&mut layout.instance_uids))
+        .collect();
+    let (houses, others): (Vec<_>, Vec<_>) = pairs.into_iter().partition(|(row, _)| accepts(&row.package));
+    for (row, uid) in others {
+        layout.rows.push(row);
+        layout.instance_uids.push(uid);
+    }
+    pending.extend(houses);
+}
+
 /// The home site always has the player's house (a system fixture the
 /// server always includes). A home site layout, starter or saved, whose rows
 /// hold no home package gets the entry's named mock house row
@@ -771,11 +796,17 @@ fn full_starter_rows(
 /// user's fixture: the entry then takes the source's no-house branch.
 /// `log` is false for the edit baseline, which repeats the completion to
 /// compare the loaded layout with the saved record.
+///
+/// Under the free layout mode (`free`) the player's own switch lifts the
+/// rule: a saved layout without a house stays without one. The origin says
+/// which case this is, `starter` being a layout with no saved rows (a first
+/// visit), whose house is appended as always.
 fn complete_home_site(
     layout: &mut FixturePlacements,
     homes: &crate::house::HomeFixtures,
     origin: &str,
     log: bool,
+    free: bool,
 ) -> Result<(), String> {
     for (row, uid) in layout.rows.iter().zip(&layout.instance_uids) {
         if homes.is_home(&row.package)? {
@@ -787,6 +818,15 @@ fn complete_home_site(
             }
             return Ok(());
         }
+    }
+    if free && origin == "saved" {
+        if log {
+            info!(
+                "[entry] free layout mode: home site {origin} layout has no house and keeps none ({} rows)",
+                layout.rows.len()
+            );
+        }
+        return Ok(());
     }
     let house = &crate::house::STARTER_HOUSE;
     let row = PlacementMock {
@@ -1029,6 +1069,29 @@ pub struct FixturePlacements {
     level: u32,
     next_edit_uid: u64,
     floor: Option<crate::site::FloorGridLayout>,
+    /// House rows of a free home site layout, kept for after its boot check:
+    /// they go to the end of the rows, as a house the layout did not store
+    /// is appended there.
+    pending_houses: Vec<(PlacementMock<String>, String)>,
+}
+
+impl FixturePlacements {
+    /// Puts rows kept aside back at the end of the site's rows.
+    pub(crate) fn insert_home_rows(&mut self, rows: Vec<(PlacementMock<String>, String)>) {
+        for (row, uid) in rows {
+            self.rows.push(row);
+            self.instance_uids.push(uid);
+        }
+    }
+
+    /// A copy of this layout with no rows, for a stored row list: the house
+    /// rows the restore kept aside go with it, after the new rows.
+    pub(crate) fn copied_without_rows(&self) -> Self {
+        let mut copy = self.clone();
+        copy.rows.clear();
+        copy.instance_uids.clear();
+        copy
+    }
 }
 
 pub struct PlacedFixture<'a> {
@@ -1200,9 +1263,7 @@ impl FixturePlacements {
             return Err("active site layout is not installed".into());
         }
         let mut seen = std::collections::HashSet::new();
-        let mut next = self.clone();
-        next.rows.clear();
-        next.instance_uids.clear();
+        let mut next = self.copied_without_rows();
         for row in rows {
             if row.uid.is_empty() || !seen.insert(row.uid.as_str()) {
                 return Err("editor supplied an empty or duplicate fixture UID".into());
@@ -1272,6 +1333,19 @@ impl FixturePlacements {
 
     pub fn total(&self) -> usize {
         self.rows.len()
+    }
+
+    /// Keeps the rows whose UID `keep` accepts and drops the others, each row
+    /// with its UID; the next edit UID is left as it is.
+    pub fn retain_by_uid(&mut self, keep: impl Fn(&str) -> bool) {
+        let rows = std::mem::take(&mut self.rows);
+        let uids = std::mem::take(&mut self.instance_uids);
+        for (row, uid) in rows.into_iter().zip(uids) {
+            if keep(&uid) {
+                self.rows.push(row);
+                self.instance_uids.push(uid);
+            }
+        }
     }
 
     /// 已摆放的家具 id 全集（对话的锚定配对面按它核对锚点在不在）。
@@ -1591,6 +1665,16 @@ fn restore_selected_layout(
         Ok(layout)
     }) {
         Ok(mut layout) => {
+            // The house a free home site layout holds waits for the floor
+            // check above, which is what the boot check reads the rows for;
+            // it goes back at the end of the rows, where a house the layout
+            // did not store would have been appended.
+            let house = std::mem::take(&mut layout.pending_houses);
+            if !house.is_empty() {
+                info!("[offline-layout] free layout mode: the house {} stays placed",
+                    house.iter().map(|(_, uid)| uid.as_str()).collect::<Vec<_>>().join(", "));
+            }
+            layout.insert_home_rows(house);
             info!("[offline-layout] site {} ({}) level {}: restored {} fixtures; layouts are per-site",
                 site_id, selection.site_type(), floor.level, layout.total());
             if !imported && selection.site_type() == "home_site" {
@@ -1634,6 +1718,7 @@ pub fn reload_current_layout(world: &mut World) {
     world.remove_resource::<FixtureScenesReady>();
     world.remove_resource::<crate::fixture_material::FixtureMaterialsSwapped>();
     world.remove_resource::<crate::fixture_material::EmissionAccount>();
+    world.remove_resource::<crate::fixture_material::EmissionAccountKept>();
     world.remove_resource::<crate::fixture_attach::AttachWorlds>();
     world.remove_resource::<crate::fixture_talk::TimelinesPlanned>();
     world.remove_resource::<crate::fixture_talk::TimelineAssets>();
@@ -1707,6 +1792,72 @@ fn release_retained_sources(
     if retained.is_some() && swapped.is_some() {
         commands.remove_resource::<RetainedFixtureSources>();
     }
+}
+
+/// After a save of the active layout. When the saved layout is `before` with
+/// rows appended (the same rows and UIDs first, in order), the placed
+/// fixtures stay and only the appended rows are loaded and spawned; any other
+/// change reloads the whole layout ([`reload_after_save`]).
+pub fn reload_after_save_from(world: &mut World, before: &FixturePlacements) {
+    if !append_after_save(world, before) {
+        reload_after_save(world);
+    }
+}
+
+/// The appended rows of a saved layout, spawned after the placed ones. The
+/// derived state a reload rebuilds from the placed fixtures (scene inputs,
+/// attach points, talk timelines, the house entry and the walk cells through
+/// the revision) is dropped as a reload drops it; the placed roots, their
+/// swapped materials and the spawn counters stay. `false` changes nothing.
+fn append_after_save(world: &mut World, before: &FixturePlacements) -> bool {
+    if world.contains_resource::<TemporaryFixtureLayout>()
+        || !world.contains_resource::<FixtureScenesReady>()
+        || !world.contains_resource::<crate::fixture_material::FixtureMaterialsSwapped>()
+    {
+        return false;
+    }
+    let Some(after) = world.get_resource::<FixturePlacements>() else {
+        return false;
+    };
+    let kept = before.rows.len();
+    let appends = after.site_id == before.site_id
+        && after.site_type == before.site_type
+        && after.level == before.level
+        && after.floor == before.floor
+        && after.rows.len() > kept
+        && after.instance_uids.len() == after.rows.len()
+        && before.instance_uids.len() == kept
+        && after.rows[..kept] == before.rows[..]
+        && after.instance_uids[..kept] == before.instance_uids[..];
+    let added = after.rows.len() - kept.min(after.rows.len());
+    let spawned = world.get_resource::<FixtureSpawnedCount>().map_or(0, |count| count.0);
+    let ready = world.get_resource::<FixtureScenesReadyCount>().map_or(0, |count| count.0);
+    if !appends || spawned != kept || ready != kept {
+        return false;
+    }
+    crate::player_fixture_action::cancel_for_site_change(world);
+    crate::npc_fixture_activity::cancel_for_site_change(world);
+    crate::fixture_gimmick::cancel_for_site_change(world);
+    crate::fixture_scene_inputs::invalidate_for_site_change(world);
+    residency::forget_active(world);
+    world.remove_resource::<FixtureGltfAssets>();
+    world.remove_resource::<FixtureLoadFailure>();
+    world.remove_resource::<FixtureScenesReady>();
+    world.remove_resource::<crate::fixture_material::FixtureMaterialsSwapped>();
+    if let Some(account) = world.remove_resource::<crate::fixture_material::EmissionAccount>() {
+        world.insert_resource(crate::fixture_material::EmissionAccountKept(account));
+    }
+    world.remove_resource::<crate::fixture_attach::AttachWorlds>();
+    world.remove_resource::<crate::fixture_talk::TimelinesPlanned>();
+    world.remove_resource::<crate::fixture_talk::TimelineAssets>();
+    world.remove_resource::<crate::house_doors::HouseEntryTagged>();
+    let mut revision = world.resource_mut::<FixtureLayoutRevision>();
+    revision.0 = revision
+        .0
+        .checked_add(1)
+        .expect("fixture layout revision exhausted");
+    info!("[fixture] the save appended {added} rows: {kept} placed fixtures kept, the appended rows load");
+    true
 }
 
 pub fn reload_after_save(world: &mut World) {

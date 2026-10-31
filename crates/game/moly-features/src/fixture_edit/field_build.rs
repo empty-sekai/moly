@@ -256,11 +256,15 @@ fn finish_save(world: &mut World, outcome: Result<Reply, Refusal>) {
             return;
         }
     };
+    let before = world.get_resource::<crate::fixture::FixturePlacements>().cloned();
     world.insert_resource(flight.next.clone());
     if let Some(mut layouts) = world.get_resource_mut::<crate::fixture::layouts::SiteFixtureLayouts>() {
         layouts.did_save(&flight.next, receipt);
     }
-    crate::fixture::reload_after_save(world);
+    match &before {
+        Some(before) => crate::fixture::reload_after_save_from(world, before),
+        None => crate::fixture::reload_after_save(world),
+    }
     world.write_message(super::LayoutSaved);
     flight.reload = Some(actors::wait_for_reload(world, true, false));
     builds.settle(flight.ticket, FieldBuildState::Reloading);

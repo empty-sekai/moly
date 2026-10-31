@@ -18,6 +18,13 @@ mod inventory;
 
 pub const SECTION: &str = "OfflineSiteLayouts";
 
+/// Whether the home site's free layout mode is on for `site_id` in the
+/// document at hand. A section that names a site as something other than a
+/// switch is malformed and refused, never read as off.
+fn free_at(document: &Value, site_id: u32) -> Result<bool, String> {
+    crate::free_layout::mode_in(document, site_id)
+}
+
 /// The home site's compact starter layout, from the server panel's housing
 /// layout block (the server decides placements; the panel document is the
 /// only source), each row with the authored piece's traits when the row
@@ -300,7 +307,21 @@ impl SiteFixtureLayouts {
         if let Some(record) = snapshot.site_record.as_ref() {
             let mut saved = decode(record, layout.site_id, &layout.site_type, layout.level)?;
             // The loaded layout carries the restore-time house completion.
-            complete_home_site(&mut saved, homes, "saved", false)?;
+            // Under the free layout mode the baseline is the rows as stored,
+            // as the restore leaves them: the saved houses set aside, and no
+            // house appended.
+            let free = free_at(&document, layout.site_id)?;
+            if free && layout.site_type == "home_site" {
+                if let Some(homes) = homes {
+                    let mut pending = Vec::new();
+                    super::take_home_rows(
+                        &mut saved,
+                        |package| homes.is_home(package).unwrap_or(false),
+                        &mut pending,
+                    );
+                }
+            }
+            complete_home_site(&mut saved, homes, "saved", false, free)?;
             if saved.editor_rows() != layout.editor_rows()
                 || saved.next_edit_uid() != layout.next_edit_uid()
                 || saved.phenomena_id != layout.phenomena_id
@@ -387,6 +408,18 @@ impl SiteFixtureLayouts {
         self.document = Ok(receipt.document);
     }
 
+    /// The snapshot a save of the site's decided layout checks against: the
+    /// stored record of the site and the returned inventory, read from the
+    /// document as a fresh read. `None` when the site has no stored record:
+    /// there is nothing a save would overwrite.
+    pub fn snapshot(&self, site_id: u32) -> Result<Option<EditStorageSnapshot>, String> {
+        let document = settings_store::read_document()?;
+        if saved_site(&document, site_id)?.is_none() {
+            return Ok(None);
+        }
+        EditStorageSnapshot::capture(&document, site_id).map(Some)
+    }
+
     pub fn validate_target(
         &self,
         site_id: u32,
@@ -396,7 +429,9 @@ impl SiteFixtureLayouts {
         region: Option<NavMeshSourceRegion>,
     ) -> Result<(), String> {
         // A dry run of the stored rows: the restore-time house completion
-        // refuses instead of breaking a layout, so it is not part of it.
+        // refuses instead of breaking a layout, so it is not part of it. The
+        // free layout mode keeps the house a saved layout stored, and is not
+        // part of it either.
         let layout = self.restore(site_id, site_type, floor.level, content, region, None)?;
         validate_floor_layout(&layout, floor)
     }
@@ -445,13 +480,53 @@ impl SiteFixtureLayouts {
             layout.level = level;
             return Ok(layout);
         }
-        if let Some(saved) = saved_site(self.document.as_ref().map_err(Clone::clone)?, site_id)? {
-            let mut layout = decode(saved, site_id, site_type, level)?;
-            if homes.is_some() {
-                complete_home_site(&mut layout, homes, "saved", true)?;
+        let document = self.document.as_ref().map_err(Clone::clone)?;
+        let free = free_at(document, site_id)?;
+        // The house rows of a saved layout under the free layout mode are
+        // kept aside, after the fixtures the boot check derives from the
+        // rows (a house the floor's height bound refuses still stands).
+        let mut pending = Vec::new();
+        let saved = saved_site(document, site_id)?;
+        let mut layout = match saved {
+            Some(saved) => {
+                let mut layout = decode(saved, site_id, site_type, level)?;
+                if free && homes.is_some() && site_type == "home_site" {
+                    let homes = homes.expect("checked above");
+                    super::take_home_rows(
+                        &mut layout,
+                        |package| homes.is_home(package).unwrap_or(false),
+                        &mut pending,
+                    );
+                }
+                layout
             }
-            return Ok(layout);
+            None => Self::starter(site_id, site_type, level, content, region)?,
+        };
+        // After the starter and its smoke knob, so neither rewrites the house.
+        // A first visit's layout is not saved, so its house is appended
+        // whatever the mode.
+        if homes.is_some() {
+            let origin = if saved.is_some() { "saved" } else { "starter" };
+            // A house the saved rows hold waits for the floor check, so the
+            // rule sees the row list without it; the house is the layout's
+            // own and is not added twice.
+            complete_home_site(&mut layout, homes, origin, pending.is_empty(), free)?;
         }
+        // The rule appends a house at the end of the rows; the saved rows' own
+        // house goes there too, with its UID.
+        layout.pending_houses = pending;
+        Ok(layout)
+    }
+
+    /// The home starter: the server panel's compact housing layout or the
+    /// full showcase, and the gallery's preview rows, for a home site.
+    fn starter(
+        site_id: u32,
+        site_type: &str,
+        level: u32,
+        content: OfflineSceneContent,
+        region: Option<NavMeshSourceRegion>,
+    ) -> Result<FixturePlacements, String> {
         // This showcase is a HOME starter only. A room or harvest map without
         // a saved layout starts empty; it must never inherit outdoor rows.
         // The compact starter is the server panel's housing layout; the full
@@ -487,7 +562,7 @@ impl SiteFixtureLayouts {
         let instance_uids = (1..=rows.len())
             .map(|serial| format!("offline-fixture-{site_id}-{serial}"))
             .collect();
-        let mut layout = FixturePlacements {
+        Ok(FixturePlacements {
             rows,
             instance_uids,
             site_id,
@@ -496,27 +571,28 @@ impl SiteFixtureLayouts {
             next_edit_uid: 1,
             phenomena_id: if site_type == "home_site" { HOME_ENVIRONMENT.get().copied().flatten() } else { None },
             floor: None,
-        };
-        // After the starter and its smoke knob, so neither rewrites the house.
-        if homes.is_some() {
-            complete_home_site(&mut layout, homes, "starter", true)?;
-        }
-        Ok(layout)
+            pending_houses: Vec::new(),
+        })
     }
 }
 
 /// [`super::complete_home_site`] for home site layouts; other sites are
 /// left alone. A home site needs the tables: `restore` only calls this with
 /// them, and the edit baseline refuses without them.
+///
+/// `free` is the free layout mode from the document: on, a saved layout
+/// without a house stays without one and the house is appended to a starter
+/// only ([`super::complete_home_site`]).
 fn complete_home_site(
     layout: &mut FixturePlacements,
     homes: Option<&crate::house::HomeFixtures>,
     origin: &str,
     log: bool,
+    free: bool,
 ) -> Result<(), String> {
     match homes {
         Some(homes) if layout.site_type == "home_site" => {
-            super::complete_home_site(layout, homes, origin, log)
+            super::complete_home_site(layout, homes, origin, log, free)
         }
         Some(_) => Ok(()),
         None if layout.site_type == "home_site" => Err(
@@ -667,6 +743,7 @@ fn decode(
         next_edit_uid,
         phenomena_id: decode_phenomena_id(saved.get("mysekaiPhenomenaId"))?,
         floor: None,
+        pending_houses: Vec::new(),
     })
 }
 
@@ -757,6 +834,11 @@ pub fn validate_document(
 /// room into a small room while retaining furniture beyond its source grid.
 /// No row is cropped, moved or deleted. Walls belong to their own layout grids
 /// and are not incorrectly tested as floor volume by this boundary.
+///
+/// The bound is the level's grid box, not a ceiling below it: the source's
+/// floor grid carries the level's whole height and every cell of the box
+/// (`GridData.SetupGridData`), so a tall house on a short floor is placed
+/// there as the source places it. A rug or a road is one cell high.
 pub fn validate_floor_layout(
     layout: &FixturePlacements,
     floor: crate::site::FloorGridLayout,
@@ -771,23 +853,33 @@ pub fn validate_floor_layout(
         if row.layout & WALL_LAYOUT_MASK != 0 {
             continue;
         }
-        let height = if row.layout == layout_type::FLOOR {
-            floor.height
-        } else if matches!(row.layout, layout_type::RUG | layout_type::ROAD) {
-            1
-        } else {
+        // Every grid of a site level is that level's site layout grid, one
+        // cell per level; a row is checked against the selected level's box.
+        if !matches!(
+            row.layout,
+            layout_type::FLOOR
+                | layout_type::RUG
+                | layout_type::ROAD
+                | layout_type::NONE
+        ) {
             return Err(format!(
                 "layout {uid} has an unsupported ground layer {}",
                 row.layout
             ));
-        };
+        }
+        // The source gives every cell of the site level's grid box a tile and
+        // the box's height is the level's whole height, so the bound is the
+        // box: a fixture inside it is put, however tall it stands (the home
+        // site's houses are twenty cells high on a fifteen-cell floor). Only
+        // a level override to a shorter level moves the bound.
         let placed = row.placed();
         if (placed.min.x as i32) < -half_x
             || (placed.max.x as i32) >= half_x
             || (placed.min.z as i32) < -half_z
             || (placed.max.z as i32) >= half_z
             || placed.min.y < 0
-            || placed.max.y as i32 >= height
+            || (placed.max.y as i32) >= floor.height
+                && matches!(row.layout, layout_type::RUG | layout_type::ROAD)
         {
             return Err(format!("site {} ({}) level {} is incompatible with existing fixture {} ({}); choose a compatible stage or edit its layout first; saved rows were retained",
                 layout.site_id, layout.site_type, floor.level, uid, row.package));

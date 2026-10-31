@@ -11,6 +11,7 @@ fn rules() -> moly_layout::Rules {
         zones: Some(Vec::new()),
         owned: HashMap::new(),
         cleanup_protected: HashSet::new(),
+        free_layout: false,
     }
 }
 

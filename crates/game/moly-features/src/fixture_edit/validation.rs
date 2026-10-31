@@ -130,6 +130,27 @@ pub(super) fn save(
     })
 }
 
+/// The save checks of the layout steps: the source's `CheckSaveLayout` with
+/// no cutscene area question and no dialog. A verdict the editor's screen
+/// asks the player about refuses the step by name instead: a step that
+/// already stored the fixtures it was asked to store cannot wait on a
+/// question.
+
+pub(super) fn check_step_save(
+    rows: &[EditableFixture],
+    floor: Option<FloorGridLayout>,
+    areas: &FixtureAreas,
+    rules: &Rules,
+) -> Result<(), String> {
+    check_save(rows, floor, areas, Ok(rules), false).map_err(|message| {
+        if message.starts_with("CutsceneAreaOverridden") {
+            format!("the layout covers the cutscene area ({message}); the editor asks before it saves such a layout")
+        } else {
+            message
+        }
+    })
+}
+
 /// Source CheckSaveLayout status precedence: cutscene(3), animation space(2),
 /// layout(1), success(0). Source master enforcement flags still await a
 /// producer; the prior named empty enforcement mock is retained.

@@ -812,6 +812,11 @@ pub struct EmissionRow {
     pub mask_mean: Option<[f32; 3]>,
 }
 
+/// The account of the fixtures a save kept, while the fixtures it appended
+/// are swapped: their rows follow the kept ones.
+#[derive(Resource)]
+pub struct EmissionAccountKept(pub EmissionAccount);
+
 impl EmissionAccount {
     /// 按现象类型推逐材质贡献行（切档日志用）：门 × 遮罩均值。门缺
     /// （int 缺键）或遮罩缺的行原样带 None，不静默取 0。
@@ -2387,7 +2392,14 @@ fn switch_materials(
     // 账本入册：天气系统切档时按材质名逐行报自发光贡献（贡献行从这份
     // 账本现算——各臂可由日志推导）。
     if swapped.is_none() {
-        commands.insert_resource(account);
+        commands.queue(move |world: &mut World| {
+            let mut account = account;
+            if let Some(EmissionAccountKept(kept)) = world.remove_resource::<EmissionAccountKept>() {
+                let appended = std::mem::replace(&mut account.rows, kept.rows);
+                account.rows.extend(appended);
+            }
+            world.insert_resource(account);
+        });
         commands.insert_resource(FixtureMaterialsSwapped);
     }
 }

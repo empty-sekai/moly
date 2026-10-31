@@ -114,6 +114,14 @@ pub fn zones_of(world: &World, layout_id: u32) -> Option<Vec<Zone>> {
     }
 }
 
+/// Whether the site's free layout mode is on, from the document (and the
+/// switch a step made this session). A malformed switch is an error, never a
+/// mode off: a layout must not be stored under rules the document cannot
+/// tell.
+pub fn free_layout(world: &World) -> Result<bool, String> {
+    crate::free_layout::mode(world).map(|(_, on)| on)
+}
+
 /// The rules for the current floor layout, or what is missing.
 pub fn rules(world: &World, floor: Option<FloorGridLayout>) -> Result<Rules, Missing> {
     let floor = floor.ok_or(Missing::FloorGrid)?;
@@ -125,11 +133,13 @@ pub fn rules(world: &World, floor: Option<FloorGridLayout>) -> Result<Rules, Mis
         .map(|areas| areas.stack.clone())
         .ok_or(Missing::AreaTable)?;
     let zones = zones_of(world, floor.layout_id);
+    let free_layout = free_layout(world).map_err(|_| Missing::FreeLayoutSwitch)?;
     Ok(Rules {
         traits: (*traits).clone(),
         masters: (*masters).clone(),
         bundles: (*bundles).clone(),
         zones,
+        free_layout,
         ..Rules::default()
     })
 }

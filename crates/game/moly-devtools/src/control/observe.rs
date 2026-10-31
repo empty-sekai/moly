@@ -215,13 +215,20 @@ fn npc_ai(world: &mut World) -> Value {
     json!({ "report": rows, "live": live })
 }
 
-/// The site and its layout grid: the floor's size in tiles (rooms) and the
-/// tiles each placed fixture covers, as its footprint's two corners.
+/// The site and its layout grid: the floor's size in tiles (rooms), the
+/// tiles each placed fixture covers, as its footprint's two corners, and
+/// whether the site's free layout mode is on (`free_layout`).
 fn site(world: &World) -> Value {
     let mut out = match super::state::site(world) {
         Value::Object(site) => site,
         _ => return Value::Null,
     };
+    // A malformed switch is named, never reported as off.
+    let free = match crate::free_layout::mode(world) {
+        Ok((_, on)) => json!(on),
+        Err(error) => json!(format!("error: {error}")),
+    };
+    out.insert("free_layout".into(), free);
     if let Some(placements) = world.get_resource::<crate::fixture::FixturePlacements>() {
         let floor = placements.floor_grid().map(|floor| {
             json!({ "layout_id": floor.layout_id, "width": floor.width, "height": floor.height, "depth": floor.depth })

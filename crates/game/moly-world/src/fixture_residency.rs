@@ -65,6 +65,19 @@ pub fn invalidate_active(world: &mut World) {
     if !hidden { remove_site(world, &site); }
 }
 
+/// Drops the active site's record without despawning: its roots are the live
+/// ones, which a save that appended rows keeps, so the record no longer
+/// describes them. A hidden record is left as [`invalidate_active`] leaves it.
+pub fn forget_active(world: &mut World) {
+    let site = world.get_resource::<FixturePlacements>().map(|p| p.site_type().to_owned());
+    let Some(site) = site else { return; };
+    let live = world.get_resource::<FixtureSites>().and_then(|s| s.get(&site))
+        .is_some_and(|s| s.roots.iter().all(|e| world.get::<RetainedFixture>(*e).is_none()));
+    if live {
+        world.resource_mut::<FixtureSites>().0.remove(&site);
+    }
+}
+
 pub fn remove_site(world: &mut World, site: &str) {
     let Some(context) = world.get_resource_mut::<FixtureSites>().and_then(|mut s| s.0.remove(site)) else { return; };
     for root in context.roots { if let Ok(entity) = world.get_entity_mut(root) { entity.despawn(); } }

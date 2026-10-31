@@ -29,6 +29,7 @@ mod owned;
 mod presentation;
 mod put_effect;
 mod road;
+pub(crate) mod session;
 mod validation;
 
 #[cfg(test)]
@@ -214,6 +215,48 @@ impl EditSession {
         }
     }
 
+    /// Opens the draft on the site's loaded layout, as the editor's screen
+    /// does, without its game state. The layout and its returned inventory
+    /// come from the saved layouts' own opening check.
+    pub(super) fn open_for_layout(
+        &mut self,
+        layout: FixturePlacements,
+        storage_baseline: crate::fixture::layouts::EditStorageSnapshot,
+        inventory: Vec<EditableFixture>,
+    ) {
+        self.finish();
+        self.next_fixture_uid = self.next_fixture_uid.max(layout.next_edit_uid()).max(1);
+        self.content = if layout.site_type() == "home_site" {
+            EditContentType::Outdoor
+        } else {
+            EditContentType::Floor
+        };
+        self.environment = layout.phenomena_id();
+        self.rows = layout.editor_rows();
+        self.baseline = Some(layout);
+        self.storage_baseline = Some(storage_baseline);
+        self.initial_inventory = inventory.clone();
+        self.inventory = inventory;
+        self.phase = EditPhase::Browsing;
+        self.save_dialog = None;
+        self.clean_up_dialog = false;
+        self.exit_dialog = false;
+        self.changed();
+    }
+
+    /// The draft as the site layout a save writes, and the inventory it
+    /// returns; the UID counter a new row would take next goes with it.
+    pub(super) fn decided_layout(
+        &mut self,
+    ) -> Result<(FixturePlacements, Vec<EditableFixture>), String> {
+        let base = self
+            .baseline
+            .as_ref()
+            .ok_or_else(|| "the editor has no layout".to_owned())?;
+        let next = base.with_editor_rows(&self.rows, self.next_fixture_uid)?;
+        Ok((next, self.inventory.clone()))
+    }
+
     fn finish(&mut self) {
         self.phase = EditPhase::Idle;
         self.baseline = None;
@@ -302,6 +345,12 @@ fn play_se(world: &mut World, cue: &'static str, source: &'static str) {
 
 fn begin(world: &mut World, session: &mut EditSession) {
     if session.phase != EditPhase::Idle {
+        return;
+    }
+    // A layout step's save ([`crate::layout_director`]) is out: the editor
+    // opens no draft until the site has saved it.
+    if crate::layout_director::saving(world) {
+        session.say("正在等待一次布局保存完成，稍后再开始编辑。");
         return;
     }
     if world
@@ -1030,7 +1079,12 @@ fn select(
     // A table that did not load answers false (no store action).
     let can_clean_up = world
         .get_resource::<crate::house::HomeFixtures>()
-        .is_some_and(|homes| homes.can_clean_up(&item.package));
+        .is_some_and(|homes| {
+            let free = world
+                .get_resource::<crate::free_layout::FreeLayout>()
+                .is_some_and(crate::free_layout::FreeLayout::is_on);
+            free || homes.can_clean_up(&item.package)
+        });
     let fixture_id = item.fixture_id;
     let put = (origin != SelectionOrigin::Placed).then(|| item.clone());
     session.selected = Some(Selection {
@@ -1202,6 +1256,9 @@ fn clean_up_all(world: &World, session: &mut EditSession) {
         session.say("家具主表仍在加载，未清理家具。");
         return;
     };
+    let free = world
+        .get_resource::<crate::free_layout::FreeLayout>()
+        .is_some_and(crate::free_layout::FreeLayout::is_on);
     session.cancel_selection();
     let (mut kept_house, mut kept_joint, mut moved) = (0usize, 0usize, Vec::new());
     let mut index = 0;
@@ -1209,7 +1266,7 @@ fn clean_up_all(world: &World, session: &mut EditSession) {
         let row = &session.rows[index];
         let in_grids = row.layout == layout_type::FLOOR || row.layout == layout_type::RUG;
         let joint = traits.get(&row.fixture_id).is_some_and(|t| t.joint);
-        let can_clean_up = homes.can_clean_up(&row.package);
+        let can_clean_up = free || homes.can_clean_up(&row.package);
         if !in_grids {
             index += 1;
             continue;
@@ -1242,8 +1299,13 @@ fn clean_up_all(world: &World, session: &mut EditSession) {
     );
     session.changed();
     session.say(format!(
-        "已清理 {} 件家具到离线库存草稿；家与大门保留。保存后生效。",
-        moved.len()
+        "已清理 {} 件家具到离线库存草稿；{}。保存后生效。",
+        moved.len(),
+        if free {
+            "自由布局：家与大门也一并清理"
+        } else {
+            "家与大门保留"
+        }
     ));
 }
 
@@ -1455,6 +1517,10 @@ fn commit_saved_layout(
 /// asks to save over the cutscene area; any other verdict lists the invalid
 /// fixtures (`CreateInValidFixtureList`) and either asks to store them or,
 /// when the house or the gate is on the list, sends the player home.
+///
+/// Under the free layout mode a listed house or gate is stored with the rest
+/// and the save goes on: the mode is what the home dialog sends the player
+/// back to, so its question has one answer.
 fn refused_save(
     world: &mut World,
     session: &mut EditSession,
@@ -1523,6 +1589,27 @@ fn refused_save(
                     Buttons::One { ok: "WORD_OK" },
                     SaveDialogKind::GoToHome,
                 )
+            } else if world
+                .get_resource::<crate::free_layout::FreeLayout>()
+                .is_some_and(crate::free_layout::FreeLayout::is_on)
+            {
+                // The free layout mode stores the house and the gates like
+                // any other fixture, so the list goes to storage without a
+                // question: the dialog would only be answered OK.
+                let mut index = 0;
+                while index < session.rows.len() {
+                    if listed.contains(&session.rows[index].uid) {
+                        let row = session.rows.remove(index);
+                        if !session.inventory.iter().any(|item| item.uid == row.uid) {
+                            session.inventory.push(row);
+                        }
+                    } else {
+                        index += 1;
+                    }
+                }
+                info!("[edit-save] RemoveInValidFixture (free layout mode): {listed:?} to storage; saving");
+                save(session, world, exit_after, true);
+                return;
             } else {
                 // The source shows the list in its own dialog
                 // (InValidLayoutFixtureListDialog); the common dialog shows
@@ -1557,19 +1644,29 @@ fn refused_save(
 
 /// The save dialog's answer, once it has one.
 fn answer_save_dialog(world: &mut World) {
-    let Some(dialog) = world
+    let Some(id) = world
         .get_resource::<EditSession>()
-        .and_then(|session| session.save_dialog.clone())
+        .and_then(|session| session.save_dialog.as_ref().map(|dialog| dialog.id))
     else {
         return;
     };
-    let Some(ok) = crate::common_dialog::answer(world, dialog.id) else {
+    let Some(ok) = crate::common_dialog::answer(world, id) else {
         return;
     };
+    settle_save_dialog(world, id, ok);
+}
+
+/// The editor's save dialog `id` is answered: `ok` runs its OK, a cancel
+/// drops it. The layout steps call this as the editor does.
+pub(crate) fn settle_save_dialog(world: &mut World, id: crate::ui_layers::DialogId, ok: bool) {
     let Some(mut session) = world.remove_resource::<EditSession>() else {
         return;
     };
-    session.save_dialog = None;
+    if session.save_dialog.as_ref().map(|dialog| dialog.id) != Some(id) {
+        world.insert_resource(session);
+        return;
+    }
+    let dialog = session.save_dialog.take().expect("checked above");
     session.changed();
     info!(
         "[edit-save] {:?} answered {}",
@@ -2311,6 +2408,7 @@ impl Plugin for FixtureEditPlugin {
         edit_grid::install(app);
         crate::fixture_put_limit::install(app);
         road::install(app);
+        crate::layout_director::install(app);
         app.init_resource::<EditSession>()
             .init_resource::<field_build::FieldBuilds>()
             .init_resource::<EditSessionActive>()
