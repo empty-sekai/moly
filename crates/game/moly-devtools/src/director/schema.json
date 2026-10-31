@@ -52,7 +52,14 @@
      "layout.place",
      "player.deliver",
      "dialog.answer",
-     "key.back"
+     "key.back",
+     "layout.free",
+     "layout.clear",
+     "layout.put",
+     "layout.put_many",
+     "layout.remove",
+     "view.set",
+     "companion.gather"
     ],
     "description": "The action name."
    },
@@ -1165,6 +1172,29 @@
    }
   },
   {
+   "name": "view.set",
+   "description": "Sets the clean view: hud true hides every HUD, button and dialog view, so only the scene, the in-world balloons and the talk window remain; player true hides the player's own body, which the field camera would otherwise fill the frame with. Each switch changes only when given.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "hud": {
+      "type": "boolean"
+     },
+     "player": {
+      "type": "boolean"
+     }
+    },
+    "additionalProperties": false
+   },
+   "constraints": [
+    "refused at parse time without hud, player or both",
+    "ends at once; the note names the resulting state (view: hud hidden, player shown)",
+    "a view the switch hid is shown again when the switch goes off; a view the game hid itself stays hidden"
+   ]
+  },
+  {
    "name": "server.edit",
    "description": "Sends one server.edit command built from the step's own fields; the server model checks the edit when the step runs.",
    "macro": false,
@@ -1418,6 +1448,218 @@
    ]
   },
   {
+   "name": "layout.free",
+   "description": "Sets the free layout mode of the site in the server document, and ends once the game has received the edit. Free layout lifts four rules of the home site: a saved layout may hold no house (the starter house is still appended on a first visit without one), the house and the gates can be stored, any number of homes and gates may stand, and placement no longer checks ownership. With it off the four rules hold.",
+   "macro": false,
+   "timeout_default": 30,
+   "params": {
+    "type": "object",
+    "properties": {
+     "on": {
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "on"
+    ],
+    "additionalProperties": false
+   },
+   "constraints": [
+    "refused when the game has no server link, or when the server refuses the edit",
+    "refused while a director script other than the step's own is running (the edit would wait on itself)"
+   ]
+  },
+  {
+   "name": "layout.clear",
+   "description": "Moves every fixture on the current site to the inventory and saves the site once. With free layout off the house and the gates stay placed, as the game keeps them; with it on keep can name them. The ceiling puts stay too and are not counted.",
+   "macro": false,
+   "timeout_default": 120,
+   "params": {
+    "type": "object",
+    "properties": {
+     "keep": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "enum": [
+        "house",
+        "gate"
+       ]
+      },
+      "default": []
+     }
+    },
+    "additionalProperties": false
+   },
+   "constraints": [
+    "an item of keep other than house and gate is refused at parse time",
+    "refused when the site, its layout, the fixture tables or the floor grid are still loading, when the site is changing, or when the layout editor is open",
+    "refused when another layout save is in flight, or when the server refuses the save"
+   ]
+  },
+  {
+   "name": "layout.put",
+   "description": "Places one fixture with its minimum corner (after the rotation) on the layout grid cell at, and saves the site. The cells are the layout grid moly.layout.view reports; face is the rotation (back turns the door toward +z, the default camera). The step ends once the layout has reloaded with the fixture.",
+   "macro": false,
+   "timeout_default": 120,
+   "params": {
+    "type": "object",
+    "properties": {
+     "fixture": {
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+     },
+     "texture": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295,
+      "default": 1
+     },
+     "at": {
+      "type": "array",
+      "items": {
+       "type": "integer",
+       "minimum": -128,
+       "maximum": 127
+      },
+      "minItems": 2,
+      "maxItems": 2
+     },
+     "y": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 127,
+      "default": 0
+     },
+     "face": {
+      "type": "string",
+      "enum": [
+       "front",
+       "back",
+       "left",
+       "right"
+      ],
+      "default": "front"
+     }
+    },
+    "required": [
+     "fixture",
+     "at"
+    ],
+    "additionalProperties": false
+   },
+   "constraints": [
+    "refused when the fixture is not in the master table, or when the cell and the rotation do not fit the floor: out of the floor, overlaps <uid>, wrong layer, unavailable zone, no room above, or left the grid",
+    "without free layout: refused when the player owns no free copy (not owned)",
+    "refused when the layout editor is open, or the site, layout, fixture tables or floor grid are loading",
+    "refused when another layout save is in flight, when the game or the server refuses the save, or when the layout does not come back"
+   ]
+  },
+  {
+   "name": "layout.put_many",
+   "description": "Places several fixtures, all or nothing, in one save of the site: the items are read as a layout.put each and committed together once every one fits. A refusal names the item by its index.",
+   "macro": false,
+   "timeout_default": 180,
+   "params": {
+    "type": "object",
+    "properties": {
+     "items": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+       "type": "object",
+       "properties": {
+        "fixture": {
+         "type": "integer",
+         "minimum": -2147483648,
+         "maximum": 2147483647
+        },
+        "texture": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 4294967295,
+         "default": 1
+        },
+        "at": {
+         "type": "array",
+         "items": {
+          "type": "integer",
+          "minimum": -128,
+          "maximum": 127
+         },
+         "minItems": 2,
+         "maxItems": 2
+        },
+        "y": {
+         "type": "integer",
+         "minimum": 0,
+         "maximum": 127,
+         "default": 0
+        },
+        "face": {
+         "type": "string",
+         "enum": [
+          "front",
+          "back",
+          "left",
+          "right"
+         ],
+         "default": "front"
+        }
+       },
+       "required": [
+        "fixture",
+        "at"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    "required": [
+     "items"
+    ],
+    "additionalProperties": false
+   },
+   "constraints": [
+    "an empty items list is refused at parse time",
+    "the constraints of layout.put, with the reason prefixed by the item index (item <index>: <reason>)",
+    "two items that overlap are refused as item <index>: overlaps item <other index>"
+   ]
+  },
+  {
+   "name": "layout.remove",
+   "description": "Stores one placed fixture on the current site, named by its placement uid or by one of the cells it covers, and saves the site once; the placement nonce counts as used.",
+   "macro": false,
+   "timeout_default": 120,
+   "params": {
+    "type": "object",
+    "properties": {
+     "uid": {
+      "type": "string"
+     },
+     "at": {
+      "type": "array",
+      "items": {
+       "type": "integer",
+       "minimum": -128,
+       "maximum": 127
+      },
+      "minItems": 2,
+      "maxItems": 2
+     }
+    },
+    "additionalProperties": false
+   },
+   "constraints": [
+    "refused at parse time without exactly one of uid and at",
+    "without free layout: refused for the house and for a gate",
+    "refused when at covers no fixture on the site, or uid names none",
+    "refused when the layout editor is open, or the site, layout, fixture tables or floor grid are loading",
+    "refused when another layout save is in flight, or when the server refuses the save"
+   ]
+  },
+  {
    "name": "player.deliver",
    "description": "Presses the delivery button on a birthday party in session, holds it (hold seconds, or until the party has nothing left to deliver) and releases it; the step ends once the end action has run and reports the points the party gained.",
    "macro": false,
@@ -1469,6 +1711,47 @@
    "params": {
     "type": "object",
     "properties": {},
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "companion.gather",
+   "description": "Has the companion of unit gather a wood or mineral harvest object: the object of the UID gatherable, or with \"nearest\" the nearest one left to the companion (of kind when given) that no other companion is gathering. The companion walks inside the object's contact circle and swings the player's tool for that kind (the tool the harvest screen would take up), its model in the right hand, as many times as the object's hit points take at the tool's attack power; each hit is a hit of the player's harvest, with its effects, sound, break, drops, stamina, durability and server log. The step ends after the last swing and fails with the reason when the object is gone or harvested, is not wood or mineral, the player has no tool for it, no point beside it is walkable, the walk stops short, or a build or another gather is in flight.",
+   "macro": false,
+   "timeout_default": 120,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "gatherable": {
+      "description": "Harvest object UID, or \"nearest\".",
+      "anyOf": [
+       {
+        "type": "integer",
+        "minimum": 0
+       },
+       {
+        "const": "nearest"
+       }
+      ]
+     },
+     "kind": {
+      "type": "string",
+      "enum": [
+       "wood",
+       "mineral"
+      ],
+      "description": "With gatherable \"nearest\": the kind to gather."
+     }
+    },
+    "required": [
+     "unit",
+     "gatherable"
+    ],
     "additionalProperties": false
    }
   }
@@ -2560,6 +2843,21 @@
      },
      "then": {
       "$ref": "#/steps/47/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "companion.gather"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/55/params"
      }
     }
    ],

@@ -1,0 +1,42 @@
+[plugin]
+id = "moly.home-build"
+name = "Home build"
+version = "0.1.0"
+moly = ">=0.0.5"
+kind = "luau"
+entry = "main.luau"
+description = "Companions put a queue of fixtures on the site one after another, each hammered from a ghost to solid, and celebrate together once every queue is done."
+
+[config]
+# Seconds between the starts of two builds, so the fixtures land one after
+# another. Hammering still overlaps.
+put_gap = 2.5
+# Hammer hits per fixture; the build step's own default when absent.
+# swings = 4
+# Direction of the put fixtures (0 front, 1 left, 2 back, 3 right). A builder's
+# or a queue item's own `direction` comes first; the field camera's yaw decides
+# when none is given.
+# direction = 0
+# Whether the builders react when every queue is done.
+celebrate = true
+# What the builders face while they celebrate: "player", or a world point [x, y, z].
+face = "player"
+face_player_within = 6
+# Seconds between one builder's reaction and the next one's.
+finale_stagger = 0.4
+finale_effects = ["fx_emote_018_single", "fx_emote_010"]
+# Each builder enters `distance` metres from the player along `degrees` (from +x),
+# or at a world point [x, y, z]. Points below take either form.
+# Each queue item may name `at`: its fixture
+# goes on exactly the cell that point falls in, or the build fails with the
+# refusal. `near` (the same form) instead starts the put search there. With
+# neither the fixture goes in front of the companion.
+# `use` is a fixture id the builder uses after the reaction. `leave` is a point
+# the builder walks to once every builder is done, all of them together.
+builders = [
+	{ unit = 14, enter = { degrees = 200, distance = 4 }, queue = [
+		{ fixture = 727, texture = 1, at = { degrees = 60, distance = 4 } },
+		{ fixture = 727, texture = 1, at = { degrees = 120, distance = 4 } },
+		{ fixture = 727, texture = 1, at = { degrees = 180, distance = 5 } },
+	], use = 727 },
+]

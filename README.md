@@ -67,6 +67,7 @@ Releases 中另有 Linux x64（`x86_64-unknown-linux-gnu`）与 macOS Apple Sili
 - [玩家数据导入](docs/player-data.md)：开发窗口中导入玩家数据的步骤、备份与资源要求。
 - [主表与区服](docs/masters.md)：主表的读取来源、合并规则与启用的区服。
 - [MCP 服务器](docs/mcp.md)：供 AI 客户端启动并驱动游戏实例的 MCP 服务器。
+- [插件](docs/plugins.md)：Luau 插件的接口、全部导演步骤、可观察的段落、事件与环境变量开关。
 - [项目结构](docs/architecture.md)：各目录与 crate 的职责。
 - [开发](docs/development.md)：测试与检查、提交规范、持续集成与版本发布。
 - [发布包说明](docs/release-package.md)：下载发布包后的内容、运行与升级方法。

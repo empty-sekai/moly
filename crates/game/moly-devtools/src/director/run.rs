@@ -317,6 +317,8 @@ enum Kind {
     Parallel { tracks: Vec<Track>, join: Join },
     /// `moved` once the move has been seen in progress.
     SiteSwitch { site: String, moved: bool },
+    /// A layout step, until the layout it saved has loaded.
+    Layout { step: crate::layout_director::LayoutStep },
     /// One `server.edit`, until the server answers the call numbered `seq`.
     ServerEdit { seq: u32 },
     /// A companion's body, from the spawn command until it is shown;
@@ -334,6 +336,8 @@ enum Kind {
     /// A companion's use of the placed fixture `uid`, from its command until
     /// its status reaches the number the command gets (`seq`).
     CompanionUse { unit: u32, uid: String, activity: Option<i32>, variant: Option<u32>, seq: u64, written: bool },
+    /// A companion's gather: its command, written on the first frame.
+    CompanionGather { unit: u32, command: Option<crate::companion::CompanionCommand>, note: String, seq: u64 },
     /// A tweet balloon over a companion, until `until`.
     CompanionBalloon { unit: u32, entity: Entity, until: f32 },
     CompanionDespawn { unit: u32, written: bool },
@@ -364,6 +368,8 @@ impl Kind {
             | Kind::CompanionFace { written: false, .. }
             | Kind::CompanionMotion { written: false, .. }
             | Kind::CompanionUse { written: false, .. }
+            // A gather plays on: its swings are the companion's.
+            | Kind::CompanionGather { .. }
             | Kind::CompanionDespawn { written: false, .. } => {}
             // A motion whose command was written plays on: its body is the
             // companion's.
@@ -856,6 +862,19 @@ fn start(world: &mut World, shared: &mut Shared, ticket: u64, step: Step, path: 
             // The command takes the next number.
             Kind::CompanionUse { unit: *unit, uid, activity: *activity, variant: *variant, seq: seq + 1, written: false }
         }
+        Node::CompanionGather { unit, what } => {
+            let Some(seq) = companion_seq(world, *unit) else {
+                return ended(path, Err(format!("no companion of unit {unit} is spawned")), optional);
+            };
+            let Some(from) = companion_place(world, *unit).map(|place| place.translation) else {
+                return ended(path, Err(format!("companion {unit} has no place yet")), optional);
+            };
+            match crate::harvest::companion_gather::prepare(world, *unit, from, what) {
+                // The command takes the next number.
+                Ok((command, note)) => Kind::CompanionGather { unit: *unit, command: Some(command), note, seq: seq + 1 },
+                Err(error) => return ended(path, Err(error), optional),
+            }
+        }
         Node::CompanionExpression { unit, eye, mouth, reset } => {
             let Some(entity) = companion_entity(world, *unit) else {
                 return ended(path, Err(format!("no companion of unit {unit} is spawned")), optional);
@@ -950,6 +969,81 @@ fn start(world: &mut World, shared: &mut Shared, ticket: u64, step: Step, path: 
             per_sec: if *secs > 0.0 { by / secs } else { f32::INFINITY },
             until: shared.now + secs,
         },
+        Node::LayoutFree { on } => {
+            // The switch decides itself; the note names the mode it left.
+            return match crate::layout_director::open(world, &crate::layout_director::LayoutStep::SetFree { on: *on }) {
+                Ok(note) => ended(path, Ok(note), optional),
+                Err(error) => ended(path, Err(error), optional),
+            };
+        }
+        Node::LayoutClear { keep } => {
+            let step = crate::layout_director::LayoutStep::Clear { keep: keep.clone() };
+            match plan_edit(world, &step) {
+                Ok(Ok(_)) => Kind::Layout { step },
+                Ok(Err(error)) | Err(error) => return ended(path, Err(error), optional),
+            }
+        }
+        Node::LayoutPut { fixture, texture, at, y, face } => {
+            let step = crate::layout_director::puts(&[crate::layout_director::PutItem {
+                fixture: *fixture,
+                texture: *texture,
+                at: *at,
+                y: *y,
+                face: *face,
+            }]);
+            match plan_edit(world, &step) {
+                Ok(Ok(_)) => Kind::Layout { step },
+                Ok(Err(error)) | Err(error) => return ended(path, Err(error), optional),
+            }
+        }
+        Node::LayoutPutMany { items } => {
+            let step = crate::layout_director::puts(items);
+            match plan_edit(world, &step) {
+                Ok(Ok(_)) => Kind::Layout { step },
+                Ok(Err(error)) | Err(error) => return ended(path, Err(error), optional),
+            }
+        }
+        Node::ViewSet { hud, player } => {
+            let Some(mut clean) = world.get_resource_mut::<crate::clean_view::CleanView>() else {
+                return ended(path, Err("the clean view is not installed".into()), optional);
+            };
+            clean.set(*hud, *player);
+            let note = clean.note();
+            return ended(path, Ok(note), optional);
+        }
+        Node::LayoutRemove { uid, at } => {
+            let rows = world
+                .get_resource::<crate::fixture::FixturePlacements>()
+                .map_or_else(Vec::new, crate::fixture::FixturePlacements::editor_rows);
+            let removed = match uid {
+                Some(uid) => rows.iter().position(|row| row.uid == *uid),
+                None => at.and_then(|cell| {
+                    rows.iter().position(|row| {
+                        row.footprint()
+                            .is_ok_and(|(min, max)| {
+                                (min.x..=max.x).contains(&cell[0]) && (min.z..=max.z).contains(&cell[1])
+                            })
+                    })
+                }),
+            };
+            let Some(index) = removed else {
+                let named = match (uid, at) {
+                    (Some(uid), _) => format!("uid {uid}"),
+                    (None, Some(cell)) => format!("the cell ({}, {})", cell[0], cell[1]),
+                    (None, None) => "the site has no fixture to remove".to_owned(),
+                };
+                return ended(path, Err(format!("no fixture of the site is {named}")), optional);
+            };
+            let step = crate::layout_director::LayoutStep::Edit {
+                ops: vec![moly_layout::LayoutOp::Remove {
+                    piece: moly_layout::Piece(index as u32 + 1),
+                }],
+            };
+            match plan_edit(world, &step) {
+                Ok(Ok(_)) => Kind::Layout { step },
+                Ok(Err(error)) | Err(error) => return ended(path, Err(error), optional),
+            }
+        }
         Node::Parallel { tracks, join } => Kind::Parallel {
             tracks: tracks
                 .iter()
@@ -1235,6 +1329,16 @@ fn poll(world: &mut World, shared: &mut Shared, active: &mut Active, ticket: u64
                 None => Poll::Failed(format!("companion {unit} was removed while using fixture {uid}")),
             }
         }
+        Kind::CompanionGather { unit, command, note, seq } => {
+            if let Some(command) = command.take() {
+                world.write_message(command);
+                return Poll::Running(format!("companion {unit} gathers {note}"));
+            }
+            match companion_state(world, *unit) {
+                Some(state) => companion_gathered(state, *seq, *unit, note),
+                None => Poll::Failed(format!("companion {unit} was removed while gathering")),
+            }
+        }
         Kind::CompanionBalloon { unit, entity, until } => {
             if shared.now >= *until {
                 super::npc::hide_tweet(world, *entity);
@@ -1343,6 +1447,14 @@ fn poll(world: &mut World, shared: &mut Shared, active: &mut Active, ticket: u64
             }
             if running == 0 { Poll::Done(String::new()) } else { Poll::Running(format!("{running} tracks running")) }
         }
+        Kind::Layout { step } => match crate::layout_director::settled(world) {
+            Some(Ok(())) => Poll::Done(layout_note(world, step)),
+            Some(Err(error)) => Poll::Failed(error),
+            None => Poll::Running(format!(
+                "the layout step {} is waiting for its save",
+                crate::layout_director::wire(step)
+            )),
+        },
         Kind::SiteSwitch { site, moved } => {
             let current = world.get_resource::<crate::site::SiteActive>().map(|active| active.site_type.clone());
             let moving = world.contains_resource::<crate::site_move::SiteMoveActive>();
@@ -1357,6 +1469,34 @@ fn poll(world: &mut World, shared: &mut Shared, active: &mut Active, ticket: u64
             }
         }
     }
+}
+
+/// The note a finished layout step ends with: the fixtures the save
+/// created, by uid and cells, or the mode the switch left.
+fn layout_note(world: &World, step: &crate::layout_director::LayoutStep) -> String {
+    match step {
+        crate::layout_director::LayoutStep::SetFree { on } => {
+            format!("free layout {}", if *on { "on" } else { "off" })
+        }
+        crate::layout_director::LayoutStep::Clear { .. } => "the site is cleared".to_owned(),
+        crate::layout_director::LayoutStep::Edit { .. } => crate::layout_director::put_notes(world),
+    }
+}
+
+/// A layout step's draft, its decision and its save, in order: the step
+/// starts with its save in flight, and waits for it in [`Kind::Layout`]. The
+/// inner `Err` is the step's own refusal (a put rule, a save check), the
+/// outer one a site or editor state it could not run on.
+fn plan_edit(
+    world: &mut World,
+    step: &crate::layout_director::LayoutStep,
+) -> Result<Result<(), String>, String> {
+    crate::layout_director::open(world, step)?;
+    crate::layout_director::reset(world);
+    if let Err(refusal) = crate::layout_director::decide(world, step) {
+        return Ok(Err(refusal));
+    }
+    crate::layout_director::save(world).map(|_| Ok(()))
 }
 
 /// Whether no companion of `unit` is spawned, or is being spawned: the
@@ -1482,7 +1622,7 @@ fn companion_spawned(state: (crate::companion::CompanionState, crate::companion:
     match state {
         CompanionState::Spawned => Poll::Running(format!("companion {unit}: its body is loading")),
         CompanionState::Idle => Poll::Done(format!("companion {unit} spawned")),
-        CompanionState::Walking | CompanionState::Turning | CompanionState::Building | CompanionState::Acting | CompanionState::Using => {
+        CompanionState::Walking | CompanionState::Turning | CompanionState::Building | CompanionState::Gathering | CompanionState::Acting | CompanionState::Using => {
             Poll::Running(format!("companion {unit} walks to its spawn point"))
         }
         CompanionState::Done => Poll::Done(format!("companion {unit} spawned at its spawn point")),
@@ -1593,7 +1733,7 @@ fn companion_built(
         CompanionState::Idle
         | CompanionState::Walking
         | CompanionState::Turning
-        | CompanionState::Building
+        | CompanionState::Building | CompanionState::Gathering
         | CompanionState::Acting
         | CompanionState::Using => Poll::Running(format!("companion {unit} build {seq}: {}", state.label())),
         CompanionState::Spawned => Poll::Running(format!("companion {unit}: its body is loading")),
@@ -1671,6 +1811,31 @@ fn companion_used(
     }
 }
 
+/// The end of a gather: the status at or past the command's number, done or
+/// failed.
+fn companion_gathered(
+    state: (crate::companion::CompanionState, crate::companion::CompanionStatus),
+    seq: u64,
+    unit: u32,
+    note: &str,
+) -> Poll {
+    use crate::companion::CompanionState;
+    let (state, status) = state;
+    if status.seq < seq {
+        return Poll::Running(format!("companion {unit} gather {seq}: the command is queued"));
+    }
+    match state {
+        CompanionState::Spawned => Poll::Running(format!("companion {unit}: its body is loading")),
+        CompanionState::Done if status.seq > seq => Poll::Failed(format!(
+            "companion {unit} gather {seq} was never accepted: command {} came first",
+            status.seq
+        )),
+        CompanionState::Done => Poll::Done(format!("companion {unit} gathered {note}")),
+        CompanionState::Failed(reason) => Poll::Failed(format!("companion {unit} gather {seq} failed: {reason}")),
+        state => Poll::Running(format!("companion {unit} gather {seq}: {}", state.label())),
+    }
+}
+
 /// The end of a motion: the status at or past the command's number, done or
 /// failed.
 fn companion_moved(
@@ -1708,7 +1873,7 @@ fn companion_walked(state: (crate::companion::CompanionState, crate::companion::
         CompanionState::Idle
         | CompanionState::Walking
         | CompanionState::Turning
-        | CompanionState::Building
+        | CompanionState::Building | CompanionState::Gathering
         | CompanionState::Acting
         | CompanionState::Using => Poll::Running(format!("companion {unit} walk {seq}: {}", state.label())),
         CompanionState::Spawned => Poll::Running(format!("companion {unit}: its body is loading")),
@@ -1730,7 +1895,7 @@ fn companion_turned(state: (crate::companion::CompanionState, crate::companion::
         return Poll::Running(format!("companion {unit} face {seq}: the command is queued"));
     }
     match state {
-        CompanionState::Idle | CompanionState::Walking | CompanionState::Building | CompanionState::Acting | CompanionState::Using => {
+        CompanionState::Idle | CompanionState::Walking | CompanionState::Building | CompanionState::Gathering | CompanionState::Acting | CompanionState::Using => {
             Poll::Running(format!("companion {unit} face {seq}: {}", state.label()))
         }
         CompanionState::Turning => Poll::Running(format!("companion {unit} face {seq}: turning")),

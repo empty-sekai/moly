@@ -86,7 +86,10 @@
 //! finger by logical pixels from a point given as fractions of the window
 //! (the field above the player by default); `camera.zoom {by, secs}` turns
 //! the wheel by pixels (positive zooms in). Both go through the gesture
-//! layer and the camera's own input law.
+//! layer and the camera's own input law. `view.set {hud, player}` sets the
+//! clean view for a recording: `hud: true` hides every UI view but the talk
+//! window and `player: true` hides the player's own body; a switch left out
+//! keeps its state, and the note names the result.
 //!
 //! Server: `server.edit {path, value}` or `server.edit {action, ...}` makes
 //! one edit of the server document (the clock, the stamina, the phenomenon
@@ -101,6 +104,19 @@
 //! copy, turn it a quarter turn `rotate` times, move it onto the tile,
 //! decide it and save. A refusal of the editor's is the step's failure, with
 //! its put status and feedback; the editor stays open afterwards.
+//!
+//! The layout steps: `layout.free {on}` sets the site's free layout mode (no
+//! house required, the house and the gates stored like any fixture, any
+//! number of houses and gates, no owned copy needed for a put);
+//! `layout.clear {keep?}` stores the site's fixtures (the house and the gates
+//! stay outside the mode) and saves once; `layout.put {fixture, texture?,
+//! at: [x, z], y?, face?}` places one fixture with its minimum corner on a
+//! layout grid cell and saves; `layout.put_many {items}` places several, all
+//! or nothing, in one save and names a refusal by the item's index;
+//! `layout.remove {uid}` or `{at: [x, z]}` stores one and saves. A put
+//! meets the editor's own put rules and saves through the editor's save
+//! checks; the step ends once the layout has reloaded. `face` is the
+//! rotation: `front` the master's own facing, `back` the door toward +z.
 //!
 //! World: `weather.set {phenomenon}`, `site.switch {site}` (a site type such
 //! as `first_floor`; it waits until the entry has opened movement), and the
@@ -507,6 +523,24 @@ mod tests {
         }
     }
 
+    /// Every step the schema offers has a row in the plugin documentation,
+    /// whose tables name the step by its `do` value in backticks.
+    #[test]
+    fn the_plugin_document_names_every_step() {
+        let document = include_str!("../../../../../docs/plugins.md");
+        let schema: Value = serde_json::from_str(SCHEMA).unwrap();
+        let mut missing: Vec<&str> = schema
+            .get("steps")
+            .and_then(Value::as_array)
+            .expect("the schema lists its steps")
+            .iter()
+            .map(|step| step["name"].as_str().expect("a schema step has a name"))
+            .filter(|name| !names(document, name))
+            .collect();
+        missing.sort_unstable();
+        assert!(missing.is_empty(), "docs/plugins.md has no row for: {}", missing.join(", "));
+    }
+
     #[test]
     fn every_bundled_example_parses() {
         let examples = examples();
@@ -515,6 +549,13 @@ mod tests {
             assert!(!title.is_empty());
             script::parse(&script).unwrap_or_else(|error| panic!("{title}: {error}"));
         }
+    }
+
+    /// Whether a documentation table has a row whose first cell is `name`:
+    /// `| `name` |` at the start of a line.
+    fn names(document: &str, name: &str) -> bool {
+        let row = format!("| `{name}` |");
+        document.lines().any(|line| line.starts_with(&row))
     }
 
     #[test]

@@ -5,7 +5,10 @@
 use std::sync::Arc;
 
 use moly_law::action_button::ButtonType;
+use moly_layout::Rot;
 use serde_json::{Map, Value};
+
+use crate::layout_director::{Keep, PutItem};
 
 /// A validated script.
 #[derive(Clone, Debug)]
@@ -137,6 +140,9 @@ pub enum Node {
     /// Has the companion of `unit` use a placed fixture: walk to the action
     /// point of its character's action there and play it.
     CompanionUse { unit: u32, target: UseTarget, activity: Option<i32>, variant: Option<u32> },
+    /// Has the companion of `unit` swing at a wood or mineral harvest object
+    /// until it is harvested, with the player's tool for it.
+    CompanionGather { unit: u32, what: crate::harvest::companion_gather::GatherTarget },
     /// Shows the emoticon `name` at a world point for `secs`.
     EffectPlay { name: String, at: [f32; 3], secs: f32 },
     /// A one-finger drag of `by` logical pixels (x right, y down) over
@@ -150,6 +156,28 @@ pub enum Node {
     /// the answer.
     ServerEdit { command: Map<String, Value> },
     SiteSwitch { site: String },
+    /// The free layout mode of the site: written into the local document, and
+    /// the step ends once the game holds it.
+    LayoutFree { on: bool },
+    /// Every fixture of the site goes to the inventory but the kept ones, and
+    /// the site is saved once.
+    LayoutClear { keep: Vec<Keep> },
+    /// One fixture, its minimum corner on the cell `at`, saved once.
+    LayoutPut {
+        fixture: i32,
+        texture: Option<u32>,
+        at: [i8; 2],
+        y: i8,
+        face: Rot,
+    },
+    /// Several fixtures, all or nothing, in one save.
+    LayoutPutMany { items: Vec<PutItem> },
+    /// One placed fixture goes to the inventory: named by its uid, or by a
+    /// cell it covers.
+    LayoutRemove { uid: Option<String>, at: Option<[i8; 2]> },
+    /// The clean view's switches: each of `hud` and `player` changes only
+    /// when given (`hud: true` hides the HUD).
+    ViewSet { hud: Option<bool>, player: Option<bool> },
 }
 
 /// The point a companion turns to.
@@ -273,10 +301,11 @@ pub(super) const ACTIONS: &[&str] = &[
     "wait", "wait_until", "assert", "log", "where", "capture", "parallel", "repeat",
     "player.walk_to", "player.interact", "player.gather", "player.craft", "player.stick", "player.release", "player.talk_to", "player.wear",
     "player.wear_avatar", "player.deliver", "tap", "ui.tap", "dialog.answer", "key.back", "layout.place",
+    "layout.free", "layout.clear", "layout.put", "layout.put_many", "layout.remove", "view.set",
     "npc.take", "npc.walk_to", "npc.face", "npc.emote", "npc.use", "npc.tweet", "npc.talk", "npc.release",
     "companion.spawn", "companion.walk_to", "companion.face", "companion.emote", "companion.motion",
     "companion.expression", "companion.balloon", "companion.despawn", "companion.build",
-    "companion.use",
+    "companion.use", "companion.gather",
     "effect.play",
     "camera.drag", "camera.zoom", "server.edit", "weather.set", "site.switch", "site.enter_room", "site.go_home",
 ];
@@ -654,6 +683,24 @@ fn step(value: &Value, at: &str) -> Result<Vec<Step>, String> {
             let variant = fields.opt_u32("variant")?;
             vec![one(Node::CompanionUse { unit, target, activity, variant }, Some(120.0))]
         }
+        "companion.gather" => {
+            use crate::harvest::companion_gather::GatherTarget;
+            let unit = fields.req_u32("unit")?;
+            let what = match fields.req("gatherable")? {
+                Value::String(word) if word == "nearest" => {
+                    GatherTarget::Nearest { kind: fields.opt_str("kind")?.map(str::to_owned) }
+                }
+                value => GatherTarget::Uid(
+                    value
+                        .as_u64()
+                        .ok_or_else(|| format!("{at}: gatherable is a harvest object UID or \"nearest\""))?,
+                ),
+            };
+            if matches!(what, GatherTarget::Uid(_)) && fields.opt("kind").is_some() {
+                return Err(format!("{at}: kind only narrows gatherable \"nearest\""));
+            }
+            vec![one(Node::CompanionGather { unit, what }, Some(120.0))]
+        }
         "effect.play" => {
             let name = fields.req_str("name")?.to_owned();
             let at = triple(fields.req("at")?, &format!("{at}.at"))?;
@@ -704,6 +751,76 @@ fn step(value: &Value, at: &str) -> Result<Vec<Step>, String> {
         // button, then wait for the move to start and to land in a room.
         "site.enter_room" => door_steps(&one, TargetKind::HouseDoor, ButtonType::HouseEntry, SiteKindName::Room),
         "site.go_home" => door_steps(&one, TargetKind::RoomDoor, ButtonType::GoHomeSite, SiteKindName::Home),
+        "layout.free" => vec![one(Node::LayoutFree { on: fields.req_bool("on")? }, Some(30.0))],
+        "layout.clear" => {
+            let keep = match fields.opt("keep") {
+                None => Vec::new(),
+                Some(list) => list
+                    .as_array()
+                    .ok_or_else(|| format!("{at}: keep must be a list of house and gate"))?
+                    .iter()
+                    .map(|item| match item.as_str() {
+                        Some("house") => Ok(Keep::House),
+                        Some("gate") => Ok(Keep::Gate),
+                        other => Err(format!("{at}: keep is house or gate, not {other:?}")),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            };
+            let mut keep: Vec<Keep> = keep;
+            keep.sort_by_key(|keep| *keep as u8);
+            keep.dedup();
+            vec![one(Node::LayoutClear { keep }, Some(120.0))]
+        }
+        "layout.put" => {
+            let item = put(&mut fields, &at)?;
+            vec![one(
+                Node::LayoutPut {
+                    fixture: item.fixture,
+                    texture: item.texture,
+                    at: item.at,
+                    y: item.y,
+                    face: item.face,
+                },
+                Some(120.0),
+            )]
+        }
+        "layout.put_many" => {
+            let list = fields
+                .req("items")?
+                .as_array()
+                .ok_or_else(|| format!("{at}: items must be a list of fixtures"))?;
+            if list.is_empty() {
+                return Err(format!("{at}: items is empty"));
+            }
+            let items = list
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    let at = format!("{at}.items[{index}]");
+                    let mut item = Fields::new(value, &at)?;
+                    let placed = put(&mut item, &at)?;
+                    item.finish()?;
+                    Ok(placed)
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            vec![one(Node::LayoutPutMany { items }, Some(180.0))]
+        }
+        "view.set" => {
+            let hud = fields.opt_bool("hud")?;
+            let player = fields.opt_bool("player")?;
+            if hud.is_none() && player.is_none() {
+                return Err(format!("{at}: give hud, player or both"));
+            }
+            vec![one(Node::ViewSet { hud, player }, None)]
+        }
+        "layout.remove" => {
+            let uid = fields.opt_str("uid")?.map(str::to_owned);
+            let at_cell = fields.opt("at").map(|cell| cell_pair(cell, &format!("{at}.at"))).transpose()?;
+            if uid.is_some() == at_cell.is_some() {
+                return Err(format!("{at}: give exactly one of uid and at"));
+            }
+            vec![one(Node::LayoutRemove { uid, at: at_cell }, Some(120.0))]
+        }
         other => {
             return Err(format!("{at}: unknown action {other}; the actions are {}", ACTIONS.join(", ")));
         }
@@ -731,6 +848,47 @@ fn door_steps(
             Some(60.0),
         ),
     ]
+}
+
+/// `layout.put`'s item, read from `fields`; the `at` names it.
+fn put(fields: &mut Fields<'_>, at: &str) -> Result<PutItem, String> {
+    let fixture = fields.req_i32("fixture")?;
+    let texture = fields.opt_u32("texture")?;
+    if texture == Some(0) {
+        return Err(format!("{at}: texture counts from 1"));
+    }
+    let cell = fields
+        .req("at")
+        .and_then(|value| cell_pair(value, at))?;
+    let y = fields
+        .opt_u32("y")?
+        .map_or(Ok(0), |y| {
+            i8::try_from(y).map_err(|_| format!("{at}: y is a grid height below 128, not {y}"))
+        })?;
+    let face = fields.opt_str("face")?.unwrap_or("front");
+    let face = crate::layout_director::face(face).map_err(|error| format!("{at}: {error}"))?;
+    Ok(PutItem {
+        fixture,
+        texture,
+        at: cell,
+        y,
+        face,
+    })
+}
+
+/// A layout cell: two whole numbers in the grid's own range.
+fn cell_pair(value: &Value, at: &str) -> Result<[i8; 2], String> {
+    let Some([x, z]) = value.as_array().map(Vec::as_slice) else {
+        return Err(format!("{at}: at is a cell [x, z]"));
+    };
+    let mut out = [0i8; 2];
+    for (slot, value) in out.iter_mut().zip([x, z]) {
+        *slot = value
+            .as_i64()
+            .and_then(|number| i8::try_from(number).ok())
+            .ok_or_else(|| format!("{at}: at is two whole numbers from -128 to 127"))?;
+    }
+    Ok(out)
 }
 
 /// A condition outside a script, as the control surface sends one.
@@ -1016,6 +1174,11 @@ impl<'a> Fields<'a> {
                     .ok_or_else(|| format!("{at}: {key} must be a number of at least 0"))
             })
             .transpose()
+    }
+
+    fn req_bool(&mut self, key: &'a str) -> Result<bool, String> {
+        let at = self.at.clone();
+        self.opt_bool(key)?.ok_or_else(|| format!("{at}: missing field {key}"))
     }
 
     fn req_f32(&mut self, key: &'a str) -> Result<f32, String> {

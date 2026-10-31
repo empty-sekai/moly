@@ -253,5 +253,52 @@
     }
    ]
   }
+ },
+ {
+  "id": "free-layout-house",
+  "title": "自由布局：清空场地并摆放一座房子",
+  "script": {
+   "name": "Free layout: clear the site and place a house",
+   "steps": [
+    {
+     "do": "wait_until",
+     "until": "entry_done",
+     "timeout": 120
+    },
+    {
+     "do": "view.set",
+     "hud": true,
+     "player": true
+    },
+    {
+     "do": "layout.free",
+     "on": true
+    },
+    {
+     "do": "layout.clear"
+    },
+    {
+     "do": "layout.put",
+     "fixture": 1,
+     "at": [
+      -6,
+      -6
+     ],
+     "face": "back"
+    },
+    {
+     "do": "where",
+     "of": [
+      "house_door",
+      "player"
+     ]
+    },
+    {
+     "do": "view.set",
+     "hud": false,
+     "player": false
+    }
+   ]
+  }
  }
 ]

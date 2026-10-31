@@ -59,6 +59,7 @@ Each platform also has a server-only package, `moly-server-<version>-<platform>`
 - [Importing player data](docs/player-data.md): steps, backups and resource requirements for importing player data in the developer window.
 - [Master tables and regions](docs/masters.md): where master tables are read from, how they are merged, and which regions are enabled.
 - [MCP server](docs/mcp.md): the MCP server that lets AI clients start and drive game instances.
+- [Plugins](docs/plugins.md): the Luau plugin interface, every director step, the observable sections, the events and the environment switches.
 - [Project structure](docs/architecture.md): the responsibilities of each directory and crate.
 - [Development](docs/development.md): testing and checks, commit conventions, continuous integration, and versioning and releases.
 - [Release package guide](docs/release-package.md): what a downloaded release package contains, and how to run and upgrade it.

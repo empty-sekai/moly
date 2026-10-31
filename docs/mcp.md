@@ -7,3 +7,5 @@ npm ci --prefix tools/mcp
 ```
 
 The `.mcp.json` file in the repository root registers it as `moly`. For the tools, JSON-RPC methods and security notes, see [tools/mcp/README.md](../tools/mcp/README.md).
+
+The game also runs Luau plugins that drive it through the same director steps and observe the same sections; the interface, every step, the events and the environment switches are in [Plugins](plugins.md).
