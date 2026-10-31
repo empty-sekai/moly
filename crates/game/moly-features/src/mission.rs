@@ -1,5 +1,6 @@
 //! The mission screen (621) and its receive: the pure rules over the mission
-//! master tables and a plain user state ([`model`]), the one receive request
+//! master tables and a plain user state
+//! ([`crate::userdata::mission::model`]), the one receive request
 //! the screen sends (`MysekaiMissionService`, [`service`]), the screen layer's
 //! view, its two pages and the page turn ([`screen`]), the list cells
 //! ([`cell`]) and the two dialogs those cells open ([`list_dialog`],
@@ -24,7 +25,6 @@
 pub mod cell;
 pub mod detail_dialog;
 pub mod list_dialog;
-pub mod model;
 pub mod screen;
 pub mod service;
 

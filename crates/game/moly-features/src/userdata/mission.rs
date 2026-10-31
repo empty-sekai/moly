@@ -5,7 +5,7 @@
 //! `UserMysekaiNormalMissions`; a response or a sync that carries one of them
 //! replaces it whole (`UserDataManager.UpdateAll` -> `UpdateMysekaiMissionSheet`
 //! and `UpdateMysekaiMission`). The copy is read as the screen's plain user
-//! state ([`crate::mission::model::UserMissionState`]) by
+//! state ([`model::UserMissionState`]) by
 //! `MysekaiMissionUtility.GetCurrentMissionSheetId` and
 //! `MysekaiMissionUtility.GetMissionUserData`.
 //!
@@ -26,7 +26,9 @@ use serde_json::Value;
 
 use moly_masters::mission::MissionMasters;
 
-use crate::mission::model::{MissionStatus, UserMission, UserMissionState};
+pub mod model;
+
+use model::{MissionStatus, UserMission, UserMissionState};
 
 /// `UserMysekaiNormalMissionSheet` and `UserMysekaiNormalMissions` as an
 /// arrival carries them; `None` for the table it does not carry.

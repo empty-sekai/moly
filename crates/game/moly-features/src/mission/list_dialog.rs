@@ -438,7 +438,7 @@ pub struct SheetRow {
 /// `CreateMissionAllList`: every sheet in `seq` order.
 pub fn all_rows(
     masters: &moly_masters::mission::MissionMasters,
-    state: &super::model::UserMissionState,
+    state: &crate::userdata::mission::model::UserMissionState,
 ) -> Vec<SheetRow> {
     masters
         .sheets_by_seq()
@@ -448,8 +448,8 @@ pub fn all_rows(
             name: sheet.name.clone(),
             complete: masters.parent_mission(sheet.id).map(|mission| mission.id),
             received: masters.parent_mission(sheet.id).is_some_and(|mission| {
-                super::model::mission_state(masters, state, mission)
-                    .is_some_and(|view| view.status == super::model::MissionStatus::Received)
+                crate::userdata::mission::model::mission_state(masters, state, mission)
+                    .is_some_and(|view| view.status == crate::userdata::mission::model::MissionStatus::Received)
             }),
             children: masters
                 .child_missions(sheet.id)
@@ -867,7 +867,7 @@ pub fn first_row(
 ) -> usize {
     let mut state = user.state();
     state.current_sheet = screen::current_sheet(masters, user);
-    if super::model::is_all_completed(masters, &state) {
+    if crate::userdata::mission::model::is_all_completed(masters, &state) {
         return sheets.saturating_sub(1);
     }
     masters

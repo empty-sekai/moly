@@ -27,7 +27,7 @@
 //!   sent while `MysekaiTutorialManager.IsTutorial`) is refused by name: this
 //!   tree has no tutorial domain.
 //! - `IsCompleteSheet` (`MysekaiMissionService.cs`) is the model's
-//!   ([`crate::mission::model::ReceiveRequest::is_complete_sheet`]) and is
+//!   ([`crate::userdata::mission::model::ReceiveRequest::is_complete_sheet`]) and is
 //!   read from the request kept while it is in flight.
 //! - The reward chain (`ShowRewards`) is not built here (a later unit): a
 //!   success is published as [`MissionReceived`] and the screen logs the
@@ -38,7 +38,7 @@ use moly_link::ServerLink;
 use moly_protocol::api::{UserMysekaiNormalMissionRewardRequest, UserMysekaiNormalMissionRewardResponse};
 use moly_protocol::{Call, CallKind, Refusal, Reply};
 
-use super::model::ReceiveRequest;
+use crate::userdata::mission::model::ReceiveRequest;
 use crate::userdata::mission::ClientMission;
 use crate::userdata::ServerPending;
 

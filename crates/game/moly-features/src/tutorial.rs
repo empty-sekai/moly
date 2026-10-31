@@ -848,7 +848,7 @@ fn step(world: &mut World, run: &mut Run, op: &Op) -> Result<bool, String> {
             let user = world
                 .get_resource::<crate::userdata::mission::ClientMission>()
                 .ok_or("mission user data is absent")?;
-            Ok(crate::mission::model::is_child_mission_all_achieved(
+            Ok(crate::userdata::mission::model::is_child_mission_all_achieved(
                 tables,
                 &user.state(),
             ))

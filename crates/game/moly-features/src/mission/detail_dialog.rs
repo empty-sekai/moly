@@ -1117,7 +1117,7 @@ pub fn setup(
     dialog.set_up = true;
     let mut state = user.state();
     state.current_sheet = screen::current_sheet(masters, user);
-    let view_data = super::model::mission_state(masters, &state, master);
+    let view_data = crate::userdata::mission::model::mission_state(masters, &state, master);
     let data = SetupData {
         mode: dialog.mode,
         sentence: moly_law::text::custom_text_mesh::set_text(&master.sentence, false),

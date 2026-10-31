@@ -65,7 +65,7 @@ use bevy::window::PrimaryWindow;
 use moly_assets::ui_layout::{UiComponent, UiInstance, UiNode, UiPrefab};
 use serde_json::Value;
 
-use super::model;
+use crate::userdata::mission::model;
 use super::screen;
 use crate::canvas::RootCanvas;
 use crate::gesture::{GestureEvent, GestureKind, GestureState};

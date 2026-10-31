@@ -451,10 +451,10 @@ impl MissionPanel {
             return PanelContent::default();
         };
         let state = user.state();
-        if crate::mission::model::is_all_completed(masters, &state) {
+        if crate::userdata::mission::model::is_all_completed(masters, &state) {
             return PanelContent::default();
         }
-        let Some(panel) = crate::mission::model::panel_view(masters, &state) else {
+        let Some(panel) = crate::userdata::mission::model::panel_view(masters, &state) else {
             return PanelContent::default();
         };
         PanelContent {

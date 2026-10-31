@@ -14,7 +14,7 @@
 //! - `OnExited`: each page disposed (its stamp unloaded), the bundle
 //!   unloaded.
 //!
-//! The screen shows the model's list ([`crate::mission::model`]). Its
+//! The screen shows the model's list ([`crate::userdata::mission::model`]). Its
 //! buttons:
 //! - the page's own cell is the sheet's completion mission
 //!   (`_completeCell`): a complete sheet sends the bulk receive
@@ -77,7 +77,7 @@ use moly_law::ui::dotween::Ease;
 use moly_masters::mission::MissionMasters;
 use serde_json::Value;
 
-use super::model::{self, CellTap, MissionScreen as MissionModel};
+use crate::userdata::mission::model::{self, CellTap, MissionScreen as MissionModel};
 use super::service::{MissionReceiveFailed, MissionReceived, MysekaiMissionService};
 use crate::balloon::BALLOON_LAYER;
 use crate::canvas::RootCanvas;
