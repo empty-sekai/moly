@@ -45,9 +45,9 @@ use moly_assets::json::JsonAsset;
 use moly_assets::source_navigation::SourceObjectIdentity;
 use serde_json::Value;
 
-use crate::fixture_activity_provider::FixtureActivityProvider;
-use crate::fixture_activity_state::FixtureActivityOwner;
-use crate::fixture_activity_timeline::{
+use moly_features::fixture_activity_provider::FixtureActivityProvider;
+use moly_features::fixture_activity_state::FixtureActivityOwner;
+use moly_features::fixture_activity_timeline::{
     self as timeline, AnimationCoverage, FixtureActivityTimelines, SourceAnimationEvidence,
     StartTimeline, TimelineAnimationBinding, TimelineBindings, TimelineDefinition, TimelineOwner,
     TimelineOwnerKind, TimelinePayload, TimelineStatus, TimelineTimeoutBudget, TimelineToken,
@@ -135,7 +135,7 @@ pub fn advance(world: &mut World) {
 
 fn step(world: &mut World, bloom: &mut DeliveryBloom) {
     let epoch = world
-        .get_resource::<crate::site::GroundEpoch>()
+        .get_resource::<moly_features::site::GroundEpoch>()
         .map(|e| e.0);
     let objects = world
         .get_resource::<super::site::DeliverySite>()

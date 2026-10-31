@@ -152,7 +152,7 @@ pub use moly_features::birthday;
 pub use moly_features::browser_game;
 pub use moly_features::content_library;
 pub use moly_features::cutscene;
-pub use moly_features::delivery;
+pub use moly_delivery as delivery;
 pub use moly_features::entry;
 pub use moly_fixture_edit as fixture_edit;
 pub use moly_fixture_edit::ui as fixture_edit_ui;

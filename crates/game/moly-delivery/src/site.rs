@@ -45,11 +45,11 @@ use moly_law::action_button::inside_circle;
 use serde_json::Value;
 
 use super::{CollisionEdge, DeliveryCollision, DeliveryModel, DeliveryObjectType};
-use crate::fixture_activity_timeline::{
+use moly_features::fixture_activity_timeline::{
     ReceiverCall, SignalReaction, SignalReceiverBinding, SourceAssetId,
 };
-use crate::fixture_timeline_particles::SignalCall;
-use crate::player::PlayerControlled;
+use moly_features::fixture_timeline_particles::SignalCall;
+use moly_features::player::PlayerControlled;
 
 /// A site's package: its bundle under the field prefix.
 const SITE_PACKAGE_PREFIX: &str = "mysekai__site__field__";
@@ -165,8 +165,8 @@ pub fn prepare_signal_targets(world: &mut World) {
         return;
     };
     let package = format!("{SITE_PACKAGE_PREFIX}{bundle}");
-    let started = crate::fixture_timeline_particles::realtime(world);
-    match crate::fixture_activity_timeline::prepare_receiver_targets(world, &receiver, &package) {
+    let started = moly_features::fixture_timeline_particles::realtime(world);
+    match moly_features::fixture_activity_timeline::prepare_receiver_targets(world, &receiver, &package) {
         Ok(false) => {}
         Ok(true) => {
             world.resource_mut::<DeliverySite>().signals_prepared = true;
@@ -189,8 +189,8 @@ pub fn prepare_signal_targets(world: &mut World) {
 pub fn resolve(
     server: Res<AssetServer>,
     jsons: Res<Assets<JsonAsset>>,
-    site: Option<Res<crate::site::SiteActive>>,
-    epoch: Option<Res<crate::site::GroundEpoch>>,
+    site: Option<Res<moly_features::site::SiteActive>>,
+    epoch: Option<Res<moly_features::site::GroundEpoch>>,
     mut state: ResMut<DeliverySite>,
     identities: Query<(
         Entity,
@@ -199,7 +199,7 @@ pub fn resolve(
         Option<&Name>,
     )>,
     parents: Query<&ChildOf>,
-    roots: Query<(), With<crate::site::SiteRoot>>,
+    roots: Query<(), With<moly_features::site::SiteRoot>>,
 ) {
     let (Some(site), Some(epoch)) = (site, epoch) else {
         return;
@@ -284,12 +284,12 @@ type Finder<'a> =
 
 fn read_objects(
     text: &str,
-    site: &crate::site::SiteActive,
+    site: &moly_features::site::SiteActive,
     find: &Finder<'_>,
 ) -> Result<DeliveryObjects, Resolve> {
     let fail = Resolve::Failed;
     let doc: Value = serde_json::from_str(text).map_err(|e| fail(format!("unreadable: {e}")))?;
-    let view = crate::site_move::arrival::delivery_site_view(&doc).map_err(fail)?;
+    let view = moly_features::site_move::arrival::delivery_site_view(&doc).map_err(fail)?;
     let fields = &view["fields"];
     let refs = fields["_deliveryCollisionObjects"]
         .as_array()
@@ -346,7 +346,7 @@ fn read_objects(
     let start_id =
         reference_id(&fields["_itemDropStartPosition"], "_itemDropStartPosition").map_err(fail)?;
     let (drop_start, _) = find(&|identity: &SourceObjectIdentity| identity.transform == start_id)?;
-    let offset = crate::site_move::arrival::jump_offset_of(view).map_err(fail)?;
+    let offset = moly_features::site_move::arrival::jump_offset_of(view).map_err(fail)?;
     let bloom_timeline = doc["timelineSockets"].as_array().and_then(|sockets| {
         sockets
             .iter()
@@ -562,15 +562,15 @@ fn signal_receiver(doc: &Value, view: &Value) -> Result<SignalReceiverBinding, S
 pub fn arrive(
     mut state: ResMut<DeliverySite>,
     mut model: ResMut<DeliveryModel>,
-    client: Res<crate::userdata::client::birthday_party::ClientBirthdayPartyData>,
-    parties: Option<Res<crate::birthday::BirthdayParties>>,
+    client: Res<moly_features::userdata::client::birthday_party::ClientBirthdayPartyData>,
+    parties: Option<Res<moly_features::birthday::BirthdayParties>>,
     tables: Option<Res<moly_masters::delivery::DeliveryTables>>,
-    configs: Option<Res<crate::client_config::ClientConfigs>>,
+    configs: Option<Res<moly_features::client_config::ClientConfigs>>,
     mut spawns: ResMut<super::drops::DeliveryDropSpawns>,
     mut gather_loop: ResMut<super::drops::DeliveryGatherLoop>,
-    catalog: Option<Res<crate::harvest::catalog::HarvestCatalog>>,
-    mut glbs: ResMut<crate::harvest::HarvestGltfs>,
-    mut docs: ResMut<crate::harvest::HarvestDocs>,
+    catalog: Option<Res<moly_features::harvest::catalog::HarvestCatalog>>,
+    mut glbs: ResMut<moly_features::harvest::HarvestGltfs>,
+    mut docs: ResMut<moly_features::harvest::HarvestDocs>,
     server: Res<AssetServer>,
     frames: Res<bevy::diagnostic::FrameCount>,
 ) {
@@ -589,7 +589,7 @@ pub fn arrive(
     }
     state.arrived = true;
     // GetMasterBirthdayPartiesInSession.
-    let in_session = parties.in_session(crate::birthday::now_ms());
+    let in_session = parties.in_session(moly_features::birthday::now_ms());
     if in_session.is_empty() {
         match parties.missing() {
             Some(reason) => info!("[delivery] arrival on {}: no party in session, the party table is missing ({reason}); no delivery", objects.scene),
@@ -601,7 +601,7 @@ pub fn arrive(
         error!("[delivery] arrival on {}: the delivery tables (birthday-party-delivery.json) are absent (the server model names them among its missing masters); no delivery", objects.scene);
         return;
     };
-    use crate::userdata::client::birthday_party::{CONFIG_BASE_POINT, CONFIG_DROP_UPPER_LIMIT};
+    use moly_features::userdata::client::birthday_party::{CONFIG_BASE_POINT, CONFIG_DROP_UPPER_LIMIT};
     let (Some(base_point), Some(drop_upper_limit)) = (
         client.master_config_int(CONFIG_BASE_POINT),
         client.master_config_int(CONFIG_DROP_UPPER_LIMIT),
@@ -680,7 +680,7 @@ pub fn arrive(
 /// object the player collides with again, whatever the game state).
 pub fn scan(
     mut state: ResMut<DeliverySite>,
-    eligibility: crate::interaction::InteractionEligibility,
+    eligibility: moly_features::interaction::InteractionEligibility,
     players: Query<&Transform, With<PlayerControlled>>,
     mut collisions: MessageWriter<DeliveryCollision>,
     mut retrigger: ResMut<super::DeliveryEnterRetrigger>,
@@ -760,7 +760,7 @@ pub struct DeliveryAutoplay {
     /// The wait for a drawn delivery button is logged.
     waiting_logged: bool,
     /// The awaited dialog and when the instrument first saw it.
-    dialog_since: Option<(crate::ui_layers::DialogId, f32)>,
+    dialog_since: Option<(moly_features::ui_layers::DialogId, f32)>,
     /// The back key is down (released on the next frame).
     back_down: bool,
     /// When the walk toward the drops began; after 30 s the instrument
@@ -790,8 +790,8 @@ pub fn autoplay(
     state: Res<DeliverySite>,
     model: Res<DeliveryModel>,
     awaiting: Res<super::honor::DialogAwait>,
-    joystick: Res<crate::joystick::JoystickState>,
-    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
+    joystick: Res<moly_features::joystick::JoystickState>,
+    root_canvas: Option<Res<moly_features::canvas::RootCanvas>>,
     windows: Query<(Entity, &Window), With<PrimaryWindow>>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
     players: Query<&Transform, With<PlayerControlled>>,
@@ -802,7 +802,7 @@ pub fn autoplay(
         Res<super::screen::DeliveryScreen>,
         MessageWriter<bevy::window::WindowEvent>,
     ),
-    navigation: Option<Res<crate::player_fixture_action::PlayerFixtureNavigation>>,
+    navigation: Option<Res<moly_features::player_fixture_action::PlayerFixtureNavigation>>,
 ) {
     let Some((hold, close)) = autoplay_config() else {
         return;
@@ -981,7 +981,7 @@ pub fn autoplay(
         world.dot(Vec2::new(right.x, right.z)),
         world.dot(forward_flat),
     );
-    let radius = crate::joystick::HANDLE_SIZE * root_canvas.scale(window);
+    let radius = moly_features::joystick::HANDLE_SIZE * root_canvas.scale(window);
     if !run.walking {
         run.walking = true;
         write(&mut touches, TouchPhase::Started, base);

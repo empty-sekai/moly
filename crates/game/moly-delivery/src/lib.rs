@@ -13,7 +13,7 @@
 //!   `OnChangeUILayer`: the delivery button's press and release are the
 //!   start / end requests.
 //! - The server's side is the server model's delivery section
-//!   (`crate::userdata::client::birthday_party`): the user rows and the two master configs
+//!   (`moly_features::userdata::client::birthday_party`): the user rows and the two master configs
 //!   the client reads as its copies (`ClientBirthdayPartyData`), the two API
 //!   replies, and the delivery master tables (`DeliveryTables`).
 //! - `flow`: `OnStartDelivery` / `ExecuteDelivery`: the approach, the start
@@ -22,7 +22,13 @@
 //!   unclaimed drops of an arrival, gathering and the gather API loop.
 //! - `honor`: `PlayTotalRewardAnimation` and the honor reward state.
 //!
-//! The honor reward camera (state 20) is `delivery_camera`.
+//! The honor reward camera (state 20) is `moly_features::delivery_camera`.
+//!
+//! Boundaries: the crate reads the hub (`moly_features`) for the field, the
+//! player, the UI layers and the user data copies, and the harvest's master
+//! catalog, ground height, drop animation and auto-move step for its drops.
+//! The menu shell takes the delivery screen's texts through the text source
+//! the plugin registers.
 //!
 //! GameState 12: the pre-action of the first press of a visit sets
 //! `GameStateManager.ChangeState(Delivery)`, and nothing reachable from the
@@ -114,9 +120,9 @@ pub struct DeliveryProgress {
     pub animation_time: f32,
 }
 
-pub use crate::field_modes::DeliveryHold;
+pub use moly_features::field_modes::DeliveryHold;
 
-pub use crate::field_modes::DeliveryGameState;
+pub use moly_features::field_modes::DeliveryGameState;
 
 /// One drop's model (`MysekaiDropItemModel`: resource type 41, the party's
 /// reward material, its rarity, the site, quantity 1).
@@ -200,7 +206,7 @@ impl PartySite {
     /// have-quantity and the party's `deliveryTotalPoint` (0 without a row).
     pub fn user_rows(
         &self,
-        client: &crate::userdata::client::birthday_party::ClientBirthdayPartyData,
+        client: &moly_features::userdata::client::birthday_party::ClientBirthdayPartyData,
     ) -> (i32, i32) {
         (
             i32::try_from(self.item_material_id).map_or(0, |id| client.have_quantity(id)),
@@ -302,7 +308,7 @@ impl DeliveryModel {
     /// item, `GetUserBirthdayParty(id).deliveryTotalPoint`, 0 without a row).
     pub fn update_synchronized(
         &mut self,
-        client: &crate::userdata::client::birthday_party::ClientBirthdayPartyData,
+        client: &moly_features::userdata::client::birthday_party::ClientBirthdayPartyData,
     ) {
         for party in &mut self.parties {
             let (have, points) = party.user_rows(client);
@@ -414,7 +420,7 @@ pub fn clear_for_site_change(world: &mut World) {
     world.resource_mut::<drops::DeliveryDropSpawns>().clear();
     let shown = world.resource_mut::<honor::RewardRuns>().cancel();
     if !shown.is_empty() {
-        let mut screens = world.resource_mut::<crate::ui_layers::ScreenManager>();
+        let mut screens = world.resource_mut::<moly_features::ui_layers::ScreenManager>();
         for id in &shown {
             screens.close_dialog(*id);
             screens.dialog_destroyed(*id);
@@ -425,7 +431,7 @@ pub fn clear_for_site_change(world: &mut World) {
     if let Some(id) = refresh {
         // The site's enable token cancels the refresh's `WaitUntil`; the
         // dialog goes with the site's UI.
-        let mut screens = world.resource_mut::<crate::ui_layers::ScreenManager>();
+        let mut screens = world.resource_mut::<moly_features::ui_layers::ScreenManager>();
         screens.close_dialog(id);
         screens.dialog_destroyed(id);
         info!("[delivery] site change: the refresh dialog {id:?} closes with the end action");
@@ -460,10 +466,10 @@ impl Plugin for DeliveryPlugin {
             .init_resource::<flow::DeliveryFace>()
             .init_resource::<honor::RewardRuns>()
             .init_resource::<honor::DialogAwait>()
-            .init_resource::<crate::delivery_camera::DeliveryHonorCamera>()
+            .init_resource::<moly_features::delivery_camera::DeliveryHonorCamera>()
             .init_resource::<bloom::DeliveryBloom>()
             .init_resource::<screen::DeliveryScreen>()
-            .init_resource::<crate::ui_charsets::ShellTextSources>()
+            .init_resource::<moly_features::ui_charsets::ShellTextSources>()
             .init_resource::<DeliveryEnterRetrigger>()
             .add_systems(Startup, screen::load)
             .add_systems(Update, (screen::load_names, screen::spawn_when_ready))
@@ -475,7 +481,7 @@ impl Plugin for DeliveryPlugin {
                     site::scan,
                     drops::scan,
                     screen::follow_screen,
-                    screen::input.run_if(crate::game_settings::scene_input_enabled),
+                    screen::input.run_if(moly_features::game_settings::scene_input_enabled),
                     site::autoplay,
                     flow::advance,
                     drops::spawn,
@@ -488,31 +494,31 @@ impl Plugin for DeliveryPlugin {
                     screen::advance,
                 )
                     .chain()
-                    .after(crate::player_input::read_input)
-                    .before(crate::player_state::drive_from_input)
-                    .before(crate::player::advance)
-                    .before(crate::audio::SeDrainSet::Drain),
+                    .after(moly_features::player_input::read_input)
+                    .before(moly_features::player_state::drive_from_input)
+                    .before(moly_features::player::advance)
+                    .before(moly_features::audio::SeDrainSet::Drain),
             )
             .add_systems(
                 Update,
                 bloom::advance
-                    .after(crate::player_avatar::item_timeline::advance)
-                    .before(crate::fixture_activity_timeline::advance),
+                    .after(moly_features::player_avatar::item_timeline::advance)
+                    .before(moly_features::fixture_activity_timeline::advance),
             )
             .add_systems(
                 Update,
                 site::prepare_signal_targets
                     .after(site::resolve)
-                    .before(crate::player_avatar::item_timeline::advance),
+                    .before(moly_features::player_avatar::item_timeline::advance),
             )
             .add_systems(
                 PostUpdate,
-                crate::delivery_camera::advance.after(crate::camera::follow_avatar),
+                moly_features::delivery_camera::advance.after(moly_features::camera::follow_avatar),
             );
         {
             let mut sources = app
                 .world_mut()
-                .resource_mut::<crate::ui_charsets::ShellTextSources>();
+                .resource_mut::<moly_features::ui_charsets::ShellTextSources>();
             sources.register_texts(screen::TEXT_SOURCE, &screen::WORDINGS, screen::FIXED_TEXTS);
             sources.declare(screen::TEXT_SOURCE);
         }

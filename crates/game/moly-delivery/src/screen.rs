@@ -101,13 +101,13 @@ use super::{
     CollisionEdge, DeliveryActionState, DeliveryCollision, DeliveryEnterRetrigger, DeliveryModel,
     DeliveryObjectType, DeliveryProgress, DeliveryRequest, PartySite,
 };
-use crate::balloon::{BalloonArt, BALLOON_LAYER};
-use crate::canvas::RootCanvas;
-use crate::gesture::{UiPointerEvent, UiPointerPhase};
-use crate::menu_shell::{event_pointer, ShellDialogState, SourceInputManager};
-use crate::ui_layers::{MenuScreenType, ScreenHook, ScreenLayerEvent, ScreenManager};
-use crate::ui_charsets::ShellTextSources;
-use crate::ui_layout::{UiLayouts, UiPrefabView};
+use moly_features::balloon::{BalloonArt, BALLOON_LAYER};
+use moly_features::canvas::RootCanvas;
+use moly_features::gesture::{UiPointerEvent, UiPointerPhase};
+use moly_features::menu_shell::{event_pointer, ShellDialogState, SourceInputManager};
+use moly_features::ui_layers::{MenuScreenType, ScreenHook, ScreenLayerEvent, ScreenManager};
+use moly_features::ui_charsets::ShellTextSources;
+use moly_features::ui_layout::{UiLayouts, UiPrefabView};
 
 /// The layout key of the screen layer's prefab.
 pub const KEY: &str = "ShellDelivery";
@@ -1417,7 +1417,7 @@ fn apply_actions(
     bindings: &Bindings,
     layouts: &UiLayouts,
     requests: &mut MessageWriter<DeliveryRequest>,
-    sounds: &mut crate::audio::SeRequests,
+    sounds: &mut moly_features::audio::SeRequests,
 ) {
     let ease = tween_ease(layouts);
     for action in actions {
@@ -1500,8 +1500,8 @@ pub fn input(
     mut manager: ResMut<SourceInputManager>,
     mut screen: ResMut<DeliveryScreen>,
     mut requests: MessageWriter<DeliveryRequest>,
-    mut sounds: ResMut<crate::audio::SeRequests>,
-    eligibility: crate::interaction::InteractionEligibility,
+    mut sounds: ResMut<moly_features::audio::SeRequests>,
+    eligibility: moly_features::interaction::InteractionEligibility,
 ) {
     let events: Vec<UiPointerEvent> = pointers.read().copied().collect();
     let key_down = keys.just_pressed(KeyCode::KeyG);
@@ -1761,13 +1761,13 @@ pub fn advance(
     art: Option<Res<BalloonArt>>,
     (screens, entry, site): (
         Res<ScreenManager>,
-        Option<Res<crate::entry::EntrySequence>>,
-        Option<Res<crate::site::SiteActive>>,
+        Option<Res<moly_features::entry::EntrySequence>>,
+        Option<Res<moly_features::site::SiteActive>>,
     ),
     mut manager: ResMut<SourceInputManager>,
     mut screen: ResMut<DeliveryScreen>,
     mut requests: MessageWriter<DeliveryRequest>,
-    mut sounds: ResMut<crate::audio::SeRequests>,
+    mut sounds: ResMut<moly_features::audio::SeRequests>,
     mut roots: Query<
         (&mut Transform, &mut UiPrefabView, &mut Visibility),
         With<DeliveryScreenRoot>,
@@ -1883,7 +1883,7 @@ pub fn advance(
     }
     // The root: drawn while the layer is active on the delivery site.
     screen.shown = screens.is_active(SCREEN)
-        && crate::entry::hud_open(entry.as_deref())
+        && moly_features::entry::hud_open(entry.as_deref())
         && site
             .as_deref()
             .is_some_and(|site| site.category == "delivery");
@@ -1893,7 +1893,7 @@ pub fn advance(
         Visibility::Hidden
     };
     visibility.set_if_neq(wanted);
-    crate::canvas::set_scale(&mut transform, scale);
+    moly_features::canvas::set_scale(&mut transform, scale);
     // CustomButton.OnDisable of a pressed button.
     let lives = button_lives(screen, &bindings, &view, &layouts, canvas);
     let mut actions = Vec::new();

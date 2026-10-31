@@ -52,12 +52,12 @@
 //! `Stop()`) run through the particle host.
 //!
 //! The pre-action's `MysekaiUtility.ForceResetJoyStick` is the joystick's
-//! forced pointer-up ([`crate::joystick::ForceResetJoystick`]). The
+//! forced pointer-up ([`moly_features::joystick::ForceResetJoystick`]). The
 //! joystick's GameState Delivery arm is unreachable: `DeliveryGameState.
 //! OnEnter` publishes no game-state change.
 //!
 //! A refreshed reply (the server's birthday plant refresh policy,
-//! `crate::userdata::client::birthday_party`) runs `ExecuteHarvestSiteRefresh` after the
+//! `moly_features::userdata::client::birthday_party`) runs `ExecuteHarvestSiteRefresh` after the
 //! reward animation and before state Idle: `ShowSubWindowDialog<
 //! MysekaiRefreshBirthdayPlantSubWindowDialog>(null, onClose,
 //! allowCloseExternal true,
@@ -78,7 +78,7 @@
 //! (0.25 s) and the animator goes back to locomotion.
 //!
 //! The refresh dialog's view is the acquisition module's
-//! ([`crate::get_resource`]), which gets the party as its Setup argument;
+//! ([`moly_features::get_resource`]), which gets the party as its Setup argument;
 //! `Setup`'s icon (`icon_refresh.png` of the party's bundle through
 //! `_iconLoader`) is not on the roots and is not drawn, and the open
 //! animation passes at once.
@@ -94,17 +94,17 @@ use super::{
     publish, DeliveryActionState, DeliveryGameState, DeliveryHold, DeliveryModel, DeliveryProgress,
     DeliveryRequest,
 };
-use crate::player::PlayerControlled;
-use crate::player_avatar::item_timeline::{PlayerStepItem, StepItemOnStop};
-use crate::player_avatar::{
+use moly_features::player::PlayerControlled;
+use moly_features::player_avatar::item_timeline::{PlayerStepItem, StepItemOnStop};
+use moly_features::player_avatar::{
     PlayerActionMotion, PlayerActionOwner, PlayerActionToken, AUTO_MOVE_CLIP, STATE_FADE,
 };
-use crate::player_state::{PlayerActionState, PlayerAvatarStates};
-use crate::site_move::timeline::{delay_seconds, Delay, TweenClock};
-use crate::ui_layers::{
+use moly_features::player_state::{PlayerActionState, PlayerAvatarStates};
+use moly_features::site_move::timeline::{delay_seconds, Delay, TweenClock};
+use moly_features::ui_layers::{
     DialogBackKey, DialogBackKeyEvent, DialogId, DialogType, DisplayLayerType, ScreenManager,
 };
-use crate::userdata::{Answered, ServerPending};
+use moly_features::userdata::{Answered, ServerPending};
 use moly_link::ServerLink;
 use moly_protocol::api::BirthdayPartyDeliveryRequest;
 use moly_protocol::{Call, Refusal, Reply};
@@ -324,16 +324,16 @@ pub struct FlowWorld<'w, 's> {
     runs: ResMut<'w, RewardRuns>,
     face: ResMut<'w, DeliveryFace>,
     link: ResMut<'w, ServerLink>,
-    client: ResMut<'w, crate::userdata::client::birthday_party::ClientBirthdayPartyData>,
-    catalog: Option<Res<'w, crate::harvest::catalog::HarvestCatalog>>,
-    navigation: Option<Res<'w, crate::player_fixture_action::PlayerFixtureNavigation>>,
+    client: ResMut<'w, moly_features::userdata::client::birthday_party::ClientBirthdayPartyData>,
+    catalog: Option<Res<'w, moly_features::harvest::catalog::HarvestCatalog>>,
+    navigation: Option<Res<'w, moly_features::player_fixture_action::PlayerFixtureNavigation>>,
     game_state: Option<Res<'w, DeliveryGameState>>,
-    joystick_resets: MessageWriter<'w, crate::joystick::ForceResetJoystick>,
+    joystick_resets: MessageWriter<'w, moly_features::joystick::ForceResetJoystick>,
     step: Option<ResMut<'w, PlayerStepItem>>,
-    timelines: Option<Res<'w, crate::fixture_activity_timeline::FixtureActivityTimelines>>,
+    timelines: Option<Res<'w, moly_features::fixture_activity_timeline::FixtureActivityTimelines>>,
     bloom: ResMut<'w, super::bloom::DeliveryBloom>,
     screens: ResMut<'w, ScreenManager>,
-    openers: ResMut<'w, crate::get_resource::GetResourceOpeners>,
+    openers: ResMut<'w, moly_features::get_resource::GetResourceOpeners>,
     back_keys: MessageReader<'w, 's, DialogBackKeyEvent>,
     awaiting: ResMut<'w, DialogAwait>,
     graphs: ResMut<'w, Assets<AnimationGraph>>,
@@ -345,9 +345,9 @@ type PlayerQuery<'w, 's> = Query<
     (
         Entity,
         &'static mut Transform,
-        &'static mut crate::npc::MotionPhase,
-        &'static mut crate::player::DashMode,
-        Option<&'static mut crate::player_avatar::AvatarDriver>,
+        &'static mut moly_features::npc::MotionPhase,
+        &'static mut moly_features::player::DashMode,
+        Option<&'static mut moly_features::player_avatar::AvatarDriver>,
     ),
     With<PlayerControlled>,
 >;
@@ -585,7 +585,7 @@ fn show_refresh(world: &mut FlowWorld, party_id: i32) -> Option<DialogId> {
             world.screens.dialog_open_finished(dialog);
             world.openers.set_reward_payload(
                 dialog,
-                crate::get_resource::RewardPayload::Refresh { party_id },
+                moly_features::get_resource::RewardPayload::Refresh { party_id },
             );
             world.awaiting.refresh = Some(dialog);
             info!(
@@ -716,7 +716,7 @@ fn on_request(
             let id = id.or_else(|| world.model.parties.first().map(|p| p.id));
             let Some(party) = id.and_then(|id| world.model.party(id)) else {
                 info!("[delivery] OnStartDelivery: no party site data (no party in session): nothing happens");
-                crate::bus::emit(
+                moly_features::bus::emit(
                     "delivery_refused",
                     serde_json::json!({ "party_id": id, "reason": "no party is in session" }),
                 );
@@ -727,7 +727,7 @@ fn on_request(
                     "[delivery] OnStartDelivery party {}: CanDelivery false (have {}, spent {}): nothing happens",
                     party.id, party.tally.synchronized_cost_quantity, party.tally.unsynchronized_cost
                 );
-                crate::bus::emit(
+                moly_features::bus::emit(
                     "delivery_refused",
                     serde_json::json!({
                         "party_id": party.id,
@@ -739,7 +739,7 @@ fn on_request(
                 return;
             }
             let party_id = party.id;
-            crate::bus::emit("delivery_started", serde_json::json!({ "party_id": party_id }));
+            moly_features::bus::emit("delivery_started", serde_json::json!({ "party_id": party_id }));
             world.model.enabled = true;
             execute_delivery(world, flow, players, animators, objects, party_id, now);
         }
@@ -808,12 +808,12 @@ fn execute_delivery(
     world.commands.entity(entity).insert(DeliveryHold);
     world
         .joystick_resets
-        .write(crate::joystick::ForceResetJoystick {
+        .write(moly_features::joystick::ForceResetJoystick {
             reason: "delivery pre-action",
         });
     // The AutoMove state's Initialize: `ChangeAnimation(RunMotion)`. The
     // state replaces locomotion's, which stays at rest under the token.
-    *phase = crate::npc::MotionPhase::Dwelling { remaining: None };
+    *phase = moly_features::npc::MotionPhase::Dwelling { remaining: None };
     let clip = run_motion(world, driver, animators, entity);
     flow.auto_move = clip.as_ref().ok().copied();
     let clip = match clip {
@@ -862,7 +862,7 @@ fn execute_delivery(
 /// moves the player).
 fn run_motion(
     world: &mut FlowWorld,
-    driver: Option<Mut<crate::player_avatar::AvatarDriver>>,
+    driver: Option<Mut<moly_features::player_avatar::AvatarDriver>>,
     animators: &mut AnimatorQuery,
     player: Entity,
 ) -> Result<PlayerActionToken, String> {
@@ -923,7 +923,7 @@ pub fn release_auto_move(world: &mut World) {
         return;
     };
     let mut params = bevy::ecs::system::SystemState::<(
-        Query<&mut crate::player_avatar::AvatarDriver, With<PlayerControlled>>,
+        Query<&mut moly_features::player_avatar::AvatarDriver, With<PlayerControlled>>,
         Query<&mut AnimationPlayer>,
     )>::new(world);
     let (mut drivers, mut animators) = params.get_mut(world).expect("system params");
@@ -962,14 +962,14 @@ fn step_auto_move(
         .or(approach.corners.last())
         .copied()
         .unwrap_or(position);
-    match crate::harvest::law::auto_move_step(
+    match moly_features::harvest::law::auto_move_step(
         position,
         steering,
         approach.target,
         approach.speed,
         law::APPROACH_THRESHOLD,
     ) {
-        crate::harvest::law::AutoMoveStep::Arrived => {
+        moly_features::harvest::law::AutoMoveStep::Arrived => {
             world.states.can_intercept = true;
             world.states.change_status(PlayerActionState::Idle);
             approach.left = true;
@@ -983,7 +983,7 @@ fn step_auto_move(
                 world.states.current
             );
         }
-        crate::harvest::law::AutoMoveStep::Move(velocity) => {
+        moly_features::harvest::law::AutoMoveStep::Move(velocity) => {
             if dt <= 0.0 {
                 return;
             }
@@ -1224,7 +1224,7 @@ fn delivery_api(
         finish_delivery_api(world, flow, players, now, None, None);
         return;
     };
-    let obtained = |client: &crate::userdata::client::birthday_party::ClientBirthdayPartyData| {
+    let obtained = |client: &moly_features::userdata::client::birthday_party::ClientBirthdayPartyData| {
         client
             .user_birthday_party(party_id)
             .map_or(0, |row| row.obtained_mysekai_material_count)
@@ -1328,7 +1328,7 @@ fn finish_delivery_api(
             }
             Err(refusal) => {
                 error!("[delivery] {}: the error dialog (UI lane)", refusal.reason);
-                crate::bus::emit(
+                moly_features::bus::emit(
                     "delivery_refused",
                     serde_json::json!({
                         "party_id": party_id,

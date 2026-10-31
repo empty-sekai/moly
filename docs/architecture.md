@@ -17,6 +17,7 @@
 | `crates/game/moly-mission` | Missions: their screen, list cells, detail and list dialogs and the reward receive |
 | `crates/game/moly-photo` | Photo mode: field capture, frame selection and saving the shot to a local file |
 | `crates/game/moly-fixture-edit` | Layout editor: placing and laying out fixtures, roads and environments, with its UI and its camera |
+| `crates/game/moly-delivery` | Delivery: the birthday party delivery site, its flow, drops, honor rewards and delivery screen |
 | `crates/game/moly-devtools` | Control port, director scripts and developer panel |
 | `crates/game/moly-game` | Assembles the layers above into the game |
 | `crates/net/moly-protocol` | Request, response and push message types between the game and the server |

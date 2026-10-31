@@ -17,7 +17,7 @@
 //! state Idle (published), the gate open and player state Idle. Without an
 //! honor, state Idle (published) after the dialog.
 //!
-//! The dialogs open through the screen manager ([`crate::ui_layers`]):
+//! The dialogs open through the screen manager ([`moly_features::ui_layers`]):
 //! `ShowDialog` (the Dialog layer, `SubWindowDialog`'s back key), `Open`,
 //! the open animation's end, and on a close request `SubWindowDialog.
 //! CloseProcess` -> `Close`: its onClose first (the flow goes on), then
@@ -27,7 +27,7 @@
 //! (`OnHardwareBackKeyProcess` -> `CloseProcess`), and the dialog view's own
 //! close taps.
 //!
-//! The views are the acquisition module's ([`crate::get_resource`]): each
+//! The views are the acquisition module's ([`moly_features::get_resource`]): each
 //! shown dialog hands it its message and Setup argument
 //! (`set_reward_payload`), and a tap on a view's close area sends the close
 //! request the back key sends. The open and close animations are not built
@@ -49,13 +49,13 @@ use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
 
 use super::{publish, DeliveryActionState, DeliveryHold, DeliveryModel, DeliveryProgress};
-use crate::player::PlayerControlled;
-use crate::player_avatar::item_timeline::PlayerStepItem;
-use crate::player_state::{PlayerActionState, PlayerAvatarStates};
+use moly_features::player::PlayerControlled;
+use moly_features::player_avatar::item_timeline::PlayerStepItem;
+use moly_features::player_state::{PlayerActionState, PlayerAvatarStates};
 use moly_protocol::rows::Reward;
-use crate::userdata::client::birthday_party::HONOR;
-use crate::site_move::timeline::Delay;
-use crate::ui_layers::{
+use moly_features::userdata::client::birthday_party::HONOR;
+use moly_features::site_move::timeline::Delay;
+use moly_features::ui_layers::{
     DialogBackKey, DialogBackKeyEvent, DialogId, DialogType, DisplayLayerType, ScreenManager,
 };
 
@@ -216,7 +216,7 @@ pub fn advance(
     mut commands: Commands,
     frames: Res<FrameCount>,
     time: Res<Time>,
-    configs: Option<Res<crate::client_config::ClientConfigs>>,
+    configs: Option<Res<moly_features::client_config::ClientConfigs>>,
     mut runs: ResMut<RewardRuns>,
     mut model: ResMut<DeliveryModel>,
     mut states: ResMut<PlayerAvatarStates>,
@@ -226,7 +226,7 @@ pub fn advance(
     // (paired with the screen manager: a system takes at most 16 params).
     (mut screens, mut openers): (
         ResMut<ScreenManager>,
-        ResMut<crate::get_resource::GetResourceOpeners>,
+        ResMut<moly_features::get_resource::GetResourceOpeners>,
     ),
     mut awaiting: ResMut<DialogAwait>,
     mut face: ResMut<super::flow::DeliveryFace>,
@@ -290,7 +290,7 @@ pub fn advance(
                         if let Some(shown) = shown {
                             openers.set_reward_payload(
                                 shown.id,
-                                crate::get_resource::RewardPayload::Common {
+                                moly_features::get_resource::RewardPayload::Common {
                                     message_key: TOTAL_REWARD_MESSAGE.to_owned(),
                                     resources: run.others.len(),
                                 },
@@ -359,7 +359,7 @@ pub fn advance(
                         );
                         face.0 = Some(tween);
                     }
-                    commands.queue(crate::delivery_camera::enter);
+                    commands.queue(moly_features::delivery_camera::enter);
                     match (site.objects.as_ref(), step.as_deref_mut()) {
                         (Some(objects), Some(step)) => {
                             let bundle = format!(
@@ -421,7 +421,7 @@ pub fn advance(
                     if let Ok((entity, _)) = players.single() {
                         commands.entity(entity).remove::<DeliveryHold>();
                     }
-                    commands.queue(crate::delivery_camera::exit);
+                    commands.queue(moly_features::delivery_camera::exit);
                     let object = step.as_deref().and_then(PlayerStepItem::step_item_object);
                     if let Some(step) = step.as_deref_mut() {
                         step.stop();
@@ -452,7 +452,7 @@ pub fn advance(
 /// OpenSE.MysekaiGetBlueprint)`).
 fn show_honor(
     screens: &mut ScreenManager,
-    openers: &mut crate::get_resource::GetResourceOpeners,
+    openers: &mut moly_features::get_resource::GetResourceOpeners,
     honor: &[Reward],
     index: usize,
 ) -> Option<Shown> {
@@ -472,7 +472,7 @@ fn show_honor(
     if let Some(shown) = shown {
         openers.set_reward_payload(
             shown.id,
-            crate::get_resource::RewardPayload::Honor {
+            moly_features::get_resource::RewardPayload::Honor {
                 honor_id: reward.resource_id as i32,
                 level: reward.level.unwrap_or(0) as i32,
             },

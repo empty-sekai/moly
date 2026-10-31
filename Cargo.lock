@@ -5399,6 +5399,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "moly-delivery"
+version = "0.0.5"
+dependencies = [
+ "bevy",
+ "moly-assets",
+ "moly-features",
+ "moly-law",
+ "moly-link",
+ "moly-masters",
+ "moly-protocol",
+ "serde_json",
+]
+
+[[package]]
 name = "moly-devtools"
 version = "0.0.5"
 dependencies = [
@@ -5416,6 +5430,7 @@ dependencies = [
  "moly-assets",
  "moly-audio",
  "moly-core",
+ "moly-delivery",
  "moly-features",
  "moly-fixture-edit",
  "moly-law",
@@ -5521,6 +5536,7 @@ dependencies = [
  "moly-audio",
  "moly-convert",
  "moly-core",
+ "moly-delivery",
  "moly-devtools",
  "moly-features",
  "moly-fixture-edit",

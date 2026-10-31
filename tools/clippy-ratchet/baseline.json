@@ -28,6 +28,11 @@
     "clippy::len_without_is_empty": 1,
     "unused_imports": 1
   },
+  "moly-delivery": {
+    "clippy::derivable_impls": 1,
+    "clippy::large_enum_variant": 1,
+    "unused_mut": 1
+  },
   "moly-devtools": {
     "clippy::large_enum_variant": 1,
     "clippy::manual_is_multiple_of": 1,
@@ -42,7 +47,7 @@
     "clippy::cloned_ref_to_slice_refs": 5,
     "clippy::collapsible_if": 1,
     "clippy::collapsible_match": 3,
-    "clippy::derivable_impls": 3,
+    "clippy::derivable_impls": 2,
     "clippy::doc_lazy_continuation": 10,
     "clippy::drop_non_drop": 2,
     "clippy::empty_line_after_doc_comments": 3,
@@ -50,7 +55,7 @@
     "clippy::explicit_auto_deref": 18,
     "clippy::filter_map_bool_then": 1,
     "clippy::filter_next": 1,
-    "clippy::large_enum_variant": 2,
+    "clippy::large_enum_variant": 1,
     "clippy::len_without_is_empty": 2,
     "clippy::manual_range_contains": 1,
     "clippy::map_clone": 1,
@@ -74,7 +79,7 @@
     "private_interfaces": 6,
     "unreachable_patterns": 1,
     "unused_imports": 6,
-    "unused_mut": 6,
+    "unused_mut": 5,
     "unused_variables": 2
   },
   "moly-fixture-edit": {

@@ -25,7 +25,7 @@ order = [
     "game-media",# moly-render, moly-audio, moly-ui, moly-masters
     "world",     # moly-world
     "hub",       # moly-features
-    "domain",    # gameplay domain crates: moly-convert, moly-mission, moly-photo, moly-fixture-edit
+    "domain",    # gameplay domain crates: moly-convert, moly-mission, moly-photo, moly-fixture-edit, moly-delivery
     "tools",     # moly-devtools
     "assembly",  # moly-game
     "app",       # moly-app, moly-stage, moly-android, moly-launcher, moly-server-host
@@ -58,7 +58,7 @@ crates = ["moly-world"]
 crates = ["moly-features"]
 
 [layers.domain]
-crates = ["moly-convert", "moly-mission", "moly-photo", "moly-fixture-edit"]
+crates = ["moly-convert", "moly-mission", "moly-photo", "moly-fixture-edit", "moly-delivery"]
 
 [layers.tools]
 crates = ["moly-devtools"]
@@ -98,6 +98,7 @@ crates = ["moly-app", "moly-stage", "moly-android", "moly-launcher", "moly-serve
 "crates/game/moly-mission/Cargo.toml" = "domain"
 "crates/game/moly-photo/Cargo.toml" = "domain"
 "crates/game/moly-fixture-edit/Cargo.toml" = "domain"
+"crates/game/moly-delivery/Cargo.toml" = "domain"
 "crates/game/moly-devtools/Cargo.toml" = "tools"
 "crates/game/moly-game/Cargo.toml" = "assembly"
 

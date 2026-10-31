@@ -15,6 +15,7 @@ moly-convert = { path = "../moly-convert" }
 moly-mission = { path = "../moly-mission" }
 moly-photo = { path = "../moly-photo" }
 moly-fixture-edit = { path = "../moly-fixture-edit" }
+moly-delivery = { path = "../moly-delivery" }
 moly-devtools = { path = "../moly-devtools" }
 moly-protocol = { path = "../../net/moly-protocol" }
 moly-link = { path = "../../net/moly-link" }

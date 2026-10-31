@@ -85,13 +85,13 @@ use moly_law::delivery as law;
 use super::honor::{RewardOwner, RewardRuns};
 use super::site::{DeliveryObjects, DeliverySite};
 use super::{publish, DeliveryActionState, DeliveryModel, DeliveryProgress, DropModel};
-use crate::audio::{SeClass, SeRequest, SeRequests};
-use crate::harvest::{HarvestDocs, HarvestGltfs, Rng};
-use crate::player::PlayerControlled;
-use crate::userdata::client::birthday_party::ClientBirthdayPartyData;
+use moly_features::audio::{SeClass, SeRequest, SeRequests};
+use moly_features::harvest::{HarvestDocs, HarvestGltfs, Rng};
+use moly_features::player::PlayerControlled;
+use moly_features::userdata::client::birthday_party::ClientBirthdayPartyData;
 use moly_protocol::api::GatherContent;
-use crate::site_move::timeline::{delay_seconds, Delay};
-use crate::userdata::{Answered, ServerPending};
+use moly_features::site_move::timeline::{delay_seconds, Delay};
+use moly_features::userdata::{Answered, ServerPending};
 use moly_link::ServerLink;
 use moly_protocol::api::BirthdayPartyGatherRequest;
 use moly_protocol::{Call, Refusal, Reply};
@@ -162,7 +162,7 @@ impl DeliveryDropSpawns {
 /// Request a drop package's model and document (the harvest caches).
 pub fn request(
     server: &AssetServer,
-    catalog: &crate::harvest::catalog::HarvestCatalog,
+    catalog: &moly_features::harvest::catalog::HarvestCatalog,
     package: &str,
     glbs: &mut HarvestGltfs,
     docs: &mut HarvestDocs,
@@ -295,15 +295,15 @@ pub fn generate_unclaimed(
 }
 
 fn height_at(
-    face: Option<&crate::walk_face::WalkFace>,
-    objective: Option<&crate::npc_objective::ObjectiveFace>,
+    face: Option<&moly_features::walk_face::WalkFace>,
+    objective: Option<&moly_features::npc_objective::ObjectiveFace>,
     epoch: Option<u64>,
     verts: &[Vec3],
     x: f32,
     z: f32,
 ) -> f32 {
-    face.and_then(|face| crate::harvest::walk_surface_y(face, objective, epoch, x, z))
-        .unwrap_or_else(|| crate::harvest::surface_y(verts, x, z, 0.0))
+    face.and_then(|face| moly_features::harvest::walk_surface_y(face, objective, epoch, x, z))
+        .unwrap_or_else(|| moly_features::harvest::surface_y(verts, x, z, 0.0))
 }
 
 /// `PlayDropItemSE(rarity)`.
@@ -328,14 +328,14 @@ pub fn spawn(
     json: Res<Assets<moly_assets::json::JsonAsset>>,
     glbs: Res<HarvestGltfs>,
     docs: Res<HarvestDocs>,
-    catalog: Option<Res<crate::harvest::catalog::HarvestCatalog>>,
+    catalog: Option<Res<moly_features::harvest::catalog::HarvestCatalog>>,
     site: Res<DeliverySite>,
     mut spawns: ResMut<DeliveryDropSpawns>,
     mut se: ResMut<SeRequests>,
-    face: Option<Res<crate::walk_face::WalkFace>>,
-    objective: Option<Res<crate::npc_objective::ObjectiveFace>>,
-    epoch: Option<Res<crate::site::GroundEpoch>>,
-    ground: Option<Res<crate::site::GroundMeshes>>,
+    face: Option<Res<moly_features::walk_face::WalkFace>>,
+    objective: Option<Res<moly_features::npc_objective::ObjectiveFace>>,
+    epoch: Option<Res<moly_features::site::GroundEpoch>>,
+    ground: Option<Res<moly_features::site::GroundMeshes>>,
     meshes: Res<Assets<Mesh>>,
     parts: Query<(&Mesh3d, &GlobalTransform)>,
 ) {
@@ -349,7 +349,7 @@ pub fn spawn(
         let Some(ground) = ground.as_deref() else {
             return;
         };
-        spawns.ground = Some(crate::harvest::ground_world_verts(ground, &meshes, &parts));
+        spawns.ground = Some(moly_features::harvest::ground_world_verts(ground, &meshes, &parts));
     }
     while let Some(item) = spawns.pending.first() {
         let Some(material) = catalog.materials.get(&item.model.material_id) else {
@@ -379,12 +379,12 @@ pub fn spawn(
         let view_radius = view["radius"].as_f64().unwrap_or_else(|| {
             panic!("drop document {leaf}: MysekaiAreaDropItemView has no radius")
         }) as f32;
-        let scene_index = crate::harvest::prefab_scene_index(&doc.0, &leaf);
+        let scene_index = moly_features::harvest::prefab_scene_index(&doc.0, &leaf);
         let scene = gltf.scenes.get(scene_index).cloned().unwrap_or_else(|| {
             panic!("drop model {leaf}: prefab scene {scene_index} out of range")
         });
         let verts = spawns.ground.as_deref().unwrap_or(&[]);
-        let (snapped, tries) = crate::harvest::snap_from(&face, objects.arrive.xz(), item.raw);
+        let (snapped, tries) = moly_features::harvest::snap_from(&face, objects.arrive.xz(), item.raw);
         let y = height_at(
             Some(&*face),
             objective.as_deref(),
@@ -457,7 +457,7 @@ pub fn spawn(
             let d2 = (1.0 - distance).clamp(0.3, 1.0);
             commands
                 .entity(entity)
-                .insert(crate::harvest::HarvestDropAnimation::hop(
+                .insert(moly_features::harvest::HarvestDropAnimation::hop(
                     start, landing, d1, d2, item.r, true,
                 ));
             info!(
@@ -549,7 +549,7 @@ fn enter_drop(
 /// runs the enter callback of every drop the player collides with whatever
 /// the game state.
 pub fn scan(
-    eligibility: crate::interaction::InteractionEligibility,
+    eligibility: moly_features::interaction::InteractionEligibility,
     mut model: ResMut<DeliveryModel>,
     mut progress: MessageWriter<DeliveryProgress>,
     mut retrigger: ResMut<super::DeliveryEnterRetrigger>,
@@ -608,7 +608,7 @@ pub fn scan(
 pub fn advance(
     mut commands: Commands,
     time: Res<Time>,
-    configs: Option<Res<crate::client_config::ClientConfigs>>,
+    configs: Option<Res<moly_features::client_config::ClientConfigs>>,
     mut spawns: ResMut<DeliveryDropSpawns>,
     mut model: ResMut<DeliveryModel>,
     mut se: ResMut<SeRequests>,
@@ -618,7 +618,7 @@ pub fn advance(
             Entity,
             &mut Transform,
             &mut DeliveryDropItem,
-            Has<crate::harvest::HarvestDropAnimation>,
+            Has<moly_features::harvest::HarvestDropAnimation>,
         ),
         Without<PlayerControlled>,
     >,
@@ -639,8 +639,8 @@ pub fn advance(
         return;
     };
     let player = player.translation;
-    let step = configs.float(crate::client_config::KEY_DROP_ITEM_APPROACH_SPEED);
-    let reach = configs.float(crate::client_config::KEY_DROP_ITEM_APPROACH_DISTANCE);
+    let step = configs.float(moly_features::client_config::KEY_DROP_ITEM_APPROACH_SPEED);
+    let reach = configs.float(moly_features::client_config::KEY_DROP_ITEM_APPROACH_DISTANCE);
     let dt = time.delta_secs();
     for (entity, mut transform, mut item, hopping) in &mut drops {
         match item.phase {
@@ -710,7 +710,7 @@ pub fn advance(
                     continue;
                 }
                 let acceleration = acceleration + dt;
-                transform.translation = crate::harvest::move_towards(
+                transform.translation = moly_features::harvest::move_towards(
                     transform.translation,
                     player,
                     step + acceleration,
@@ -728,7 +728,7 @@ pub fn advance(
 /// site).
 pub fn gather(
     mut model: ResMut<DeliveryModel>,
-    catalog: Option<Res<crate::harvest::catalog::HarvestCatalog>>,
+    catalog: Option<Res<moly_features::harvest::catalog::HarvestCatalog>>,
     mut warned: Local<bool>,
     mut drops: Query<&mut DeliveryDropItem>,
 ) {
@@ -762,7 +762,7 @@ pub fn gather(
 /// `mysekai_material`, quantity 1): `CanCollectMaterial`'s
 /// `IsMaterialReceivableOverPossessionLimit` arm.
 fn can_collect_resource(
-    catalog: Option<&crate::harvest::catalog::HarvestCatalog>,
+    catalog: Option<&moly_features::harvest::catalog::HarvestCatalog>,
     drop: &DropModel,
     warned: &mut bool,
 ) -> bool {
