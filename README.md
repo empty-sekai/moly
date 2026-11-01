@@ -25,9 +25,10 @@ MYSEKAI 的还原项目，使用 Rust 与 [Bevy](https://bevyengine.org/) 构建
 - **制作与转换**（`moly-features`、`moly-convert`）：制作界面与背包，转换机的槽位与转换界面。
 - **家具编辑**（`moly-fixture-edit`）：从背包摆放家具，地面家具、道路与环境的布局编辑。
 - **任务与拍照**（`moly-mission`、`moly-photo`）：任务界面与奖励领取，拍照模式与保存照片。
+- **内容库**（`moly-content-library`）：浏览对话、家具与 NPC 活动，在场地上布置并播放所选内容。
 - **NPC**（`moly-world`）：寻路、配对后的对话、头顶 tweet 气泡、待机动作决策、自主与家具互动。
 - **天气与粒子**（`moly-law`、`moly-render`）：天气现象的完整链路。
-- **音频与演出**（`moly-audio`、`moly-features`）：BGM、SE、语音与环境音，唱片 BGM，生日派对与过场演出。
+- **音频与演出**（`moly-audio`、`moly-cutscene`）：BGM、SE、语音与环境音，唱片 BGM，生日派对与过场演出。
 - **导演脚本与插件**（`moly-devtools`、`moly-plugin`）：用 JSON 脚本或 Luau 插件编排玩家、角色、相机、天气与服务端模拟面板。
 - **MCP 服务器**（`tools/mcp`）：供 AI 客户端启动并驱动原生或浏览器实例。
 
@@ -61,14 +62,14 @@ Releases 中另有 Linux x64（`x86_64-unknown-linux-gnu`）与 macOS Apple Sili
 ### 单独运行服务端
 
 每个平台另有一个只含服务端的程序包 `moly-server-<版本>-<平台>`，用于在另一台机器上单独运行服务端。
-它与游戏读取同一份资源，监听地址、资源目录与存档目录由环境变量指定，见
-[服务端](docs/server.md) 与 [环境变量](docs/configuration.md#environment-variables)。
+它与游戏读取同一份资源，监听地址、资源目录与存档目录在配置文件 `moly.toml` 中设置，也可用对应的环境变量，见
+[服务端](docs/server.md) 与 [配置](docs/configuration.md#server)。
 
 ## 文档
 
 - [从源码构建](docs/building.md)：环境要求，原生程序、浏览器版与 Android 的构建方法。
 - [服务端](docs/server.md)：服务端的监听地址、控制端口与单独运行方法。
-- [配置](docs/configuration.md)：环境变量与浏览器版的页面参数。
+- [配置](docs/configuration.md)：配置文件 `moly.toml`、覆盖其键的环境变量与浏览器版的页面参数。
 - [玩家数据导入](docs/player-data.md)：开发窗口中导入玩家数据的步骤、备份与资源要求。
 - [主表与区服](docs/masters.md)：主表的读取来源、合并规则与启用的区服。
 - [MCP 服务器](docs/mcp.md)：供 AI 客户端启动并驱动游戏实例的 MCP 服务器。

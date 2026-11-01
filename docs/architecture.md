@@ -2,8 +2,11 @@
 
 | Directory | Responsibility |
 |---|---|
+| `crates/base/moly-config` | The configuration file `moly.toml`: its keys, their environment variable overrides and their checks; read by every program |
 | `crates/base/moly-law` | Engine-independent behaviour and calculation logic |
 | `crates/base/moly-store` | Local resource library: data directory, CDN release manifest, resource download and verification, install records |
+| `crates/base/moly-plugin` | Plugins for the native game: manifests, the enabled profile and the check of the enabled set at startup |
+| `crates/base/moly-text` | Display-only localization over the source text catalogue |
 | `crates/engine/moly-assets` | Resource directory, resource packs and data loading |
 | `crates/engine/moly-perf` | Per-frame performance counters |
 | `crates/game/moly-core` | Types, markers and system ordering shared by the game layers |
@@ -28,6 +31,7 @@
 | `crates/net/moly-layout` | Furniture layout documents |
 | `crates/server/moly-server` | Server: player documents, rules and request handling |
 | `crates/app/moly-app` | Game program: native and browser entry points |
+| `crates/app/moly-stage` | Embedded field runtime for the browser stage, without the full game's progression |
 | `crates/app/moly-server-host` | Server program `moly-server` |
 | `crates/app/moly-launcher` | Launcher: downloads resources, handles settings, and starts the server and the game (Tauri, with its pages in `ui/`) |
 | `crates/app/moly-android` | Android native library: game entry point that connects to a separately running server |
@@ -36,3 +40,5 @@
 | `web` | Browser pages and build tools |
 | `tools` | Checks for versions, repository boundaries and render order |
 | `tools/mcp` | MCP server |
+
+The crates form layers, from lowest to highest: configuration, base, engine, net, server, game core, game media, world, hub, gameplay domains, tools, assembly and programs. A crate uses only crates of lower layers, and the server layer uses no game layer. `tools/layers/layers.toml` lists each crate's layer and the allowed exceptions, and `tools/layers/check.py` checks them.

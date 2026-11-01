@@ -120,7 +120,24 @@ exclusive rows; the Japanese server is enabled.
 - One shared lint configuration; clippy warnings have a per-crate baseline that may only go down.
 - Test coverage across the whole workspace.
 
-## Next release: remaining plugin layer and AI player
+## Next release (0.0.6): one configuration file and crate boundaries
+
+**Configuration**
+- One file, `moly.toml`, configures the launcher, the game, the developer window and the server.
+  Each key can also be set through its environment variable. An unknown key or a value of the
+  wrong kind stops the start with the key named. `moly.example.toml` and
+  [Configuration](docs/configuration.md) list every key.
+- The programs carry no network addresses of their own: the resource publication, the master
+  repositories, the player data API and the shared server are set in the file. A feature whose
+  address is not set is refused with a message that names the key.
+
+**Engineering**
+- The content library and the cut-scenes are crates of their own. The hub provides the interfaces
+  they register through: input claims per channel, and a cut-scene player through which any
+  caller starts a cut-scene with a cast.
+- Built on Bevy 0.20.
+
+## After 0.0.6: remaining plugin layer and AI player
 
 **Plugin layer**
 - The game generates type definitions for the plugin API from its own type registry, so editors
@@ -240,13 +257,9 @@ exclusive rows; the Japanese server is enabled.
 
 ## Engineering
 
-- Upgrade Bevy to 0.20.
 - Move the materials' mesh, depth and shadow passes onto the engine's standard interfaces (depth
   and normal prepass, the engine's cascaded shadow maps), keeping each material's shading
   arithmetic as it is.
-- Tidy the environment variable switches, moving values decided by the server into the
-  simulation panel.
-- Split the content library and cutscenes into their own crates, after giving the hub a
-  registration interface for its input gates and presentation calls.
+- Move the remaining values decided by the server into the simulation panel.
 - Clear the remaining clippy warnings.
 - One code format across the workspace.

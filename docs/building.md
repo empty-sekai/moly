@@ -21,7 +21,7 @@ cargo run --release -p moly-app
 - The game connects to the server at `MOLY_SERVER_URL`. If the connection fails, the game shows a specific message and does not fall back to an in-process implementation.
 - The server and the game read the same resource root and master table variables, so they see the same master tables.
 
-By default, the native program runs the same game as the web version: it starts from the home, and the home level comes from the server's player document. To start the developer window, set `MOLY_DEV=1`. It reads the variables that [configuration](configuration.md) marks as "developer window" variables. The server's player documents are kept only in memory, and the developer window provides development tools such as player data import.
+By default, the native program runs the same game as the web version: it starts from the home, and the home level comes from the server's player document. To start the developer window, set `MOLY_DEV=1`. It reads the keys that [configuration](configuration.md) marks as read by the developer window. The server's player documents are kept only in memory, and the developer window provides development tools such as player data import.
 
 | Key | Action |
 |---|---|

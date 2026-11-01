@@ -22,9 +22,10 @@ Grouped by gameplay domain; the crates that implement each domain are in parenth
 - **Crafting and conversion** (`moly-features`, `moly-convert`): the crafting UI and inventory, and the conversion machine's slots and screen.
 - **Furniture editing** (`moly-fixture-edit`): placing furniture from the inventory, and layout editing for floor furniture, roads and environments.
 - **Missions and photos** (`moly-mission`, `moly-photo`): the mission screen and reward receive, and photo mode with saving the shot.
+- **Content library** (`moly-content-library`): browsing conversations, furniture and NPC activities, and staging and playing a choice on the field.
 - **NPCs** (`moly-world`): pathfinding, conversations after pairing, overhead tweet bubbles, idle action decisions, autonomous behaviour and furniture interaction.
 - **Weather and particles** (`moly-law`, `moly-render`): the weather phenomena pipeline, end to end.
-- **Audio and presentation** (`moly-audio`, `moly-features`): BGM, SE (sound effects), voice and ambient sound, record BGM, birthday parties and cutscenes.
+- **Audio and presentation** (`moly-audio`, `moly-cutscene`): BGM, SE (sound effects), voice and ambient sound, record BGM, birthday parties and cutscenes.
 - **Director scripts and plugins** (`moly-devtools`, `moly-plugin`): JSON scripts or Luau plugins that orchestrate players, characters, the camera, weather and the server simulation panel.
 - **MCP server** (`tools/mcp`): lets AI clients start and drive native or browser instances.
 
@@ -54,13 +55,13 @@ The Releases page also has Linux x64 (`x86_64-unknown-linux-gnu`) and macOS Appl
 
 ### Running the server separately
 
-Each platform also has a server-only package, `moly-server-<version>-<platform>`, for running the server on a separate machine. It reads the same resources as the game. The listen address, resource directory and save directory are set with environment variables; see [Server](docs/server.md) and [Environment variables](docs/configuration.md#environment-variables).
+Each platform also has a server-only package, `moly-server-<version>-<platform>`, for running the server on a separate machine. It reads the same resources as the game. The listen address, resource directory and save directory are set in the configuration file `moly.toml` or through their environment variables; see [Server](docs/server.md) and [Configuration](docs/configuration.md#server).
 
 ## Documentation
 
 - [Building from source](docs/building.md): requirements, and how to build the native program, the browser version and Android.
 - [Server](docs/server.md): the server's listen address, control port and how to run it separately.
-- [Configuration](docs/configuration.md): environment variables and page parameters for the browser version.
+- [Configuration](docs/configuration.md): the configuration file `moly.toml`, the environment variables that override its keys, and page parameters for the browser version.
 - [Importing player data](docs/player-data.md): steps, backups and resource requirements for importing player data in the developer window.
 - [Master tables and regions](docs/masters.md): where master tables are read from, how they are merged, and which regions are enabled.
 - [MCP server](docs/mcp.md): the MCP server that lets AI clients start and drive game instances.
