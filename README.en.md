@@ -29,7 +29,7 @@ Grouped by gameplay domain; the crates that implement each domain are in parenth
 - **Director scripts and plugins** (`moly-devtools`, `moly-plugin`): JSON scripts or Luau plugins that orchestrate players, characters, the camera, weather and the server simulation panel.
 - **MCP server** (`tools/mcp`): lets AI clients start and drive native or browser instances.
 
-Behaviour matches the original game; the structure is organised for this repository. What must match and how it is checked are described in [Method](docs/METHOD.md); the scope of each item is in the [roadmap](ROADMAP.en.md).
+Behaviour matches the original game; the structure is organised for this repository. How the behaviour is reimplemented, what must match and how it is checked are described in [Method](docs/METHOD.md); the scope of each item is in the [roadmap](ROADMAP.en.md).
 
 ## Quick start
 
@@ -67,7 +67,7 @@ Each platform also has a server-only package, `moly-server-<version>-<platform>`
 - [MCP server](docs/mcp.md): the MCP server that lets AI clients start and drive game instances.
 - [Plugins](docs/plugins.md): the Luau plugin interface, every director step, the observable sections, the events and the environment switches.
 - [Project structure](docs/architecture.md): the responsibilities of each directory and crate.
-- [Method](docs/METHOD.md): which behaviour matches the original value for value, which is this repository's own, and how matching is checked.
+- [Method](docs/METHOD.md): how the client's behaviour is understood and reimplemented, which behaviour matches the original value for value, which is this repository's own, and how matching is checked.
 - [Development](docs/development.md): testing and checks, commit conventions, continuous integration, and versioning and releases.
 - [Release package guide](docs/release-package.md): what a downloaded release package contains, and how to run and upgrade it.
 

@@ -32,7 +32,7 @@ MYSEKAI 的还原项目，使用 Rust 与 [Bevy](https://bevyengine.org/) 构建
 - **导演脚本与插件**（`moly-devtools`、`moly-plugin`）：用 JSON 脚本或 Luau 插件编排玩家、角色、相机、天气与服务端模拟面板。
 - **MCP 服务器**（`tools/mcp`）：供 AI 客户端启动并驱动原生或浏览器实例。
 
-行为与原版一致，结构按本仓需要组织：对齐的范围与验证方式见 [方法](docs/METHOD.md)，逐项范围见 [路线图](ROADMAP.md)。
+行为与原版一致，结构按本仓需要组织：如何重新实现、对齐的范围与验证方式见 [方法](docs/METHOD.md)，逐项范围见 [路线图](ROADMAP.md)。
 
 ## 快速开始
 
@@ -75,7 +75,7 @@ Releases 中另有 Linux x64（`x86_64-unknown-linux-gnu`）与 macOS Apple Sili
 - [MCP 服务器](docs/mcp.md)：供 AI 客户端启动并驱动游戏实例的 MCP 服务器。
 - [插件](docs/plugins.md)：Luau 插件的接口、全部导演步骤、可观察的段落、事件与环境变量开关。
 - [项目结构](docs/architecture.md)：各目录与 crate 的职责。
-- [方法](docs/METHOD.md)：哪些行为与原版逐值一致、哪些由本仓自定，以及如何验证。
+- [方法](docs/METHOD.md)：如何在理解客户端行为后重新实现，哪些行为与原版逐值一致、哪些由本仓自定，以及如何验证。
 - [开发](docs/development.md)：测试与检查、提交规范、持续集成与版本发布。
 - [发布包说明](docs/release-package.md)：下载发布包后的内容、运行与升级方法。
 
