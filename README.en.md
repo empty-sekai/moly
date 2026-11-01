@@ -55,7 +55,7 @@ Models, textures, animations and audio required to run the project are supplied 
 
 1. Download the Windows package from [Releases](https://github.com/empty-sekai/moly/releases) and extract it.
    The package contains the game `moly-app.exe`, the server `moly-server.exe` and the launcher `moly-launcher.exe`.
-2. Run the launcher and give it your own resources: in its settings, point the resource directory at resources you have prepared, or enter your own resource address and download a version from it (the launcher checks the SHA-256 of each file, and an interrupted download can be resumed). The project provides no resources and no resource address.
+2. Run the launcher, configure **your own** resource address, choose a resource version and download it. When the download finishes, the launcher checks the SHA-256 of each file. An interrupted download can be resumed.
 3. Click 开始游戏 (Start game). The launcher starts the server first, then the game.
 
 For the launcher's data directory, resource directory and migration rules, see the [launcher documentation](crates/app/moly-launcher/README.md).
