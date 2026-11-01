@@ -468,7 +468,7 @@ impl RemoteReader {
         let joined = join(host_and_path, &relative, |region| {
             self.admission.repository(region)
         })
-        .map_err(|reason| refuse(reason))?;
+        .map_err(refuse)?;
         Ok(PathBuf::from(joined))
     }
 }

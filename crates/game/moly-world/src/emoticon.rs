@@ -2431,21 +2431,17 @@ impl Showcase {
     /// 不在档案里的条目即拒绝）；未指定不轮播。`dev.emoticon_show_secs`
     /// （`MOLY_EMOTICON_SHOW_SECS`）：出件秒数（缺省 6）。
     fn from_env(archive: &Archive) -> Option<Showcase> {
-        let items = match moly_config::text(&moly_config::keys::DEV_EMOTICON_ITEMS) {
-            Some(list) => list
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(|name| {
-                    archive.index.get(name).copied().unwrap_or_else(|| {
-                        panic!(
-                            "dev.emoticon_items (MOLY_EMOTICON_ITEMS) 点名了档案里没有的条目：{name}"
-                        )
-                    })
+        let list = moly_config::text(&moly_config::keys::DEV_EMOTICON_ITEMS)?;
+        let items = list
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|name| {
+                archive.index.get(name).copied().unwrap_or_else(|| {
+                    panic!("dev.emoticon_items (MOLY_EMOTICON_ITEMS) 点名了档案里没有的条目：{name}")
                 })
-                .collect::<Vec<_>>(),
-            None => return None,
-        };
+            })
+            .collect::<Vec<_>>();
         if items.is_empty() {
             panic!("展示清单为空：档案里两族都没有条目");
         }
