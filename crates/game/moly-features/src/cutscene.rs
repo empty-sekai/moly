@@ -544,7 +544,7 @@ fn step(world: &mut World, slot: &mut Stage) -> bool {
                 if let Some(root) = root {
                     world.despawn(root);
                 }
-                show_all_fixtures(world);
+                show_fixtures(world);
                 if let Some((site_id, rank)) = caller.site_level() {
                     level_release_dialog(world, site_id, rank);
                 }
@@ -560,13 +560,13 @@ fn step(world: &mut World, slot: &mut Stage) -> bool {
                 *perform = Stage::PresenterFadeIn(plan);
                 return false;
             }
-            let play = setup_internal(world, &mut plan);
+            let play = begin_play(world, &mut plan);
             *perform = Stage::Play(plan, Box::new(play));
             false
         }
         Stage::Play(mut plan, mut play) => {
             if play_frame(world, &mut plan, &mut play) {
-                end_async(world, &mut plan, &play);
+                end_play(world, &mut plan, &play);
                 let caller = std::mem::replace(&mut plan.caller, Caller::Moved);
                 if let Some((site_id, rank)) = caller.site_level() {
                     // Keep the plan's data for the dialog step.
@@ -670,7 +670,7 @@ fn unlock_cutscene(world: &mut World, unlock: SiteLevelRow, rank: i32) -> Option
         unlock.id, unlock.level, unlock.id, row.id, row.bundle
     );
     save_unlock(world, &unlock);
-    hide_fixture_all(world);
+    hide_other_fixtures(world);
     info!("[cutscene] CutSceneExecutor.PlayAsync: CutSceneRoot found (created at zero with default rotation and scale); MagicaCloth RequestReset (logged only); FadeAndSetUpAsync");
     let package = format!("{PACKAGE_PREFIX}{}", row.bundle);
     let server = world.resource::<AssetServer>().clone();
@@ -731,7 +731,7 @@ fn save_unlock(world: &mut World, unlock: &SiteLevelRow) {
 
 /// `CutSceneExecutor.HideFixtureAll`: every fixture that is neither the gate
 /// nor the house is hidden.
-fn hide_fixture_all(world: &mut World) {
+fn hide_other_fixtures(world: &mut World) {
     let placed: Vec<(Entity, String)> = {
         let mut query = world.query::<(Entity, &FixtureActivityIdentity)>();
         query
@@ -767,7 +767,7 @@ fn hide_fixture_all(world: &mut World) {
 }
 
 /// `CutScenePresenter.ShowAllFixtures`: every fixture is shown.
-fn show_all_fixtures(world: &mut World) {
+fn show_fixtures(world: &mut World) {
     let mut query = world.query_filtered::<&mut Visibility, With<FixtureActivityIdentity>>();
     let mut shown = 0;
     for mut visibility in query.iter_mut(world) {
@@ -1131,7 +1131,7 @@ fn try_load(world: &mut World, load: &mut Load) -> Result<Option<Plan>, String> 
     }
     let definition = request.definition.clone();
     // Every SE clip of a cut-scene is played by the cut-scene itself, through
-    // the one-shot channel (see `play_se_one_shot`), so the runner neither
+    // the one-shot channel (see `play_clip_se`), so the runner neither
     // routes nor plays it.
     request
         .bindings
@@ -1239,7 +1239,7 @@ fn wait(load: &mut Load, reason: &str) {
 
 /// The director's SE clips. A cut-scene's director is on the view root, the
 /// child of the cut-scene root, so every one of them takes
-/// `SEBehaviour.OnBehaviourPlay`'s cut-scene branch ([`play_se_one_shot`]).
+/// `SEBehaviour.OnBehaviourPlay`'s cut-scene branch ([`play_clip_se`]).
 fn cut_scene_se_clips(definition: &TimelineDefinition) -> Vec<TimelineClipKey> {
     definition
         .tracks
@@ -1259,7 +1259,7 @@ fn cut_scene_se_clips(definition: &TimelineDefinition) -> Vec<TimelineClipKey> {
 /// position) is for directors outside the cut-scene root. Nothing in the
 /// presenter stops SEs, so the sound outlives the cut-scene. The category is
 /// the cue's own where the export carries it, else the in-game family.
-fn play_se_one_shot(world: &mut World, cue: &str, package: &str, t: f64, bounds: &str) {
+fn play_clip_se(world: &mut World, cue: &str, package: &str, t: f64, bounds: &str) {
     if cue.is_empty() {
         error!("[cutscene] t={t:.4} SEClip {bounds}: SEBehaviour.PlaySE: the cue name is empty: the source logs that the SE does not exist; nothing plays");
         return;
@@ -1850,7 +1850,7 @@ fn presenter_fade_in(world: &mut World, plan: &Plan) {
 }
 
 /// `SetupInternal`, then `CutSceneView.PlayAsync` starts the director.
-fn setup_internal(world: &mut World, plan: &mut Plan) -> Play {
+fn begin_play(world: &mut World, plan: &mut Plan) -> Play {
     // The caller's `onStartFadeInCallBack`, awaited first in `SetupInternal`.
     if let Caller::Cast(cast) = &plan.caller {
         (cast.play.caller.on_started)(world, &cast.report());
@@ -1875,7 +1875,7 @@ fn setup_internal(world: &mut World, plan: &mut Plan) -> Play {
         );
     }
     match &mut plan.caller {
-        Caller::Cast(cast) => cast::hide_effects(world, cast),
+        Caller::Cast(cast) => cast::hide_start_effects(world, cast),
         _ => info!("[cutscene] SetupInternal: HideEffects: no focus object (the site-level caller passes none)"),
     }
     info!("[cutscene] SetupInternal: SetupCamera; UI shown; SetupSkipEvent; BindComopnents: the brain on the field camera, the fade panel on the cut-scene screen, the obstacle tracks on the home site controller; DisableIK; LoadBgms; LoadVoice; PlayPreprocess");
@@ -2160,7 +2160,7 @@ fn play_frame(world: &mut World, plan: &mut Plan, play: &mut Play) -> bool {
                 }
                 TimelinePayload::Se { package, cue } => {
                     if entered {
-                        play_se_one_shot(world, cue, package, t, &bounds);
+                        play_clip_se(world, cue, package, t, &bounds);
                     }
                 }
                 TimelinePayload::Control(_) => {
@@ -2489,7 +2489,7 @@ fn product_shot(camera: &VirtualCamera, root: Transform) -> Shot {
 }
 
 /// `CutScenePresenter.EndAsync`, up to its fade out.
-fn end_async(world: &mut World, plan: &mut Plan, play: &Play) {
+fn end_play(world: &mut World, plan: &mut Plan, play: &Play) {
     let time = play.token.and_then(|token| {
         world
             .resource::<FixtureActivityTimelines>()
@@ -2511,7 +2511,7 @@ fn end_async(world: &mut World, plan: &mut Plan, play: &Play) {
     info!("[cutscene] AloneExecutionGate.cutscene_active = false (GameState Normal): NPC alone actions and greetings resume");
     cutscene_camera::exit(world);
     if let Caller::Cast(cast) = &mut plan.caller {
-        cast::restore_states(world, cast);
+        cast::restore_cast_states(world, cast);
         info!("[cutscene] CutSceneView.Dispose: the director's graph stops");
     } else {
         info!("[cutscene] RestoreStates (no cut-scene characters); ChangeParentCharacters; CutSceneView.Dispose: the director's graph stops");
@@ -2548,8 +2548,8 @@ fn end_async(world: &mut World, plan: &mut Plan, play: &Play) {
                 "EndAsync(restoreBGM true): the site's BGM plays again",
             );
         }
-        show_all_fixtures(world);
-        cast::restore_effects(world, cast);
+        show_fixtures(world);
+        cast::restore_start_effects(world, cast);
         let (_, end) = cast.fade_colors();
         info!("[cutscene] RestoreEffects; CutScenePresenter.FadeOutAsync(_endFadeColor ({:.2},{:.2},{:.2},{:.2})): ScreenLayerMysekaiMysekaiCutScene.FadeOut({LAYER_FADE} s)", end[0], end[1], end[2], end[3]);
         crate::screen_fade::cutscene_fade_out_color(
@@ -2562,7 +2562,7 @@ fn end_async(world: &mut World, plan: &mut Plan, play: &Play) {
     }
     crate::audio::cutscene::release_bgm(world, "EndAsync: the site's BGM plays again");
     info!("[cutscene] NPC Show; player Show");
-    show_all_fixtures(world);
+    show_fixtures(world);
     info!("[cutscene] RestoreEffects; CutScenePresenter.FadeOutAsync: ScreenLayerMysekaiMysekaiCutScene.FadeOut({LAYER_FADE} s)");
     crate::screen_fade::cutscene_fade_out(world, LAYER_FADE, "CutScenePresenter.FadeOutAsync");
 }

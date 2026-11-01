@@ -233,7 +233,7 @@ fn talk_playing(world: &World) -> bool {
 }
 
 /// `SetCharacterWaitTalkObjective(2)`.
-fn set_character_wait_talk_objective(world: &mut World, party: Party) {
+fn wait_for_talk(world: &mut World, party: Party) {
     let caller = "SetCharacterWaitTalkObjective";
     let Some((scenario, npc)) = scenario_and_character(world, party, 2, caller) else {
         return;
@@ -254,7 +254,7 @@ fn set_character_wait_talk_objective(world: &mut World, party: Party) {
 
 /// `ShowCharacterEndMotion` once its list is loaded: the eye and mouth
 /// patterns of the character's row (the motion is named, see the module).
-fn show_character_end_motion(world: &mut World, party: Party, list: &serde_json::Value) {
+fn show_end_motion(world: &mut World, party: Party, list: &serde_json::Value) {
     let caller = "ShowCharacterEndMotion";
     let row = list
         .get("rows")
@@ -326,7 +326,7 @@ fn advance_end_motion(world: &mut World) {
     };
     world.resource_mut::<BirthdayParty>().end_motion_pending = false;
     match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(list) => show_character_end_motion(world, party, &list),
+        Ok(list) => show_end_motion(world, party, &list),
         Err(error) => error!("[birthday-party] ShowCharacterEndMotion: the list is not JSON: {error}"),
     }
 }
@@ -377,7 +377,7 @@ fn set_stage(world: &mut World, stage: Stage, note: &str) {
 
 /// After the first talk: the waiting objective, the back key, the wait.
 fn begin_wait(world: &mut World, party: Party) {
-    set_character_wait_talk_objective(world, party);
+    wait_for_talk(world, party);
     set_back_key(
         world,
         MysekaiBackKeyProcess::Birthday,
@@ -418,10 +418,10 @@ pub fn advance(world: &mut World) {
             .drain()
             .count();
         if clicks > 0 {
-            on_click_back_button(world, "the end-party button");
+            back_pressed(world, "the end-party button");
         }
         if backs > 0 {
-            on_click_back_button(world, "the back key (OnBackKeyForBirthday)");
+            back_pressed(world, "the back key (OnBackKeyForBirthday)");
         }
         close_confirm_answer(world);
     }
@@ -456,7 +456,7 @@ pub fn advance(world: &mut World) {
                 return;
             }
             info!("[birthday-party] FadeInAsync(1) finished; EnableStopWhenIdleState(false) (named); PutAndLookPlayerBesideFixture; UniTask.Delay({PLACE_DELAY} s)");
-            super::birthday::put_and_look_player_beside_fixture(world, party.fixture);
+            super::birthday::place_player_facing_fixture(world, party.fixture);
             set_stage(world, Stage::PlaceDelay { left: PLACE_DELAY }, "the placement delay");
         }
         Stage::PlaceDelay { left } => {
@@ -563,7 +563,7 @@ pub fn advance(world: &mut World) {
 }
 
 /// `OnClickBackButton`.
-fn on_click_back_button(world: &mut World, from: &str) {
+fn back_pressed(world: &mut World, from: &str) {
     if world
         .get_resource::<BirthdayParty>()
         .is_some_and(|party| party.close_confirm.is_some())

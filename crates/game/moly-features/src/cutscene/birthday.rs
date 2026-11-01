@@ -1060,12 +1060,12 @@ fn end_fade_out_callback(world: &mut World, report: &CutSceneReport) {
         transform.rotation = rotation;
     }
     info!("[birthday] OnEndFadeOutCallback: FindNPC({unit}).Show(); PutCharacterBesideFixture: {length} m at {:.1} deg in the fixture's frame, facing away from its forward -> ({:.3},{:.3},{:.3}); home screen HideUI (UI, not drawn)", 90.0 + offset, at.x, at.y, at.z);
-    put_and_look_player_beside_fixture(world, fixture);
+    place_player_facing_fixture(world, fixture);
 }
 
 /// `PutAndLookPlayerBesideFixture`: the player 0.5 m behind the fixture's
 /// forward, facing it (see [`end_fade_out_callback`]).
-pub(super) fn put_and_look_player_beside_fixture(world: &mut World, fixture: Entity) {
+pub(super) fn place_player_facing_fixture(world: &mut World, fixture: Entity) {
     let Some(pose) = world
         .get::<GlobalTransform>(fixture)
         .map(GlobalTransform::compute_transform)

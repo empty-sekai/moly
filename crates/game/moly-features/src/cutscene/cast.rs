@@ -86,7 +86,7 @@ struct ViewFields {
     /// The prefab root GameObject and its serialized file.
     root: Option<(String, i64)>,
     /// `_characterRoot`'s GameObject.
-    character_root: Option<i64>,
+    cast_parent: Option<i64>,
     ik_list: usize,
     /// `_setHiddenEffectDataList`.
     hidden_effects: Vec<super::hidden_effects::HiddenEffect>,
@@ -100,7 +100,7 @@ pub struct Cast {
     view: Option<ViewFields>,
     placed: bool,
     nodes_spawned: bool,
-    character_root: Option<Entity>,
+    cast_parent: Option<Entity>,
     /// The fixture `BindGateAnimator` binds, when the start is a gate.
     gate: Option<Entity>,
     /// Tracks this owner left out of the director, each with the reason.
@@ -132,7 +132,7 @@ impl Cast {
             view: None,
             placed: false,
             nodes_spawned: false,
-            character_root: None,
+            cast_parent: None,
             gate: None,
             refused: Vec::new(),
             hidden_npcs: Vec::new(),
@@ -224,7 +224,7 @@ fn read_view(document: &Value, prefab: &str) -> Result<ViewFields, String> {
         start_color: color(&fields["_startFadeColor"]),
         end_color: color(&fields["_endFadeColor"]),
         root,
-        character_root,
+        cast_parent: character_root,
         ik_list: fields["_IKDataList"].as_array().map_or(0, Vec::len),
         hidden_effects: super::hidden_effects::parse(fields),
     })
@@ -505,11 +505,11 @@ pub(super) fn prepare(
             ));
         };
         spawn_view(world, document, root, &view)?;
-        cast.character_root = view.character_root.and_then(|id| node_of(world, root, id));
+        cast.cast_parent = view.cast_parent.and_then(|id| node_of(world, root, id));
         cast.nodes_spawned = true;
         info!(
             "[cutscene-cast] _characterRoot {:?} -> {:?}; _IKDataList {} rows",
-            view.character_root, cast.character_root, view.ik_list
+            view.cast_parent, cast.cast_parent, view.ik_list
         );
     }
     // The characters.
@@ -871,12 +871,12 @@ pub(super) fn setup(
             players.len()
         );
     }
-    hide_near_fixtures(world, cast, hide_distance);
+    hide_fixtures_near_gate(world, cast, hide_distance);
     info!(
         "[cutscene-cast] Setup: ShowWhiteListFixtures {white:?}; HideBlackListFixtures {black:?}"
     );
     // ChangeParentCharacters(characterRoot, worldPositionStays false).
-    if let Some(parent) = cast.character_root {
+    if let Some(parent) = cast.cast_parent {
         for member in &cast.members {
             world.entity_mut(member.entity).insert(ChildOf(parent));
         }
@@ -891,7 +891,7 @@ pub(super) fn setup(
 }
 
 /// `CutSceneView.HideEffects` on the start object (in `SetupInternal`).
-pub(super) fn hide_effects(world: &mut World, cast: &mut Cast) {
+pub(super) fn hide_start_effects(world: &mut World, cast: &mut Cast) {
     let list = cast
         .view
         .as_ref()
@@ -901,14 +901,14 @@ pub(super) fn hide_effects(world: &mut World, cast: &mut Cast) {
 }
 
 /// `CutSceneView.RestoreEffects` on the start object (in `EndAsync`).
-pub(super) fn restore_effects(world: &mut World, cast: &mut Cast) {
+pub(super) fn restore_start_effects(world: &mut World, cast: &mut Cast) {
     super::hidden_effects::restore(world, &mut cast.hidden_effects, cast.play.start);
 }
 
 /// `HideNearFixtures(hideFixtureDistance)`: every fixture whose master id is
 /// neither the gate's nor the home's, within the distance of the gate's
 /// world position (3-D, strict), is hidden; nothing without a gate.
-fn hide_near_fixtures(world: &mut World, cast: &mut Cast, distance: i64) {
+fn hide_fixtures_near_gate(world: &mut World, cast: &mut Cast, distance: i64) {
     let Some(gate) = cast
         .gate
         .or_else(|| is_gate_object(world, cast.play.start).then_some(cast.play.start))
@@ -1168,7 +1168,7 @@ fn set_player_visible(world: &mut World, visible: bool) {
 
 /// `EndAsync`: `RestoreStates` and `ChangeParentCharacters` back, before the
 /// view is disposed.
-pub(super) fn restore_states(world: &mut World, cast: &mut Cast) {
+pub(super) fn restore_cast_states(world: &mut World, cast: &mut Cast) {
     for member in &cast.members {
         if world.get_entity(member.entity).is_err() {
             continue;
