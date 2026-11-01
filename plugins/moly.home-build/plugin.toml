@@ -2,7 +2,7 @@
 id = "moly.home-build"
 name = "Home build"
 version = "0.1.0"
-moly = ">=0.0.5"
+moly = ">=0.0.6"
 kind = "luau"
 entry = "main.luau"
 description = "Companions put a queue of fixtures on the site one after another, each hammered from a ghost to solid, and celebrate together once every queue is done."

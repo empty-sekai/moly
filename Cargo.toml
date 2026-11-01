@@ -44,7 +44,7 @@ cpal = { path = "crates/vendor/cpal" }
 
 [workspace.package]
 edition = "2021"
-version = "0.0.5"
+version = "0.0.6"
 license = "AGPL-3.0-only"
 
 [workspace.lints.rust]

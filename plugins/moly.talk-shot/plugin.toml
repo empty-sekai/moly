@@ -2,7 +2,7 @@
 id = "moly.talk-shot"
 name = "Talk shot"
 version = "0.1.0"
-moly = ">=0.0.5"
+moly = ">=0.0.6"
 kind = "luau"
 entry = "main.luau"
 description = "Summons one cross-unit conversation's cast, starts the talk, and turns the lens to the speaker as the lines play."
