@@ -7,7 +7,7 @@ All notable changes to this project are listed here. Versions follow [Semantic V
 ### Breaking changes
 
 - **config:** The programs carry no network addresses of their own. The resource publication (`resources.base`), the master hosts (`masters.repository`, `masters.base`, `masters.mirror`), the per-region master repository names (`masters.repository_jp` … `masters.repository_en`), the player data API (`player_data.api`) and the server address (`server.url`) are read only from `moly.toml` or their environment variables. A feature whose address is not set is refused with a message that names the key; a master source that is not set is skipped.
-- **masters:** `MOLY_MASTER_REPOSITORY` sets the repository host template (`{repo}` path segment) in place of `MOLY_MASTER_HARUKI_BASE`. The browser page reads `?master_repository=` and `?master_repository_<region>=`.
+- **masters:** The master repository source is an address template set by `masters.repository` (`MOLY_MASTER_REPOSITORY`); its `{repo}` path segment is replaced by the region's repository name (`masters.repository_<region>`). The earlier master repository variable is no longer read. The browser page reads `?master_repository=` and `?master_repository_<region>=`.
 - **launcher:** The download address has no default; the launcher refuses a download until one is entered.
 - **browser:** The page needs `?server=` to connect to its server, and the `/player-api/` path answers only when `MOLY_PLAYER_API` is set where the page is served.
 - **android:** The package is built with `MOLY_RESOURCE_BASE` and `MOLY_SERVER_URL` set; a build without them stops at start with a message naming the variable.
