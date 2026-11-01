@@ -234,7 +234,7 @@ def collect(data, name_aliases=None):
     for pkg in members.values():
         manifest = pkg.get("manifest_path")
         if manifest:
-            by_path[_posix(os.path.dirname(manifest))] = pkg["name"]
+            by_path[os.path.dirname(_posix(manifest))] = pkg["name"]
 
     edges = {}
     for name, pkg in members.items():
@@ -271,7 +271,7 @@ def layers_by_crate(data, members, cfg):
         manifest = pkg.get("manifest_path")
         if not manifest or pkg.get("name") not in members:
             continue
-        rel = _posix(os.path.dirname(manifest))
+        rel = os.path.dirname(_posix(manifest))
         if root and rel.lower().startswith(root + "/"):
             rel = rel[len(root) + 1:]
         layer = cfg["files"].get(f"{rel}/Cargo.toml")
