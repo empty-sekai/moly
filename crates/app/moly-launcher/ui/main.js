@@ -27,6 +27,8 @@ const state = {
   fileRate: 0,
   lastSample: null,
   dismissed: null,
+  /** Set when the running download or migration was asked to cancel. */
+  cancelling: false,
   testedCdn: null,
   update: null,
   updateError: null,
@@ -246,7 +248,9 @@ function renderDownload() {
   note.className = d.error ? "note bad" : "note";
   note.textContent = d.error ?? (d.finished ? "" : d.note);
   const action = $("cancel");
-  action.textContent = d.finished ? "关闭" : "取消";
+  if (d.finished) state.cancelling = false;
+  action.textContent = d.finished ? "关闭" : state.cancelling ? "正在取消…" : "取消";
+  action.disabled = !d.finished && state.cancelling;
   action.classList.toggle("danger", !d.finished);
   // Moves of a folder cannot be cancelled from the launcher.
   action.hidden = !d.finished && d.kind === "relocate";
@@ -755,6 +759,8 @@ $("cancel").addEventListener("click", () => {
     state.dismissed = d.snapshot + d.elapsed_ms;
     renderAll();
   } else {
+    state.cancelling = true;
+    renderAll();
     invoke("cancel_download");
   }
 });

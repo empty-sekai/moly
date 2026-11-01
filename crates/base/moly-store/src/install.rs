@@ -10,6 +10,7 @@
 use crate::publication::{Publication, Snapshot, PUBLICATION_PATH};
 use crate::record::{Installed, Record};
 use crate::store::{catalog_key, check_key, manifest_digest, Catalog, Manifest};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -21,6 +22,10 @@ const DOCUMENT_LIMIT: u64 = 64 << 20;
 const ATTEMPTS: u32 = 12;
 const FIRST_DELAY: Duration = Duration::from_secs(5);
 const LONGEST_DELAY: Duration = Duration::from_secs(300);
+/// The most transfer threads an install runs, whatever `Job::jobs` asks.
+const MAX_JOBS: usize = 64;
+/// Bytes read from a response body between two checks of `cancel`.
+const CHUNK_BYTES: usize = 64 << 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -96,14 +101,37 @@ impl Progress {
     }
 }
 
-fn agent() -> Agent {
+/// An agent whose pool keeps one idle connection per transfer thread, so
+/// `connections` threads reuse their connections instead of opening a new
+/// one for every file.
+fn agent(connections: usize) -> Agent {
+    let connections = connections.clamp(1, MAX_JOBS);
     Agent::config_builder()
+        .max_idle_connections(connections)
+        .max_idle_connections_per_host(connections)
         .tls_config(crate::tls::tls_config())
         .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(60)))
         .timeout_recv_body(Some(Duration::from_secs(300)))
         .user_agent(concat!("moly-store/", env!("CARGO_PKG_VERSION")))
         .build()
         .new_agent()
+}
+
+/// The whole of `body`, read in chunks with `cancel` checked between them;
+/// `None` once `cancel` is set, so a cancel does not wait for a large file.
+fn read_body(body: &mut dyn Read, cancel: &AtomicBool) -> std::io::Result<Option<Vec<u8>>> {
+    let mut bytes = Vec::new();
+    let mut chunk = vec![0u8; CHUNK_BYTES];
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        match body.read(&mut chunk)? {
+            0 => return Ok(Some(bytes)),
+            count => bytes.extend_from_slice(&chunk[..count]),
+        }
+    }
 }
 
 struct Fetcher<'a> {
@@ -134,13 +162,17 @@ impl Fetcher<'_> {
                 return Err(CANCELLED.into());
             }
             let failure = match self.agent.get(&url).header("Accept-Encoding", "identity").call() {
-                Ok(mut response) => match response.body_mut().with_config().limit(limit).read_to_vec() {
-                    Ok(bytes) => {
-                        self.progress.bytes_fetched.fetch_add(bytes.len() as u64, Ordering::Relaxed);
-                        return Ok(bytes);
+                Ok(mut response) => {
+                    let mut body = response.body_mut().with_config().limit(limit).reader();
+                    match read_body(&mut body, self.cancel) {
+                        Ok(Some(bytes)) => {
+                            self.progress.bytes_fetched.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                            return Ok(bytes);
+                        }
+                        Ok(None) => return Err(CANCELLED.into()),
+                        Err(error) => format!("{key}: {error}"),
                     }
-                    Err(error) => format!("{key}: {error}"),
-                },
+                }
                 Err(ureq::Error::StatusCode(code)) if code == 403 || code == 429 || code >= 500 => {
                     format!("{key}: HTTP {code}")
                 }
@@ -197,7 +229,7 @@ pub fn fetch_publication(cdn: &str) -> Result<Publication, String> {
     crate::check_cdn(cdn)?;
     let progress = Progress::default();
     let cancel = AtomicBool::new(false);
-    let fetcher = Fetcher { agent: agent(), base: cdn, progress: &progress, cancel: &cancel };
+    let fetcher = Fetcher { agent: agent(1), base: cdn, progress: &progress, cancel: &cancel };
     // A publication answers at once or not at all: one attempt, no backoff.
     let url = format!("{cdn}{PUBLICATION_PATH}");
     let mut response = fetcher
@@ -226,7 +258,7 @@ pub fn catalog(cdn: &str, prefix: &str, snapshot: &Snapshot, dir: &Path) -> Resu
     let base = snapshot.store_base(cdn, prefix)?;
     let progress = Progress::default();
     let cancel = AtomicBool::new(false);
-    let fetcher = Fetcher { agent: agent(), base: &base, progress: &progress, cancel: &cancel };
+    let fetcher = Fetcher { agent: agent(1), base: &base, progress: &progress, cancel: &cancel };
     Catalog::parse(&fetcher.file(dir, &catalog_key(id), id, DOCUMENT_LIMIT, None)?)
 }
 
@@ -240,8 +272,9 @@ pub struct Job {
     pub jobs: usize,
 }
 
-/// Install `job`, updating `progress`; setting `cancel` stops it at the next
-/// file. On success the directory's record names the snapshot.
+/// Install `job`, updating `progress`; setting `cancel` stops it within the
+/// body chunk each transfer is reading. On success the directory's record
+/// names the snapshot.
 pub fn install(job: &Job, progress: &Progress, cancel: &AtomicBool) -> Result<Installed, String> {
     let outcome = run(job, progress, cancel);
     progress.finish(&outcome);
@@ -258,15 +291,14 @@ fn run(job: &Job, progress: &Progress, cancel: &AtomicBool) -> Result<Installed,
         .ok_or_else(|| format!("snapshot {} has no asset catalog", job.snapshot.id))?;
     let base = job.snapshot.store_base(&job.cdn, &job.prefix)?;
     std::fs::create_dir_all(&job.dir).map_err(|error| format!("{}: {error}", job.dir.display()))?;
-    let fetcher = Fetcher { agent: agent(), base: &base, progress, cancel };
+    let fetcher = Fetcher { agent: agent(job.jobs), base: &base, progress, cancel };
 
     progress.enter(Phase::Catalog, 1);
     let catalog = Catalog::parse(&fetcher.file(&job.dir, &catalog_key(&catalog_id), &catalog_id, DOCUMENT_LIMIT, None)?)?;
     progress.files_done.store(1, Ordering::Relaxed);
 
     progress.enter(Phase::Manifests, catalog.packages.len() as u64);
-    // Manifests are small, so their time is round trips: twice the transfers.
-    let manifests = parallel(job.jobs * 2, catalog.packages.len(), cancel, |index| {
+    let manifests = parallel(job.jobs, catalog.packages.len(), cancel, |index| {
         let key = &catalog.packages[index].manifest;
         let digest = manifest_digest(key)?;
         let manifest = Manifest::parse(&fetcher.file(&job.dir, key, digest, DOCUMENT_LIMIT, None)?)?;
@@ -319,7 +351,7 @@ pub(crate) fn parallel<T: Send>(
     let failure: Mutex<Option<String>> = Mutex::new(None);
     let slots: Vec<Mutex<Option<T>>> = (0..count).map(|_| Mutex::new(None)).collect();
     std::thread::scope(|scope| {
-        for _ in 0..jobs.clamp(1, 64).min(count.max(1)) {
+        for _ in 0..jobs.clamp(1, MAX_JOBS).min(count.max(1)) {
             scope.spawn(|| loop {
                 if stop.load(Ordering::Relaxed) || cancel.load(Ordering::Relaxed) {
                     return;
@@ -378,7 +410,7 @@ mod tests {
         let progress = Progress::default();
         let cancel = AtomicBool::new(false);
         // An unroutable base: any request would fail.
-        let fetcher = Fetcher { agent: agent(), base: "https://invalid.invalid/", progress: &progress, cancel: &cancel };
+        let fetcher = Fetcher { agent: agent(1), base: "https://invalid.invalid/", progress: &progress, cancel: &cancel };
         assert_eq!(fetcher.file(&dir, &key, &sha, 100, Some(body.len() as u64)).unwrap(), body);
         assert_eq!(progress.bytes_fetched.load(Ordering::Relaxed), 0);
         cancel.store(true, Ordering::Relaxed);
