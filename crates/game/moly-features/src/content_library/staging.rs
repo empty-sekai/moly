@@ -728,11 +728,12 @@ fn start_independent(world: &mut World, choice: &PlaybackChoice) -> Result<(), S
         original_appearance,
         failure: None,
     });
-    let mut state = world.resource_mut::<ContentLibrary>();
-    state.scene_owned = true;
-    state.last_error = None;
-    state.status = "正在前往独立空场景…".into();
-    state.changed();
+    library_mut(world, |state| {
+        state.scene_owned = true;
+        state.last_error = None;
+        state.status = "正在前往独立空场景…".into();
+        state.changed();
+    });
     Ok(())
 }
 
@@ -804,7 +805,7 @@ fn fail_independent(
     session.failure = Some(playback::human_playback_failure(&reason));
     session.phase = IndependentPhase::RequestingReturn;
     session.elapsed = 0.;
-    playback::fail(&mut world.resource_mut::<ContentLibrary>(), &reason);
+    library_mut(world, |state| playback::fail(state, &reason));
 }
 
 fn matching_fixture_targets(world: &mut World, required: &[i32]) -> Option<Vec<FixtureTarget>> {
@@ -948,12 +949,13 @@ fn drive_independent(world: &mut World) {
                 session.phase = IndependentPhase::LoadingContent;
                 session.elapsed = 0.;
                 session.failure = None;
-                let mut state = world.resource_mut::<ContentLibrary>();
-                state.active = None;
-                state.pending = Some(choice);
-                state.stopping = false;
-                state.status = "已复用独立场景，正在切换内容…".into();
-                state.changed();
+                library_mut(world, |state| {
+                    state.active = None;
+                    state.pending = Some(choice);
+                    state.stopping = false;
+                    state.status = "已复用独立场景，正在切换内容…".into();
+                    state.changed();
+                });
                 info!(
                     "[content-library] reused independent world ticket={} fixtures={:?}",
                     session.ticket, fixtures
@@ -1001,9 +1003,10 @@ fn drive_independent(world: &mut World) {
                     session.parked_actors = park_background_actors(world, &session.required_units);
                     session.phase = IndependentPhase::LoadingContent;
                     session.elapsed = 0.;
-                    let mut state = world.resource_mut::<ContentLibrary>();
-                    state.status = "空场景已就绪，正在载入所需角色与家具…".into();
-                    state.changed();
+                    library_mut(world, |state| {
+                        state.status = "空场景已就绪，正在载入所需角色与家具…".into();
+                        state.changed();
+                    });
                 }
             } else if session.elapsed >= SITE_TIMEOUT {
                 fail_independent(world, &mut session, "无法在限定时间内准备独立场景");
@@ -1083,7 +1086,7 @@ fn drive_independent(world: &mut World) {
                             .filter(|choice| choice.ticket == session.ticket);
                         if let Some(choice) = &mut choice {
                             choice.target = targets.first().cloned();
-                            world.resource_mut::<ContentLibrary>().pending = Some(choice.clone());
+                            library_mut(world, |state| state.pending = Some(choice.clone()));
                             match plan_current(world, choice) {
                                 Ok(actors) => {
                                     apply_preview(world, choice, actors);
@@ -1169,7 +1172,7 @@ fn drive_independent(world: &mut World) {
                     .as_ref()
                     .is_some_and(|active| active.choice.ticket == session.ticket)
                 {
-                    world.resource_mut::<ContentLibrary>().active = None;
+                    library_mut(world, |state| state.active = None);
                 }
                 restore_preview(world);
                 restore_background_actors(world, &session.parked_actors);
@@ -1190,15 +1193,16 @@ fn drive_independent(world: &mut World) {
                     && !world.contains_resource::<crate::fixture::TemporaryFixtureLayout>();
                 if never_left {
                     restore_original_poses(world, &session);
-                    let mut state = world.resource_mut::<ContentLibrary>();
-                    state.stopping = false;
-                    state.scene_owned = false;
-                    state.status = session
-                        .failure
-                        .as_ref()
-                        .map(|reason| format!("{reason}；原场景未被修改"))
-                        .unwrap_or_else(|| "已留在原场景，未保存任何临时内容".into());
-                    state.changed();
+                    library_mut(world, |state| {
+                        state.stopping = false;
+                        state.scene_owned = false;
+                        state.status = session
+                            .failure
+                            .as_ref()
+                            .map(|reason| format!("{reason}；原场景未被修改"))
+                            .unwrap_or_else(|| "已留在原场景，未保存任何临时内容".into());
+                        state.changed();
+                    });
                     return;
                 }
                 session.return_epoch = world
@@ -1211,9 +1215,10 @@ fn drive_independent(world: &mut World) {
                 ));
                 session.phase = IndependentPhase::Returning;
                 session.elapsed = 0.;
-                let mut state = world.resource_mut::<ContentLibrary>();
-                state.status = "正在返回原场景并恢复位置…".into();
-                state.changed();
+                library_mut(world, |state| {
+                    state.status = "正在返回原场景并恢复位置…".into();
+                    state.changed();
+                });
             }
         }
         IndependentPhase::Returning => {
@@ -1228,15 +1233,16 @@ fn drive_independent(world: &mut World) {
                     .is_some_and(|face| face.is_fresh(epoch.unwrap()));
             if restored {
                 restore_original_poses(world, &session);
-                let mut state = world.resource_mut::<ContentLibrary>();
-                state.stopping = false;
-                state.scene_owned = false;
-                state.status = session
-                    .failure
-                    .as_ref()
-                    .map(|reason| format!("{reason}；已恢复原场景"))
-                    .unwrap_or_else(|| "已返回原场景，位置与临时内容均已恢复".into());
-                state.changed();
+                library_mut(world, |state| {
+                    state.stopping = false;
+                    state.scene_owned = false;
+                    state.status = session
+                        .failure
+                        .as_ref()
+                        .map(|reason| format!("{reason}；已恢复原场景"))
+                        .unwrap_or_else(|| "已返回原场景，位置与临时内容均已恢复".into());
+                    state.changed();
+                });
                 info!(
                     "[content-library] independent ticket={} restored site={}",
                     session.ticket, session.original_site
@@ -1264,7 +1270,7 @@ pub fn prepare_pending(world: &mut World) {
         ExperienceMode::Independent => {
             if !world.contains_resource::<IndependentSession>() {
                 if let Err(reason) = start_independent(world, &choice) {
-                    playback::fail(&mut world.resource_mut::<ContentLibrary>(), &reason);
+                    library_mut(world, |state| playback::fail(state, &reason));
                 }
             }
         }
@@ -1277,11 +1283,11 @@ pub fn prepare_pending(world: &mut World) {
                     return;
                 }
                 restore_preview(world);
-                world.resource_mut::<ContentLibrary>().active = None;
+                library_mut(world, |state| state.active = None);
             }
             match plan_current(world, &choice) {
                 Ok(actors) => apply_preview(world, &choice, actors),
-                Err(reason) => playback::fail(&mut world.resource_mut::<ContentLibrary>(), &reason),
+                Err(reason) => library_mut(world, |state| playback::fail(state, &reason)),
             }
         }
     }

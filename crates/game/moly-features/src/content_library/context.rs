@@ -4,7 +4,7 @@ use super::*;
 pub fn refresh_context(
     time: Res<Time>,
     catalog: Res<LibraryCatalog>,
-    mut state: ResMut<ContentLibrary>,
+    mut state: LibraryMut,
     mut context: ResMut<LibraryContext>,
     runtime: Res<PlayerFixtureRuntime>,
     npcs: Query<(&CharacterUnitId, &NpcActions)>,

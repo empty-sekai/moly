@@ -41,7 +41,7 @@ pub fn read_input(
     edits: Res<crate::field_modes::EditSessionActive>,
     joystick: Res<crate::joystick::JoystickState>,
     overlays: crate::game_settings::OverlayPanels,
-    library: Res<crate::content_library::ContentLibrary>,
+    claims: Res<crate::input_claims::InputClaims>,
     site_move: Option<Res<crate::field_modes::SiteMoveActive>>,
     entry: Option<Res<crate::entry::EntrySequence>>,
     learn: Option<Res<crate::field_modes::LearnSiteEnvironmentActive>>,
@@ -58,7 +58,7 @@ pub fn read_input(
     // new presses (ExistsDialog(Layer_Dialog)), so the adaptation is off too.
     if tutorial.is_some_and(|input|input.movement_blocked) || edits.is_active()
         || overlays.block_world_input()
-        || library.blocks_exploration_input()
+        || claims.blocks(crate::input_claims::InputChannel::Exploration)
         || site_move.is_some()
         || screens.as_deref().is_some_and(crate::ui_layers::ScreenManager::exists_dialog)
         // GameState LearnSiteEnvironment hides the stick.

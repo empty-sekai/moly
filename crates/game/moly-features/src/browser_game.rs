@@ -578,7 +578,7 @@ pub fn configure_browser_game(app: &mut App, seed: GameSeed) {
                 .chain()
                 .after(bevy::input::InputSystems)
                 .before(crate::game_settings::input)
-                .before(crate::content_library::input),
+                .in_set(crate::input_claims::HostInputSystems),
         )
         .add_systems(
             Last,
@@ -639,10 +639,8 @@ fn drain_commands(world: &mut World) {
         match command {
             GameCommand::Lifecycle(value) => info!("[game] page lifecycle {}", value.name()),
             GameCommand::Input(captured) => {
-                if let Some(mut library) =
-                    world.get_resource_mut::<crate::content_library::ContentLibrary>()
-                {
-                    library.set_host_input_capture(captured);
+                if let Some(mut claims) = world.get_resource_mut::<crate::input_claims::InputClaims>() {
+                    claims.capture_host_input(captured);
                 }
             }
             GameCommand::ServerEdit(command) => {

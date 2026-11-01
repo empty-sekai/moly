@@ -260,7 +260,9 @@ pub fn install(app: &mut App) {
     )
     .add_systems(
         PreUpdate,
-        content_library::input.after(bevy::ui::UiSystems::Focus),
+        content_library::input
+            .after(bevy::ui::UiSystems::Focus)
+            .after(crate::input_claims::HostInputSystems),
     )
     .add_systems(Update, crate::game_settings::apply_graphics)
     .add_systems(PostUpdate, audio::apply_sink_volumes);

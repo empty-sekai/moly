@@ -1,4 +1,6 @@
-//! Read-only byte accounting for live assets, not allocator/OS memory claims.
+//! Read-only byte accounting for live assets: images and meshes by family,
+//! not allocator or operating-system memory. The settings panel and the
+//! content library diagnostics show it.
 use std::collections::BTreeMap;
 
 use bevy::{
@@ -98,7 +100,9 @@ struct MeshFamily {
     cpu_bytes: u64,
 }
 
-pub(super) fn diagnostics(
+/// The bytes held by live images and meshes, by family, as JSON. Render
+/// targets, ECS storage and driver memory are not counted.
+pub fn summary(
     images: &Assets<Image>,
     meshes: &Assets<Mesh>,
     server: &AssetServer,

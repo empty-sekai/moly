@@ -190,6 +190,7 @@ pub mod pick;
 pub mod player_input;
 pub mod player_data;
 pub mod player_data_ui;
+pub mod resource_residency;
 pub mod userdata;
 pub mod site_expansion;
 pub mod site_move;

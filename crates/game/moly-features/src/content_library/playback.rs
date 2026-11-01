@@ -5,7 +5,7 @@ use crate::player_talk::{PlayerTalkLedger, PlayerTalkOutcome};
 
 pub fn dispatch(
     mut commands: Commands,
-    mut state: ResMut<ContentLibrary>,
+    mut state: LibraryMut,
     catalog: Res<LibraryCatalog>,
     player_session: Option<Res<crate::player_talk::PlayerTalkSession>>,
     pair_session: Option<Res<crate::talk::ActiveTalk>>,
@@ -232,7 +232,7 @@ pub fn dispatch(
 
 pub fn observe_start(
     time: Res<Time>,
-    mut state: ResMut<ContentLibrary>,
+    mut state: LibraryMut,
     player_session: Option<Res<crate::player_talk::PlayerTalkSession>>,
     pair_session: Option<Res<crate::talk::ActiveTalk>>,
     runtime: ResMut<PlayerFixtureRuntime>,

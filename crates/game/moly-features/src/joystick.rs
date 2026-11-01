@@ -103,7 +103,8 @@ pub use crate::joystick_law::{bake, bake_move_vector, handle_input, DEAD_ZONE, H
 const ZONE_W: f32 = 0.35;
 const ZONE_H: f32 = 0.5;
 
-/// 底盘 RectTransform 边长（canvas 单位；序列化 sizeDelta 256×256）。
+/// Side of the base's RectTransform, in canvas units (serialized sizeDelta
+/// 256×256).
 const BASE_SIZE: f32 = 256.0;
 
 /// The EventSystem's serialized `m_DragThreshold`, in device pixels: the
@@ -111,19 +112,20 @@ const BASE_SIZE: f32 = 256.0;
 /// was pressed (`(press - position).sqrMagnitude >= threshold²`).
 const DRAG_THRESHOLD_DEVICE_PIXELS: f32 = 10.0;
 
-/// 摇杆两件所在页（UI atlas 的 MysekaiAtlas 页）。
+/// The UI atlas page that holds both stick pieces (the MysekaiAtlas page).
 const PAGE: &str =
     "moly://ui/atlas/textures/sactx-0-1024x1024-ASTC 4x4-MysekaiAtlas-0a6c3f39-000001d9.png";
 
-/// 底盘源矩形（页图像坐标、y 从顶量）：sprite textureRect (0,0,272,272)
-/// 底原点 → 顶原点翻成 min=(0, 1024-272)。
+/// The base's source rectangle in page image coordinates, y measured from the
+/// top: sprite textureRect (0,0,272,272) with a bottom origin becomes
+/// min=(0, 1024-272).
 const BASE_SRC: Rect = Rect {
     min: Vec2::new(0.0, 752.0),
     max: Vec2::new(272.0, 1024.0),
 };
 
-/// 手柄源矩形：sprite textureRect (416,568,112,112) → 顶原点
-/// min=(416, 1024-568-112)。
+/// The handle's source rectangle: sprite textureRect (416,568,112,112) with a
+/// top origin is min=(416, 1024-568-112).
 const STICK_SRC: Rect = Rect {
     min: Vec2::new(416.0, 344.0),
     max: Vec2::new(528.0, 456.0),
@@ -161,8 +163,10 @@ pub fn force_reset(
     }
 }
 
-/// Update（手势链内、手势层之前）：摇杆层推进。读 `TouchInput` 消息流
-/// ——与手势层同一条流，两层按同一谓词各自分流（见模块注释）。
+/// Update, in the gesture chain before the gesture layer: advances the stick
+/// layer. It reads the `TouchInput` message stream, the same stream the
+/// gesture layer reads; both layers split touches by the same predicate (see
+/// the module docs).
 pub fn advance(
     mut state: ResMut<JoystickState>,
     mut touches: MessageReader<TouchInput>,
@@ -171,7 +175,7 @@ pub fn advance(
     edits: Res<crate::field_modes::EditSessionActive>,
     player_talk: Option<Res<crate::player_talk::PlayerTalkSession>>,
     overlays: crate::game_settings::OverlayPanels,
-    library: Res<crate::content_library::ContentLibrary>,
+    claims: Res<crate::input_claims::InputClaims>,
     mut last_logged: Local<Vec2>,
     mut no_area: Local<bool>,
     site_move: Option<Res<crate::field_modes::SiteMoveActive>>,
@@ -186,16 +190,17 @@ pub fn advance(
         return;
     };
     let (width, height) = (window.width(), window.height());
-    // 让位门（GameStateType 分派）：Edit=2 / Talk=3（玩家自己的对话）
-    // → 禁用。环境配对对话不改游戏态（SomeCharacterTalk=7 不在摇杆的
-    // 分派表里），不算禁用源。
+    // The stick yields to the game states Edit (2) and Talk (3, the player's
+    // own conversation). An ambient pair conversation does not change the
+    // game state (SomeCharacterTalk, 7, is not in the stick's table), so it
+    // does not disable the stick.
     // MysekaiUtility.EnableJoyStick(true) runs in the entry's Finish.
     let was_enabled = state.enabled;
     state.enabled = !photo.is_some_and(|held|held.0) && !tutorial.is_some_and(|input|input.movement_blocked)
         && !edits.is_active()
         && player_talk.is_none()
         && !overlays.block_world_input()
-        && !library.blocks_exploration_input()
+        && !claims.blocks(crate::input_claims::InputChannel::Exploration)
         // GameState SiteMove: EnableGestureLayer(false).
         && site_move.is_none()
         // GameState LearnSiteEnvironment: the stick resets and hides.
@@ -375,33 +380,35 @@ pub fn advance(
 }
 
 
-/// 摇杆 UI 根（两件 sprite 的父；可见性随捕获态，子件沿父链继承）。
+/// The stick's UI root: parent of the two sprites. Its visibility follows the
+/// capture state and the pieces inherit it.
 #[derive(Component)]
 pub struct JoystickUiRoot;
 
-/// 底盘件。
+/// The base piece.
 #[derive(Component)]
 pub struct JoystickBase;
 
-/// 手柄件。
+/// The handle piece.
 #[derive(Component)]
 pub struct JoystickHandle;
 
-/// 纹源：UI atlas 整页。
+/// The texture: the whole UI atlas page.
 #[derive(Resource)]
 pub struct JoystickArt {
     page: Handle<Image>,
 }
 
-/// Startup：请求整页贴图（两件共用一页，一次装载）。
+/// Startup: requests the page texture once; both pieces share it.
 pub fn load(mut commands: Commands, server: Res<AssetServer>) {
     let page = moly_assets::residency::load_image(&server, AssetPath::from(PAGE.to_owned()));
     commands.insert_resource(JoystickArt { page });
 }
 
-/// Update：页到齐铺两件（隐藏起步，捕获时才显）。子件按源 rect 裁、
-/// custom_size = RectTransform 尺寸（canvas 单位），place_ui 每帧压
-/// canvas 缩放。
+/// Update: once the page is loaded, spawns the two pieces, hidden until a
+/// finger is captured. Each piece is cut by its source rect with
+/// `custom_size` set to its RectTransform size in canvas units; `place_ui`
+/// applies the canvas scale every frame.
 pub fn spawn_when_ready(
     mut commands: Commands,
     server: Res<AssetServer>,
@@ -452,11 +459,13 @@ pub fn spawn_when_ready(
     info!("[joystick] 摇杆件铺装：底盘 256 手柄 128 canvas 单位，默认隐藏");
 }
 
-/// Update（advance 之后）：按捕获态摆件。捕获中：底盘心 = 触点
-/// （屏点 → 覆盖相机世界系：原点屏幕中心、y 向上、1 单位 = 1 逻辑
-/// 像素）；手柄心 = 底盘心 + 方向 × 128 × 缩放（方向本就是 y 向上
-/// 语义，与该世界系一致，无需再翻）；两件 custom_size 压当帧 canvas
-/// 缩放。未捕获：整树隐藏。
+/// Update, after `advance`: places the pieces by the capture state. While a
+/// finger is captured, the base centre is the touch point, mapped from the
+/// screen into the overlay camera's world (origin at the screen centre, y up,
+/// 1 unit = 1 logical pixel), and the handle centre is the base centre plus
+/// direction × 128 × scale (the direction is already y-up, so it needs no
+/// flip). Both pieces' `custom_size` takes this frame's canvas scale. With no
+/// finger captured the whole tree is hidden.
 pub fn place_ui(
     state: Res<JoystickState>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -492,28 +501,32 @@ pub fn place_ui(
     }
 }
 
-/// 冒烟剧本的推进账（[`smoke_autojoystick`] 的 Local）。
+/// Progress of the smoke script (the `Local` of [`smoke_autojoystick`]).
 #[derive(Default)]
 pub struct AutojoystickRun {
-    /// 剧本步号：0 未开始，1 周期一拖动中，2 周期一保持，3 周期一收场，
-    /// 4 周期二拖动中，5 周期二保持，6 周期二收场，7 完结。
+    /// Script step: 0 not started, 1 cycle one dragging, 2 cycle one holding,
+    /// 3 cycle one released, 4 cycle two dragging, 5 cycle two holding,
+    /// 6 cycle two released, 7 done.
     step: usize,
 }
 
-/// Update（手势链首、joystick::advance 之前）：摇杆层的冒烟口
-/// （`dev.joystick_autosmoke_secs`，`MOLY_JOYSTICK_AUTOSMOKE_SECS`）。往
-/// `TouchInput` 消息流注入剧本触摸——引擎触摸事件就落在同一条流上，注入即走
-/// 摇杆层与手势层
-/// 的真实分流，不绕过任何一行。剧本两周期（起手均在区内同一点）：
+/// Update, at the head of the gesture chain before `joystick::advance`: the
+/// stick layer's smoke hook (`dev.joystick_autosmoke_secs`,
+/// `MOLY_JOYSTICK_AUTOSMOKE_SECS`). It writes scripted touches into the
+/// `TouchInput` message stream, where engine touch events land too, so the
+/// touches take the same split between the stick layer and the gesture layer.
+/// The script runs two cycles, both pressed at the same point in the zone:
 ///
-/// | 周期 | 时刻 | 段 | 摇杆方向 | 预期位移 |
+/// | Cycle | Time | Drag | Stick direction | Expected motion |
 /// |---|---|---|---|---|
-/// | 一 | 1.0s 起手，1.6s 满偏，1.8s 松开 | 拖向右 128×缩放 px | (1, 0) | 相机右 × 步速 |
-/// | 二 | 2.4s 起手，3.0s 满偏，3.2s 松开 | 拖向上 128×缩放 px | (0, 1) | 相机前（水平归一）× 步速 |
+/// | 1 | press 1.0s, full deflection 1.6s, release 1.8s | right, 128 × scale px | (1, 0) | camera right × step speed |
+/// | 2 | press 2.4s, full deflection 3.0s, release 3.2s | up, 128 × scale px | (0, 1) | camera forward (flattened) × step speed |
 ///
-/// 段界记玩家位置快照（含方向与时刻），配合玩家域的输入开始/结束行，
-/// 「摇杆方向 → 相机基 → 世界位移」逐段可对账。满偏拖动是线性插值
-/// （时刻决定位置，与帧率无关）。
+/// Each segment boundary logs a player position snapshot with the direction
+/// and time; with the player's input start and end lines, each segment can be
+/// checked from stick direction to camera basis to world motion. The drag to
+/// full deflection is a linear interpolation, so the position depends on the
+/// time and not on the frame rate.
 pub fn smoke_autojoystick(
     mut touches: MessageWriter<TouchInput>,
     windows: Query<(Entity, &Window), With<PrimaryWindow>>,
@@ -532,7 +545,7 @@ pub fn smoke_autojoystick(
     };
     let (width, height) = (window.width(), window.height());
     const FINGER: u64 = 99001;
-    // 时刻表：起手 → 拖到满偏 → 保持 → 松开，两周期。
+    // Timetable for both cycles: press, drag to full deflection, hold, release.
     const C1_PRESS: f32 = 1.0;
     const C1_FULL: f32 = 1.6;
     const C1_RELEASE: f32 = 1.8;
@@ -543,7 +556,8 @@ pub fn smoke_autojoystick(
         return;
     };
     let radius = HANDLE_SIZE * root_canvas.scale(window);
-    // 起手点：区内中部（15% 宽、75% 高——顶原点坐标的左下象限）。
+    // Press point inside the zone: 15% of the width, 75% of the height (the
+    // lower-left quadrant in top-origin coordinates).
     let start = Vec2::new(width * 0.15, height * 0.75);
     let write = |touches: &mut MessageWriter<TouchInput>, phase: TouchPhase, position: Vec2| {
         touches.write(TouchInput {
@@ -563,7 +577,8 @@ pub fn smoke_autojoystick(
             );
         }
     };
-    // 拖动位置线性插值：t 从段起到段末，s∈[0,1] 走满偏距离。
+    // Drag position: linear in time from the segment's start to its end, s in
+    // [0, 1] covering the full deflection distance.
     let progress = |t0: f32, t1: f32| ((now - t0) / (t1 - t0)).clamp(0.0, 1.0);
     match run.step {
         0 if now >= C1_PRESS => {

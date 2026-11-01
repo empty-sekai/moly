@@ -1,8 +1,6 @@
 //! Opt-in, read-only acceptance telemetry. It never creates actors, fixtures,
 //! requests or synthetic assets. Ordinary runs do not touch the filesystem.
 use super::*;
-#[path = "qa_memory.rs"]
-mod memory;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Mutex, OnceLock,
@@ -28,16 +26,6 @@ pub fn library_diagnostics() -> String {
         .unwrap_or_else(|_| r#"{"schemaVersion":1,"ready":false}"#.into())
 }
 
-/// Compact read-only projection used by the browser settings panel.  It is
-/// intentionally the same accounting as `library_diagnostics` and explicitly
-/// excludes allocator/RSS claims, render targets, ECS overhead and drivers.
-pub fn resource_residency_summary(
-    images: &Assets<Image>,
-    meshes: &Assets<Mesh>,
-    server: &AssetServer,
-) -> serde_json::Value {
-    memory::diagnostics(images, meshes, server)
-}
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct QaDiagnostics<'w, 's> {
     weather_transition: Option<Res<'w, crate::weather_transition::WeatherTransition>>,
@@ -98,7 +86,7 @@ pub struct QaState {
     elapsed: f32,
 }
 pub fn qa_open(
-    mut state: ResMut<ContentLibrary>,
+    mut state: LibraryMut,
     catalog: Res<LibraryCatalog>,
     context: Res<LibraryContext>,
     time: Res<Time>,
@@ -244,7 +232,7 @@ pub fn qa_open(
             "provider":extra.provider.as_ref().map(|p|p.cache_counts()),
             "timeline":extra.timeline_loads.as_ref().map(|p|p.cache_counts())
         });
-        value["resource_residency"] = memory::diagnostics(&extra.images, &extra.particle_meshes, &extra.asset_server);
+        value["resource_residency"] = crate::resource_residency::summary(&extra.images, &extra.particle_meshes, &extra.asset_server);
         value["resource_residency"]["fixtures"] = serde_json::json!({
             "liveInstances": extra.fixture_sources.iter().count(),
             "liveUniqueGltfs": extra.fixture_sources.iter().map(|source| source.0.id())

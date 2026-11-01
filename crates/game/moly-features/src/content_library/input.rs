@@ -39,7 +39,7 @@ pub struct LibraryInput<'w, 's> {
 }
 
 pub fn input(
-    mut state: ResMut<ContentLibrary>,
+    mut state: LibraryMut,
     catalog: Res<LibraryCatalog>,
     world: Res<LibraryContext>,
     mut io: LibraryInput,

@@ -590,8 +590,12 @@ pub fn update(world: &mut World) {
     };
     if let Some(request) = browser_requests().lock().unwrap().take() {
         state.last_error = false;
-        let busy = world.get_resource::<crate::content_library::ContentLibrary>()
-            .is_some_and(|library| library.browser_busy());
+        let busy = world.get_resource::<crate::input_claims::InputClaims>().is_some_and(|claims| {
+            claims.holds_channel(
+                crate::input_claims::CONTENT_LIBRARY,
+                crate::input_claims::InputChannel::Scene,
+            )
+        });
         let checked = if !world.contains_resource::<crate::browser_stage::BrowserStage>() {
             Err("Player-data browser commands require an isolated stage".to_owned())
         } else if busy {

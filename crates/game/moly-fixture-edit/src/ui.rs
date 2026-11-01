@@ -335,7 +335,7 @@ pub fn click(
     mut ui: ResMut<EditorUiState>,
     mut consumed: ResMut<ActionTapConsumed>,
     mut actions: MessageWriter<EditCommand>,
-    mut library: ResMut<moly_features::content_library::ContentLibrary>,
+    mut library: moly_features::content_library::LibraryMut,
     mut sounds: ResMut<SeRequests>,
     roots: Query<(&EditorRoot, &UiPrefabView)>,
     auxiliaries: Query<(&EditorAuxiliary, &UiPrefabView)>,

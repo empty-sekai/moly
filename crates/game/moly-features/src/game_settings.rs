@@ -251,29 +251,29 @@ pub fn perf_plugin() -> moly_perf::PerfPlugin {
 
 pub fn scene_input_enabled(
     overlays: OverlayPanels,
-    library: Res<crate::content_library::ContentLibrary>,
+    claims: Res<crate::input_claims::InputClaims>,
     tutorial: Option<Res<crate::tutorial::TutorialInput>>,
 ) -> bool {
-    !tutorial.is_some_and(|input|input.taps_blocked) && !overlays.block_pointer() && !library.blocks_world_input()
+    !tutorial.is_some_and(|input|input.taps_blocked) && !overlays.block_pointer() && !claims.blocks(crate::input_claims::InputChannel::World)
 }
 
 pub fn camera_input_enabled(
     overlays: OverlayPanels,
-    library: Res<crate::content_library::ContentLibrary>,
+    claims: Res<crate::input_claims::InputClaims>,
     entry: Option<Res<crate::entry::EntrySequence>>,
 ) -> bool {
     // Camera drag belongs to the gesture layer the entry enables in Finish.
     !overlays.block_pointer()
-        && !library.blocks_camera_input()
+        && !claims.blocks(crate::input_claims::InputChannel::Camera)
         && crate::entry::control_open(entry.as_deref())
 }
 
 pub fn talk_input_enabled(
     overlays: OverlayPanels,
-    library: Res<crate::content_library::ContentLibrary>,
+    claims: Res<crate::input_claims::InputClaims>,
     tutorial: Option<Res<crate::tutorial::TutorialInput>>,
 ) -> bool {
-    !tutorial.is_some_and(|input|input.taps_blocked) && !overlays.block_pointer() && !library.blocks_talk_input()
+    !tutorial.is_some_and(|input|input.taps_blocked) && !overlays.block_pointer() && !claims.blocks(crate::input_claims::InputChannel::Talk)
 }
 
 /// Version of the stored `GameSettings` section. Version 2 changed the meaning
@@ -1008,7 +1008,7 @@ pub fn refresh_ui(
             ValueLabel::Residency => {
                 let now = time.elapsed_secs_f64();
                 if residency_sample.as_ref().is_none_or(|(at, _, _, _)| now - *at >= 1.0) {
-                    let value = crate::content_library::resource_residency_summary(
+                    let value = crate::resource_residency::summary(
                         &images,
                         &meshes,
                         &asset_server,

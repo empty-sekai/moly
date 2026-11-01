@@ -5,6 +5,7 @@
 //! coordinates admission, cancellation and a small transport, not a new player.
 
 use crate::{
+    input_claims,
     fixture_activity_state::{FixtureActivityIdentity, FixtureTarget},
     npc::{CharacterUnitId, NpcActions},
     npc_objective::{TalkBackend, TalkContent},
@@ -31,6 +32,7 @@ use moly_law::talk::{
     condition_type_discriminant, FixtureStep, TalkStep, CONDITION_AFTER_SET_FIXTURE,
     CONDITION_MYSEKAI_FIXTURE_ID, CONDITION_MYSEKAI_FIXTURE_TAG_ID,
 };
+use input_claims::{Channels, InputChannel, InputClaims, CONTENT_LIBRARY, HOST_INPUT};
 use std::collections::{HashMap, HashSet};
 
 pub mod bridge;
@@ -45,7 +47,6 @@ mod playback;
 mod qa;
 pub use qa::library_diagnostics;
 pub use qa::diagnostics_requested;
-pub use qa::resource_residency_summary;
 mod stage_framing;
 mod staging;
 mod view;
@@ -312,7 +313,6 @@ pub struct ContentLibrary {
     // The web shell owns chrome while the same playback owner owns the scene.
     external_ui: bool,
     external_open: bool,
-    external_input_capture: bool,
     watching: bool,
     // Scene ownership outlives closing the browser until rollback completes.
     scene_owned: bool,
@@ -354,7 +354,6 @@ impl Default for ContentLibrary {
             open: false,
             external_ui: false,
             external_open: false,
-            external_input_capture: false,
             watching: false,
             scene_owned: false,
             last_error: None,
@@ -419,7 +418,6 @@ impl ContentLibrary {
             || self.active.is_some()
             || self.pending.is_some()
             || self.scene_owned
-            || self.external_input_capture
             || self.release_guard != 0
     }
     /// Viewing an NPC performance owns only its actors and furniture. The
@@ -427,7 +425,6 @@ impl ContentLibrary {
     /// interaction remain protected by the original world-input gate.
     pub fn blocks_exploration_input(&self) -> bool {
         if ((self.open || self.fixture_dialog.is_some()) && !self.external_ui)
-            || self.external_input_capture
             || self.release_guard != 0
             || self.stopping
             || self.pending.is_some()
@@ -447,7 +444,6 @@ impl ContentLibrary {
     pub fn blocks_camera_input(&self) -> bool {
         if self.active.is_some() {
             return ((self.open || self.fixture_dialog.is_some()) && !self.external_ui)
-                || self.external_input_capture
                 || self.release_guard != 0
                 || self.stopping
                 || self.pending.is_some();
@@ -456,21 +452,28 @@ impl ContentLibrary {
     }
     /// Camera-only inspection is available during loading/pre-actions too;
     /// it never grants movement, picking, layout edits or conversation clicks.
-    pub fn playback_camera_active(&self) -> bool {
-        self.active.is_some() && !self.blocks_camera_input()
+    /// `host_captured`: the host holds the camera ([`input_claims::HOST_INPUT`]).
+    pub fn playback_camera_active(&self, host_captured: bool) -> bool {
+        self.active.is_some() && !host_captured && !self.blocks_camera_input()
     }
     pub fn blocks_talk_input(&self) -> bool {
         ((self.open || self.fixture_dialog.is_some()) && !self.external_ui)
-            || self.external_input_capture
             || self.release_guard != 0
     }
     pub fn owns_scene(&self) -> bool {
         self.scene_owned
     }
-    /// The browser game's DOM surfaces own input through the same gate as the
-    /// library host's focus command.
-    pub fn set_host_input_capture(&mut self, captured: bool) {
-        self.external_input_capture = captured;
+    /// The input channels the library holds: the world, exploration, camera
+    /// and talk gates above, and [`InputChannel::Scene`] while it stages,
+    /// plays or restores a choice ([`Self::browser_busy`]). The host's own
+    /// capture is a separate holder ([`input_claims::HOST_INPUT`]).
+    pub fn channels(&self) -> Channels {
+        Channels::NONE
+            .with(InputChannel::World, self.blocks_world_input())
+            .with(InputChannel::Exploration, self.blocks_exploration_input())
+            .with(InputChannel::Camera, self.blocks_camera_input())
+            .with(InputChannel::Talk, self.blocks_talk_input())
+            .with(InputChannel::Scene, self.browser_busy())
     }
 
     /// The original editor info button is a reading entry, not permission to
@@ -660,10 +663,93 @@ pub enum ButtonKind {
     Danger,
 }
 
+/// Mutable access to the library from a system. When the system returns, the
+/// library's [`ContentLibrary::channels`] are published in [`InputClaims`]
+/// under [`CONTENT_LIBRARY`], so every reader of the claims sees the state
+/// the library was left in.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct LibraryMut<'w> {
+    library: ResMut<'w, ContentLibrary>,
+    claims: ResMut<'w, InputClaims>,
+}
+
+impl LibraryMut<'_> {
+    /// Sets whether the host captures input ([`HOST_INPUT`]): its own focus,
+    /// such as the library's search field in the page.
+    pub fn capture_host_input(&mut self, captured: bool) {
+        self.claims.capture_host_input(captured);
+    }
+}
+
+impl std::ops::Deref for LibraryMut<'_> {
+    type Target = ContentLibrary;
+    fn deref(&self) -> &ContentLibrary {
+        &self.library
+    }
+}
+
+impl std::ops::DerefMut for LibraryMut<'_> {
+    fn deref_mut(&mut self) -> &mut ContentLibrary {
+        &mut self.library
+    }
+}
+
+impl Drop for LibraryMut<'_> {
+    fn drop(&mut self) {
+        let channels = self.library.channels();
+        if self.claims.channels_of(CONTENT_LIBRARY) != channels {
+            self.claims.publish_channels(CONTENT_LIBRARY, channels);
+        }
+    }
+}
+
+/// Runs `change` on the library in `world`, then publishes its channels as
+/// [`LibraryMut`] does.
+pub fn library_mut<R>(world: &mut World, change: impl FnOnce(&mut ContentLibrary) -> R) -> R {
+    let result = change(&mut world.resource_mut::<ContentLibrary>());
+    let channels = world.resource::<ContentLibrary>().channels();
+    if world.resource::<InputClaims>().channels_of(CONTENT_LIBRARY) != channels {
+        world
+            .resource_mut::<InputClaims>()
+            .publish_channels(CONTENT_LIBRARY, channels);
+    }
+    result
+}
+
+/// Logs an error when the published channels differ from the library's
+/// state: a change that did not go through [`LibraryMut`] or [`library_mut`].
+fn check_published_channels(
+    library: Res<ContentLibrary>,
+    claims: Res<InputClaims>,
+    mut reported: Local<Option<(Channels, Channels)>>,
+) {
+    let live = library.channels();
+    let published = claims.channels_of(CONTENT_LIBRARY);
+    if live == published {
+        *reported = None;
+        return;
+    }
+    if *reported == Some((live, published)) {
+        return;
+    }
+    *reported = Some((live, published));
+    for channel in InputChannel::ALL {
+        if live.contains(channel) != published.contains(channel) {
+            error!(
+                "[content library] input channel {channel:?} is {} but published as {}",
+                live.contains(channel),
+                published.contains(channel),
+            );
+        }
+    }
+}
+
 pub fn install(app: &mut App) {
     input::install(app);
     capabilities::install(app);
     app.init_resource::<ContentLibrary>()
+        .init_resource::<InputClaims>()
+        .add_systems(Last, check_published_channels)
         .init_resource::<crate::field_modes::LibraryMode>()
         .insert_resource(crate::field_modes::FixtureTalkObserverPort(
             stage_fixture_talk_observer,
@@ -673,15 +759,19 @@ pub fn install(app: &mut App) {
         .add_message::<TalkCancelRequest>();
 }
 /// Publishes the library's gates on the field ([`crate::field_modes::LibraryMode`]).
+/// The world and camera gates include the host's capture.
 pub fn publish_mode(
     library: Res<ContentLibrary>,
+    claims: Res<InputClaims>,
     mut mode: ResMut<crate::field_modes::LibraryMode>,
 ) {
     let next = crate::field_modes::LibraryMode {
         reads_availability: library.reads_availability(),
-        blocks_world_input: library.blocks_world_input(),
+        blocks_world_input: library.blocks_world_input()
+            || claims.holds_channel(HOST_INPUT, InputChannel::World),
         owns_scene: library.owns_scene(),
-        playback_camera: library.playback_camera_active(),
+        playback_camera: library
+            .playback_camera_active(claims.holds_channel(HOST_INPUT, InputChannel::Camera)),
         talk_preview: library
             .active
             .as_ref()
@@ -773,6 +863,14 @@ fn human_reason(reason: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The claims a reader sees with `state` published: the library's own
+    /// channels, and the host capturing input when `captured`.
+    fn claims(state: &ContentLibrary, captured: bool) -> InputClaims {
+        let mut claims = InputClaims::default();
+        claims.publish_channels(CONTENT_LIBRARY, state.channels());
+        claims.capture_host_input(captured);
+        claims
+    }
     fn camera_playback(key: EntryKey, started: bool) -> ContentLibrary {
         let mut state = ContentLibrary::default();
         state.scene_owned = true;
@@ -797,9 +895,10 @@ mod tests {
         ] {
             for started in [false, true] {
                 let state = camera_playback(key, started);
-                assert!(!state.blocks_camera_input());
-                assert!(state.playback_camera_active());
-                assert!(state.blocks_world_input());
+                let claims = claims(&state, false);
+                assert!(!claims.blocks(InputChannel::Camera));
+                assert!(state.playback_camera_active(false));
+                assert!(claims.blocks(InputChannel::World));
             }
         }
     }
@@ -807,23 +906,37 @@ mod tests {
     fn camera_inspection_respects_ui_and_replacement_guards() {
         for gate in 0..6 {
             let mut state = camera_playback(EntryKey::Fixture(1), false);
-            match gate {
-                0 => state.open = true,
-                1 => state.fixture_dialog = Some(1),
-                2 => state.external_input_capture = true,
-                3 => state.release_guard = 1,
-                4 => state.stopping = true,
-                _ => state.pending = Some(state.active.as_ref().unwrap().choice.clone()),
-            }
-            assert!(state.blocks_camera_input());
-            assert!(!state.playback_camera_active());
+            let captured = match gate {
+                0 => {
+                    state.open = true;
+                    false
+                }
+                1 => {
+                    state.fixture_dialog = Some(1);
+                    false
+                }
+                2 => true,
+                3 => {
+                    state.release_guard = 1;
+                    false
+                }
+                4 => {
+                    state.stopping = true;
+                    false
+                }
+                _ => {
+                    state.pending = Some(state.active.as_ref().unwrap().choice.clone());
+                    false
+                }
+            };
+            assert!(claims(&state, captured).blocks(InputChannel::Camera));
+            assert!(!state.playback_camera_active(captured));
         }
         let mut state = camera_playback(EntryKey::Fixture(1), false);
         state.external_ui = true;
         state.open = true;
-        assert!(state.playback_camera_active());
-        state.external_input_capture = true;
-        assert!(!state.playback_camera_active());
+        assert!(state.playback_camera_active(false));
+        assert!(!state.playback_camera_active(true));
     }
     #[test]
     fn unicode_excerpt_is_safe() {

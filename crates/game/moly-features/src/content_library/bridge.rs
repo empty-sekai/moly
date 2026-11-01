@@ -309,7 +309,7 @@ fn reject(state: &mut ContentLibrary, reason: &str) {
 }
 pub(super) fn apply_command(
     command: BrowserCommand,
-    state: &mut ContentLibrary,
+    state: &mut LibraryMut,
     catalog: &LibraryCatalog,
     world: &LibraryContext,
     io: &mut input::LibraryInput,
@@ -336,7 +336,7 @@ pub(super) fn apply_command(
         BrowserCommand::Close => {
             apply_action(LibraryAction::Close, state, catalog, world, io);
             state.external_open = false;
-            state.external_input_capture = false;
+            state.capture_host_input(false);
             // Once mounted, all catalogue chrome belongs to the host, even
             // while the host is collapsed and the original scene is restored.
             state.external_ui = true;
@@ -372,7 +372,7 @@ pub(super) fn apply_command(
                 .insert_resource(crate::site::SiteChangeRequest(site));
         }
         BrowserCommand::Focus(value) => {
-            state.external_input_capture = value;
+            state.capture_host_input(value);
         }
         BrowserCommand::Query(query) => {
             state.search = query;
@@ -385,13 +385,12 @@ pub(super) fn apply_command(
                 return;
             }
             apply_action(LibraryAction::Select(key), state, catalog, world, io);
-            state.select_index(
-                state
-                    .filtered
-                    .iter()
-                    .position(|candidate| *candidate == key)
-                    .unwrap(),
-            );
+            let index = state
+                .filtered
+                .iter()
+                .position(|candidate| *candidate == key)
+                .unwrap();
+            state.select_index(index);
         }
         BrowserCommand::Play(selected) | BrowserCommand::Preview(selected) => {
             // A stale/missing key must never silently play a different row.
@@ -898,6 +897,16 @@ pub fn gate_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input_claims::{InputChannel, InputClaims, CONTENT_LIBRARY};
+
+    /// The claims a reader sees with `state` published: the library's own
+    /// channels, and the host capturing input when `captured`.
+    fn claims(state: &ContentLibrary, captured: bool) -> InputClaims {
+        let mut claims = InputClaims::default();
+        claims.publish_channels(CONTENT_LIBRARY, state.channels());
+        claims.capture_host_input(captured);
+        claims
+    }
     #[test]
     fn exact_keys_preserve_backend_origin_and_timeline_variant() {
         let keys = [
@@ -1040,12 +1049,23 @@ mod tests {
         // otherwise four bridge tests fail with "resource does not exist",
         // which says nothing about the command semantics under test.
         world.init_resource::<crate::audio::AudioGate>();
-        let mut system = SystemState::<input::LibraryInput>::new(&mut world);
+        world.init_resource::<InputClaims>();
+        world.insert_resource(std::mem::take(state));
+        let mut system = SystemState::<(LibraryMut, input::LibraryInput)>::new(&mut world);
         {
-            let mut io = system.get_mut(&mut world).expect("system params");
-            apply_command(command, state, catalog, &LibraryContext::default(), &mut io);
+            let (mut library, mut io) = system.get_mut(&mut world).expect("system params");
+            apply_command(
+                command,
+                &mut library,
+                catalog,
+                &LibraryContext::default(),
+                &mut io,
+            );
         }
         system.apply(&mut world);
+        *state = world
+            .remove_resource::<ContentLibrary>()
+            .expect("library resource");
         (
             world.resource::<Messages<TalkCancelRequest>>().len(),
             world.resource::<Messages<PlayerFixtureRequest>>().len(),
@@ -1156,19 +1176,21 @@ mod tests {
         let mut state = playing();
         state.open = true;
         state.release_guard = 0;
-        assert!(state.blocks_world_input());
-        assert!(!state.blocks_talk_input());
-        state.external_input_capture = true;
-        assert!(state.blocks_world_input());
-        assert!(state.blocks_talk_input());
-        state.external_input_capture = false;
+        let canvas = claims(&state, false);
+        assert!(canvas.blocks(InputChannel::World));
+        assert!(!canvas.blocks(InputChannel::Talk));
+        let focused = claims(&state, true);
+        assert!(focused.blocks(InputChannel::World));
+        assert!(focused.blocks(InputChannel::Talk));
         state.active = None;
         state.scene_owned = false;
-        assert!(!state.blocks_world_input());
-        assert!(!state.blocks_talk_input());
+        let idle = claims(&state, false);
+        assert!(!idle.blocks(InputChannel::World));
+        assert!(!idle.blocks(InputChannel::Talk));
         state.external_ui = false;
-        assert!(state.blocks_world_input());
-        assert!(state.blocks_talk_input());
+        let native = claims(&state, false);
+        assert!(native.blocks(InputChannel::World));
+        assert!(native.blocks(InputChannel::Talk));
     }
     #[test]
     fn furniture_and_activity_details_keep_artwork_and_original_bubble() {
@@ -1284,16 +1306,15 @@ mod tests {
             timeline_id: 1,
         });
         state.release_guard = 0;
-        assert!(!state.blocks_exploration_input());
-        assert!(!state.blocks_camera_input());
-        assert!(state.blocks_world_input());
+        let spectator = claims(&state, false);
+        assert!(!spectator.blocks(InputChannel::Exploration));
+        assert!(!spectator.blocks(InputChannel::Camera));
+        assert!(spectator.blocks(InputChannel::World));
         state.stopping = true;
-        assert!(state.blocks_exploration_input());
+        assert!(claims(&state, false).blocks(InputChannel::Exploration));
         state.stopping = false;
-        state.external_input_capture = true;
-        assert!(state.blocks_camera_input());
-        state.external_input_capture = false;
+        assert!(claims(&state, true).blocks(InputChannel::Camera));
         state.active.as_mut().unwrap().choice.key = EntryKey::Fixture(1);
-        assert!(state.blocks_exploration_input());
+        assert!(claims(&state, false).blocks(InputChannel::Exploration));
     }
 }

@@ -1407,7 +1407,7 @@ pub struct ViewCache {
 }
 pub fn refresh(
     mut c: Commands,
-    mut state: ResMut<ContentLibrary>,
+    mut state: LibraryMut,
     catalog: Res<LibraryCatalog>,
     world: Res<LibraryContext>,
     font: Res<LibraryFont>,

@@ -312,7 +312,8 @@ pub fn install(app: &mut App) {
         PreUpdate,
         content_library::input
             .after(bevy::ui::UiSystems::Focus)
-            .after(crate::game_settings::input),
+            .after(crate::game_settings::input)
+            .after(crate::input_claims::HostInputSystems),
     )
     .add_systems(
         Update,
