@@ -181,8 +181,8 @@ keys! {
         "The locale of the display translation. Default: `zh-CN`.";
     DEV_WINDOW = "dev.window", Some("MOLY_DEV"), Flag, "game, server",
         "Starts the developer window instead of the game.";
-    DEV_CHECK_SYSTEMS = "dev.check_systems", Some("MOLY_CHECK_SYSTEMS"), Text, "developer window",
-        "`1` reports every system parameter conflict and exits instead of starting the game.";
+    DEV_CHECK_SYSTEMS = "dev.check_systems", Some("MOLY_CHECK_SYSTEMS"), Flag, "game",
+        "Reports every system parameter conflict and exits instead of starting the game.";
     DEV_PORTRAITS_OUT = "dev.portraits_out", Some("MOLY_PORTRAITS_OUT"), Path, "developer window",
         "Exports character portraits into this directory, with its own settings file there, instead of starting normally.";
     DEV_PORTRAIT_UNIT = "dev.portrait_unit", Some("MOLY_PORTRAIT_UNIT"), Text, "developer window",
@@ -370,7 +370,7 @@ keys! {
     DEV_NOTICE_COLLECT_AUTOPLAY = "dev.notice_collect_autoplay", Some("MOLY_NOTICE_COLLECT_AUTOPLAY"), Text, "developer window",
         "How many scripted NoticeCollectItem calls the collect notice sends two seconds after its cells are ready (a non-number sends all); unset: none.";
     DEV_NPC_ENTRY_PROBE = "dev.npc_entry_probe", Some("MOLY_NPC_ENTRY_PROBE"), Text, "developer window",
-        "A ;-separated script of gate and cut-scene entry steps (SECONDS:OP[:UNIT[:ARG]]) driven in developer builds, one log line per step. Unset: no steps run.";
+        "A `;`-separated script of gate and cut-scene entry steps (`SECONDS:OP[:UNIT[:ARG]]`) driven in developer builds, one log line per step. Unset: no steps run.";
     DEV_NPC_HARNESS_DIR = "dev.npc_harness_dir", Some("MOLY_NPC_HARNESS_DIR"), Path, "developer window",
         "The acceptance harness directory: cases are read from `<dir>/in/<name>.json` and results written to `<dir>/out/<name>.json`. The harness drivers stop with a panic naming the key when it is unset.";
     DEV_NPC_HFSM_SCOPE = "dev.npc_hfsm_scope", Some("MOLY_NPC_HFSM_SCOPE"), Text, "developer window",

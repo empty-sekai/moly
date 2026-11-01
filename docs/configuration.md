@@ -77,6 +77,8 @@ See [importing player data](player-data.md). Setting `player_data.uid` (`MOLY_PL
 | `control_port` | `MOLY_SERVER_CONTROL_PORT` | whole number | server | The server's control port. Default: `15801`, always bound to `127.0.0.1`. |
 | `data` | `MOLY_SERVER_DATA` | path | server | The directory the server saves player documents in. Unset: documents are kept in memory only. |
 
+The server also reads `MOLY_SERVER_ADMIN`, from the environment only: `off` refuses the administration calls, `on` or unset allows them, and any other value stops the start. A server behind a reverse proxy listens on a loopback address and sets it to `off`.
+
 ### `[update]`
 
 | Key | Environment variable | Value | Read by | Description |
@@ -112,12 +114,12 @@ The developer window translates its display text with these files: the source ca
 
 ### `[dev]`
 
-These are developer and diagnostic switches, read by the developer window, or by the server where the Read by column says so. Each one is also set through its environment variable. Every `[dev]` key except `dev.window` holds a string that the switch parses itself, so write it quoted (`seed = "42"`, not `seed = 42`); what the string must look like, and what an invalid one does, is in its Description.
+These are developer and diagnostic switches, read by the developer window, or by the server where the Read by column says so. Each one is also set through its environment variable. Every `[dev]` key except `dev.window` and `dev.check_systems` holds a string that the switch parses itself, so write it quoted (`seed = "42"`, not `seed = 42`); what the string must look like, and what an invalid one does, is in its Description.
 
 | Key | Environment variable | Value | Read by | Description |
 |---|---|---|---|---|
 | `window` | `MOLY_DEV` | true or false | game, server | Starts the developer window instead of the game. Default: false. |
-| `check_systems` | `MOLY_CHECK_SYSTEMS` | string | developer window | `1` reports every system parameter conflict and exits instead of starting the game. |
+| `check_systems` | `MOLY_CHECK_SYSTEMS` | true or false | game | Reports every system parameter conflict and exits instead of starting the game. Default: false. |
 | `portraits_out` | `MOLY_PORTRAITS_OUT` | path | developer window | Exports character portraits into this directory, with its own settings file there, instead of starting normally. |
 | `portrait_unit` | `MOLY_PORTRAIT_UNIT` | string | developer window | Limits the portrait export to this source unit id. |
 | `action_button_autowalk_secs` | `MOLY_ACTION_BUTTON_AUTOWALK_SECS` | string | developer window | A window (`<until>` or `<from>:<until>` seconds) in which the player is walked to each character and fixture and the action button is tapped; unset: the autowalk is off. |
@@ -211,7 +213,7 @@ These are developer and diagnostic switches, read by the developer window, or by
 | `menu_mock_visiting` | `MOLY_MENU_MOCK_VISITING` | string | developer window | The menu's mock visiting state (true/1 or false/0); unset: false. |
 | `music_mock_owned_records` | `MOLY_MUSIC_MOCK_OWNED_RECORDS` | string | server | The music records the mock user owns, comma-separated record ids obtained at the server clock; an id that is not an integer, or named twice, stops the start with a panic. Unset: the user owns no record. |
 | `notice_collect_autoplay` | `MOLY_NOTICE_COLLECT_AUTOPLAY` | string | developer window | How many scripted NoticeCollectItem calls the collect notice sends two seconds after its cells are ready (a non-number sends all); unset: none. |
-| `npc_entry_probe` | `MOLY_NPC_ENTRY_PROBE` | string | developer window | A ;-separated script of gate and cut-scene entry steps (SECONDS:OP[:UNIT[:ARG]]) driven in developer builds, one log line per step. Unset: no steps run. |
+| `npc_entry_probe` | `MOLY_NPC_ENTRY_PROBE` | string | developer window | A `;`-separated script of gate and cut-scene entry steps (`SECONDS:OP[:UNIT[:ARG]]`) driven in developer builds, one log line per step. Unset: no steps run. |
 | `npc_harness_dir` | `MOLY_NPC_HARNESS_DIR` | path | developer window | The acceptance harness directory: cases are read from `<dir>/in/<name>.json` and results written to `<dir>/out/<name>.json`. The harness drivers stop with a panic naming the key when it is unset. |
 | `npc_hfsm_scope` | `MOLY_NPC_HFSM_SCOPE` | string | developer window | The units whose NPC machine the controller drives (unit ids separated by commas or spaces, or `all`). Unset: the controller has no scope; on a jp source of version 7 or later it enables itself for every unit. |
 | `npc_hfsm_trace` | `MOLY_NPC_HFSM_TRACE` | string | developer window | Writes the NPC machine's per-decision, per-transition and per-recovery log lines; `1`, `true`, `yes` or `on` switch them on. Unset or any other value: only the constructor and report lines. |

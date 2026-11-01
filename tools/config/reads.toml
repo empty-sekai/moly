@@ -16,7 +16,7 @@ reason = "build-time setting of the Android package, also passed to the game thr
 [[read]]
 file = "crates/app/moly-server-host/src/main.rs"
 variable = "MOLY_SERVER_ADMIN"
-reason = "a secret, kept out of the configuration file"
+reason = "an operator switch of a public server, read from the environment only"
 
 [[read]]
 file = "crates/base/moly-law/src/carve/obstacle.rs"

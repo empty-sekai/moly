@@ -235,9 +235,12 @@ fn run_native_game() {
     moly_game::configure_browser_game(&mut app, seed);
     clean_view::install(&mut app).unwrap_or_else(|message| fail_loud(&message));
     install_link(&mut app);
-    // `dev.check_systems = "1"` (`MOLY_CHECK_SYSTEMS=1`) reports every system
+    // `dev.check_systems = true` (`MOLY_CHECK_SYSTEMS=1`) reports every system
     // parameter conflict and exits instead of starting the game.
-    if moly_config::text(&moly_config::keys::DEV_CHECK_SYSTEMS).as_deref() == Some("1") {
+    let check_systems = moly_config::global()
+        .flag(&moly_config::keys::DEV_CHECK_SYSTEMS)
+        .unwrap_or_else(|error| fail_loud(&error.to_string()));
+    if check_systems == Some(true) {
         let (checked, rejected) = moly_game::system_access::conflicts(&mut app);
         for line in &rejected {
             eprintln!("[system-access] {line}");

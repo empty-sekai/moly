@@ -109,7 +109,7 @@
 [dev]
 
 # window = false # Starts the developer window instead of the game.
-# check_systems = "" # `1` reports every system parameter conflict and exits instead of starting the game.
+# check_systems = false # Reports every system parameter conflict and exits instead of starting the game.
 # portraits_out = "portraits" # Exports character portraits into this directory, with its own settings file there, instead of starting normally.
 # portrait_unit = "" # Limits the portrait export to this source unit id.
 # action_button_autowalk_secs = "" # A window (`<until>` or `<from>:<until>` seconds) in which the player is walked to each character and fixture and the action button is tapped; unset: the autowalk is off.
@@ -203,7 +203,7 @@
 # menu_mock_visiting = "" # The menu's mock visiting state (true/1 or false/0); unset: false.
 # music_mock_owned_records = "" # The music records the mock user owns, comma-separated record ids obtained at the server clock; an id that is not an integer, or named twice, stops the start with a panic. Unset: the user owns no record.
 # notice_collect_autoplay = "" # How many scripted NoticeCollectItem calls the collect notice sends two seconds after its cells are ready (a non-number sends all); unset: none.
-# npc_entry_probe = "" # A ;-separated script of gate and cut-scene entry steps (SECONDS:OP[:UNIT[:ARG]]) driven in developer builds, one log line per step. Unset: no steps run.
+# npc_entry_probe = "" # A `;`-separated script of gate and cut-scene entry steps (`SECONDS:OP[:UNIT[:ARG]]`) driven in developer builds, one log line per step. Unset: no steps run.
 # npc_harness_dir = "harness" # The acceptance harness directory: cases are read from `<dir>/in/<name>.json` and results written to `<dir>/out/<name>.json`. The harness drivers stop with a panic naming the key when it is unset.
 # npc_hfsm_scope = "" # The units whose NPC machine the controller drives (unit ids separated by commas or spaces, or `all`). Unset: the controller has no scope; on a jp source of version 7 or later it enables itself for every unit.
 # npc_hfsm_trace = "" # Writes the NPC machine's per-decision, per-transition and per-recovery log lines; `1`, `true`, `yes` or `on` switch them on. Unset or any other value: only the constructor and report lines.
