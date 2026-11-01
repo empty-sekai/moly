@@ -30,6 +30,12 @@ pub const CONTROL_PANEL: &str = "control_panel";
 pub const SETTINGS_PANEL: &str = "settings_panel";
 /// The content library.
 pub const CONTENT_LIBRARY: &str = "content_library";
+/// The home site's performance (its expansion cut-scene and the steps around
+/// it) while it runs; it holds [`InputChannel::Scene`].
+pub const HOME_SITE_PERFORM: &str = "home_site_perform";
+/// A cut-scene with a cast, from its start to its caller's return; it holds
+/// [`InputChannel::Scene`].
+pub const CUT_SCENE: &str = "cut_scene";
 /// Input that the embedding page or a library host command captured for its
 /// own surfaces.
 pub const HOST_INPUT: &str = "host_input";

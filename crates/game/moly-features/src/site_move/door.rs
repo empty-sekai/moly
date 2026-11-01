@@ -1082,7 +1082,7 @@ impl DoorMove {
                 info!(
                     "[site-move] HomeSiteController.OnFinishEnterAsync: SetupScreenLayerMysekaiHome"
                 );
-                world.write_message(crate::cutscene::HomeScreenStartAnimation {
+                world.write_message(crate::cut_scene::HomeScreenStartAnimation {
                     caller: "a door arrival at home",
                 });
             }

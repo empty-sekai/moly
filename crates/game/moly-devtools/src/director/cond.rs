@@ -27,7 +27,7 @@ pub fn npc(world: &mut World, unit: u32) -> Result<Entity, String> {
         .query_filtered::<(Entity, &CharacterUnitId), (
             With<ObjectiveMind>,
             Without<PlayerControlled>,
-            Without<crate::cutscene::CutSceneAvatar>,
+            Without<moly_features::cut_scene::CutSceneAvatar>,
         )>()
         .iter(world)
         .find(|(_, id)| id.0 == unit)

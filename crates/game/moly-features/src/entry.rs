@@ -674,7 +674,7 @@ fn finish_enter(world: &mut World, seq: &mut EntrySequence, source_t: Option<f32
     // HomeSiteController.OnFinishEnterAsync: home HUD, then camera Normal.
     seq.hud_open = true;
     step(seq, "OnFinishEnterAsync: ScreenLayerMysekaiHome", source_t);
-    world.write_message(crate::cutscene::HomeScreenStartAnimation {
+    world.write_message(crate::cut_scene::HomeScreenStartAnimation {
         caller: "the entry's home setup",
     });
     let house_entry = world.resource::<FieldCameraState>().0 == CameraStateType::HouseEntry;

@@ -79,7 +79,7 @@ struct VoiceState {
 /// downloaded (a package of the stream table), and the cast's characters by
 /// unit (a voice track is named by its character's unit).
 pub(super) struct ScreenCast {
-    pub(super) caller: &'static str,
+    pub(super) caller: String,
     pub(super) voice_bank: Option<String>,
     pub(super) members: Vec<(u32, Entity)>,
 }
@@ -245,7 +245,7 @@ pub(super) fn frame(world: &mut World, screen: &mut ScreenTracks, t: f64, cast: 
                         {
                             Some(found) => {
                                 info!("[cutscene-screen] t={t:.4} BGMBehaviour.OnBehaviourPlay {bounds}: the track's clip [{:.4}, {:.4}) holds the time: PlayBGM({})", found.start, found.end, found.value);
-                                crate::audio::cutscene::play_bgm(world, &found.value, &found.bundle, cast.caller);
+                                crate::audio::cutscene::play_bgm(world, &found.value, &found.bundle, &cast.caller);
                             }
                             None => info!("[cutscene-screen] t={t:.4} BGMBehaviour.OnBehaviourPlay {bounds}: no clip of the track has start < {time:.4} < end: nothing plays"),
                         }

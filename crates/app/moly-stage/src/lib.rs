@@ -223,6 +223,6 @@ pub fn app(
     app.add_plugins(ui_particle::UiParticlePlugin);
     common_dialog::install(&mut app);
     // Door transitions can publish this lifecycle notification; stage has no home menu.
-    app.add_message::<cutscene::HomeScreenStartAnimation>();
+    app.add_message::<moly_features::cut_scene::HomeScreenStartAnimation>();
     app
 }

@@ -94,7 +94,7 @@ pub(super) fn characters(world: &mut World) -> Value {
         Option<&NpcActions>,
         &ObjectiveMind,
         Has<crate::npc::residency::Away>,
-    ), (Without<PlayerControlled>, Without<crate::cutscene::CutSceneAvatar>)>();
+    ), (Without<PlayerControlled>, Without<moly_features::cut_scene::CutSceneAvatar>)>();
     let world: &World = world;
     let mut characters: Vec<(u32, Entity, Value)> = roster
         .iter(world)

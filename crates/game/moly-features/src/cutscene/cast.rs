@@ -1,6 +1,7 @@
-//! A cut-scene played with a cast at a fixture (`CutSceneExecutor.PlayAsync`
-//! with character unit ids and the fixture's view transform): the gate's
-//! invite and go-home cut-scenes.
+//! A cut-scene played with a cast at a start object (`CutSceneExecutor.PlayAsync`
+//! with character unit ids and the object's view transform), for any caller
+//! of [`crate::cut_scene::start`]: the gate's invite and go-home cut-scenes,
+//! the birthday party's and the tutorial's among them.
 //!
 //! `CutScenePresenter.Setup` binds each unit: with `useAlreadyExistCharacter`
 //! a present NPC is taken over (`TryCancelCurrentObjective`, then
@@ -67,49 +68,7 @@ use crate::fixture_activity_timeline::{
 };
 use crate::npc::{CharacterUnitId, MotionClips, MotionPhase};
 
-pub use crate::fixture_activity_state::CutSceneCastLease;
-
-pub use crate::markers::CutSceneAvatar;
-
-/// Who called `CutSceneExecutor.PlayAsync` with a cast.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CastCaller {
-    /// `ScreenLayerMysekaiGateInvitationPresenter.PlayInviteCutSceneAsync`.
-    Invite,
-    /// `MysekaiGateUtility.TryShowGoHomeCutSceneAsync`.
-    GoHome,
-    /// `BirthdayPartyPresenter.PlayCutSceneAsync` (see `super::birthday`).
-    Birthday,
-    /// The feature tutorial processor owns the chapter callbacks.
-    Tutorial,
-}
-
-impl CastCaller {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Invite => "PlayInviteCutSceneAsync",
-            Self::GoHome => "TryShowGoHomeCutSceneAsync",
-            Self::Birthday => "BirthdayPartyPresenter.PlayCutSceneAsync",
-            Self::Tutorial => "MysekaiTutorialProcessor.PlayTutorialCutSceneAsync",
-        }
-    }
-}
-
-/// `CutSceneExecutor.PlayAsync(characterUnitIds, cutSceneId, startTransform,
-/// useAlreadyExistCharacter, camera, hidePlayer, showUI, ...)`.
-#[derive(Clone, Debug)]
-pub struct CastPlay {
-    pub caller: CastCaller,
-    pub units: Vec<u32>,
-    pub cut_scene_id: i64,
-    /// The master row's `timelineAssetbundleName`.
-    pub timeline: String,
-    /// The start transform's object (the placed gate).
-    pub start: Entity,
-    pub use_already_exist_character: bool,
-    pub hide_player: bool,
-    pub show_ui: bool,
-}
+use crate::cut_scene::{CutSceneAvatar, CutSceneCastLease, CutSceneReport, CutSceneRequest};
 
 struct Member {
     unit: u32,
@@ -135,7 +94,7 @@ struct ViewFields {
 
 /// A cast cut-scene from its load to the caller's return.
 pub struct Cast {
-    pub play: CastPlay,
+    pub play: CutSceneRequest,
     registry: Option<Handle<JsonAsset>>,
     members: Vec<Member>,
     view: Option<ViewFields>,
@@ -165,7 +124,7 @@ pub struct Cast {
 }
 
 impl Cast {
-    pub fn new(play: CastPlay) -> Self {
+    pub fn new(play: CutSceneRequest) -> Self {
         Self {
             play,
             registry: None,
@@ -207,6 +166,16 @@ impl Cast {
 
     pub fn start(&self) -> Entity {
         self.play.start
+    }
+
+    /// What the caller's callbacks read about this play.
+    pub fn report(&self) -> CutSceneReport {
+        CutSceneReport {
+            request: self.play.clone(),
+            members: self.members(),
+            avatars: self.avatars(),
+            outcome: self.outcome.clone(),
+        }
     }
 
     /// Every member's character by unit, taken-over NPCs included (the
@@ -573,7 +542,7 @@ pub(super) fn prepare(
             // and does not take it over, so its AI starts as any NPC's does.
             // The host creates it here, while the package loads, beside the
             // roster the callback then disposes (see `super::birthday`).
-            if cast.play.caller == CastCaller::Birthday {
+            if cast.play.caller.creates_npcs {
                 let npc = crate::npc::create_npc_avatar_for_multi(world, unit)
                     .map_err(|reason| format!("CreateBirthdayCharacter(unit {unit}): {reason}"))?;
                 info!("[cutscene-cast] Setup: unit {unit}: CreateBirthdayCharacter: AvatarUtility.CreateAndSetupNPCAvatarView + AvatarFactory.CreateNPCAvatarForMulti(unit, view, 1): new NPC {npc:?} (hidden until the director's first frame), not taken over");
@@ -587,7 +556,7 @@ pub(super) fn prepare(
                 continue;
             }
             let present = present_npc(world, unit);
-            let takes_over = cast.play.use_already_exist_character;
+            let takes_over = cast.play.take_over_present_npcs;
             let (entity, taken_over) = match (takes_over, present) {
                 (true, Some(npc)) => {
                     let cancelled = crate::npc::gate_entries::take_over_for_cut_scene(world, npc);
@@ -595,7 +564,7 @@ pub(super) fn prepare(
                     (npc, true)
                 }
                 (_, present) => {
-                    let use_existing = cast.play.use_already_exist_character;
+                    let use_existing = cast.play.take_over_present_npcs;
                     let clips = motion_clips(&registry, unit)
                         .ok_or_else(|| format!("unit {unit} is not in the character registry"))?;
                     let entity = world
@@ -1275,13 +1244,7 @@ pub(super) fn after_dispose(world: &mut World, cast: &mut Cast, definition: &Tim
         }
     }
     // The caller's `onEndFadeOutCallback`.
-    match cast.play.caller {
-        CastCaller::Birthday => super::birthday::end_fade_out_callback(world, cast),
-        CastCaller::Tutorial => crate::tutorial::end_fade_out_callback(world, cast),
-        CastCaller::Invite | CastCaller::GoHome => {
-            crate::gate_flow::cut_scene_end_callback(world, cast)
-        }
-    }
+    (cast.play.caller.on_ended)(world, &cast.report());
     let mut shown: Vec<Entity> = Vec::new();
     for (entity, prior) in cast.hidden_npcs.drain(..) {
         if world.get_entity(entity).is_err() {
@@ -1348,11 +1311,3 @@ pub(super) fn release_refused(world: &mut World, cast: &mut Cast) {
     }
 }
 
-/// `DisposeNPC` of a cut-scene avatar.
-pub fn dispose_avatar(world: &mut World, entity: Entity) -> bool {
-    if world.get::<CutSceneAvatar>(entity).is_none() {
-        return false;
-    }
-    world.despawn(entity);
-    true
-}

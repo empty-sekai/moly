@@ -85,7 +85,8 @@ use serde_json::Value;
 
 use std::collections::HashMap;
 
-use super::{Cast, CastCaller, CastPlay};
+use crate::cut_scene::{CutSceneCaller, CutSceneReport, CutSceneRequest};
+use std::borrow::Cow;
 use crate::common_dialog::Buttons;
 use crate::fixture_activity_state::FixtureActivityIdentity;
 use crate::ui_layers::DialogId;
@@ -965,17 +966,17 @@ fn begin_party(world: &mut World, confirm: BirthdayConfirm) {
         world.remove_resource::<crate::audio_inputs::BirthdayVoice>();
         return;
     };
-    let play = CastPlay {
-        caller: CastCaller::Birthday,
+    let play = CutSceneRequest {
+        caller: caller(),
         units: vec![party.unit],
         cut_scene_id,
         timeline,
         start: fixture,
-        use_already_exist_character: true,
+        take_over_present_npcs: true,
         hide_player: false,
         show_ui: true,
     };
-    match super::play_async(world, play) {
+    match crate::cut_scene::start(world, play) {
         Ok(()) => {
             world.insert_resource(BirthdayPresenter {
                 party,
@@ -991,13 +992,30 @@ fn begin_party(world: &mut World, confirm: BirthdayConfirm) {
     }
 }
 
+/// The birthday party as a cut-scene caller
+/// (`BirthdayPartyPresenter.PlayCutSceneAsync`): its voice bank, the
+/// cut-scene's BGM kept for the party, and the party's character created as
+/// a new NPC.
+fn caller() -> CutSceneCaller {
+    CutSceneCaller {
+        name: Cow::Borrowed("BirthdayPartyPresenter.PlayCutSceneAsync"),
+        voice_bank: Some(Cow::Borrowed("mysekai/talk/birthday/voice")),
+        layer_fades: true,
+        restores_bgm: false,
+        creates_npcs: true,
+        on_started: start_fade_in_callback,
+        on_ended: end_fade_out_callback,
+        on_returned: cut_scene_returned,
+    }
+}
+
 /// `OnStartFadeInCallBack`, at the start of `SetupInternal`.
-pub(super) fn start_fade_in_callback(world: &mut World, cast: &Cast) {
-    info!("[birthday] OnStartFadeInCallBack: DownloadVoiceAsync (bundle mysekai/talk/birthday/voice/{}: the voice track plays it from the root's stream table)", cast.play.timeline);
+fn start_fade_in_callback(world: &mut World, report: &CutSceneReport) {
+    info!("[birthday] OnStartFadeInCallBack: DownloadVoiceAsync (bundle mysekai/talk/birthday/voice/{}: the voice track plays it from the root's stream table)", report.request.timeline);
     // DestroyCharacters runs before CreateBirthdayCharacter, so it disposes
     // every NPC present then. The host created the party's character while
     // the package loaded (see `super::cast`), so that one is kept.
-    let members = cast.members();
+    let members = &report.members;
     let caller = "BirthdayPartyPresenter.DestroyCharacters";
     let mut disposed = Vec::new();
     for (unit, entity) in crate::npc::dispose::npc_list(world) {
@@ -1012,14 +1030,14 @@ pub(super) fn start_fade_in_callback(world: &mut World, cast: &Cast) {
     // DisposeNPC takes a unit off the roster; the party's character keeps
     // its own registration.
     if let Some(mut registry) = world.get_resource_mut::<crate::npc::Registry>() {
-        for (unit, _) in &members {
+        for (unit, _) in members {
             if !registry.character_unit_ids.contains(unit) {
                 registry.character_unit_ids.push(*unit);
             }
         }
         registry.character_unit_ids.sort_unstable();
     }
-    info!("[birthday] DestroyCharacters: every NPC warps away and is destroyed: units {disposed:?}; CreateBirthdayCharacter(unit {:?}): the new NPC {members:?}, whose AI runs as any NPC's", cast.play.units);
+    info!("[birthday] DestroyCharacters: every NPC warps away and is destroyed: units {disposed:?}; CreateBirthdayCharacter(unit {:?}): the new NPC {members:?}, whose AI runs as any NPC's", report.request.units);
 }
 
 /// `OnEndFadeOutCallback`, after the view is disposed.
@@ -1033,13 +1051,13 @@ pub(super) fn start_fade_in_callback(world: &mut World, cast: &Cast) {
 /// yaw `90 + o` degrees and distance `len`, turned 180 degrees; the player
 /// at yaw 180 degrees and distance 0.5, facing the fixture. They are placed
 /// through the fixture's pose as the view's nodes are.
-pub(super) fn end_fade_out_callback(world: &mut World, cast: &Cast) {
+fn end_fade_out_callback(world: &mut World, report: &CutSceneReport) {
     let Some(presenter) = world.get_resource::<BirthdayPresenter>() else {
         error!("[birthday] OnEndFadeOutCallback: no birthday presenter");
         return;
     };
     let (fixture, unit) = (presenter.fixture, presenter.party.unit);
-    let Some((_, character)) = cast.members().into_iter().find(|(u, _)| *u == unit) else {
+    let Some((_, character)) = report.members.iter().copied().find(|(u, _)| *u == unit) else {
         error!("[birthday] OnEndFadeOutCallback: FindNPC({unit}) found no character");
         return;
     };
@@ -1093,18 +1111,19 @@ pub(super) fn put_and_look_player_beside_fixture(world: &mut World, fixture: Ent
 
 /// `PlayCutSceneAsync` returned: `ExecuteAsync` goes on with the party (see
 /// [`super::birthday_party`]).
-pub(super) fn cut_scene_returned(world: &mut World, cast: &Cast) {
+fn cut_scene_returned(world: &mut World, report: &CutSceneReport) {
     let presenter = world.remove_resource::<BirthdayPresenter>();
-    let outcome = cast.outcome.clone().unwrap_or(Ok(()));
+    let outcome = report.outcome.clone().unwrap_or(Ok(()));
     info!(
         "[birthday] PlayCutSceneAsync returned {outcome:?} (party {:?})",
         presenter.as_ref().map(|presenter| presenter.party.id)
     );
     match (outcome, presenter) {
         (Ok(()), Some(presenter)) => {
-            let character = cast
-                .members()
-                .into_iter()
+            let character = report
+                .members
+                .iter()
+                .copied()
                 .find(|(unit, _)| *unit == presenter.party.unit)
                 .map(|(_, entity)| entity);
             info!("[birthday] the party's character: {character:?}");

@@ -94,7 +94,7 @@ use moly_assets::json::JsonAsset;
 use moly_law::objective::appearance::EngineRand;
 use serde_json::Value;
 
-use crate::cutscene::{Cast, CastCaller, CastPlay};
+use crate::cut_scene::{CutSceneCaller, CutSceneReport, CutSceneRequest};
 use crate::fixture_activity_provider::FixtureActivityProvider;
 use crate::fixture_activity_state::{FixtureActivityIdentity, FixtureActivityOwner};
 use crate::fixture_activity_timeline::{
@@ -669,8 +669,15 @@ fn ready(world: &mut World) -> Result<Entity, &'static str> {
     {
         return Err("the visitors are being assembled");
     }
-    if world.contains_resource::<crate::cutscene::HomePerform>()
-        || world.contains_resource::<crate::game_state::UiHold>()
+    let home_site_perform = world
+        .get_resource::<crate::input_claims::InputClaims>()
+        .is_some_and(|claims| {
+            claims.holds_channel(
+                crate::input_claims::HOME_SITE_PERFORM,
+                crate::input_claims::InputChannel::Scene,
+            )
+        });
+    if home_site_perform || world.contains_resource::<crate::game_state::UiHold>()
     {
         return Err("another performance holds the field");
     }
@@ -1201,17 +1208,17 @@ fn reserve_process(
         "[gate] PlayInviteCutSceneAsync(unit {unit}): master cut-scene {id} {timeline}; NPCs present {:?}; the gate fixture {gate:?}",
         present.iter().map(|(unit, _)| *unit).collect::<Vec<_>>()
     );
-    let play = CastPlay {
-        caller: CastCaller::Invite,
+    let play = CutSceneRequest {
+        caller: invite_caller(),
         units: vec![unit],
         cut_scene_id: id,
         timeline,
         start: gate,
-        use_already_exist_character: false,
+        take_over_present_npcs: false,
         hide_player: true,
         show_ui: true,
     };
-    match crate::cutscene::play_async(world, play) {
+    match crate::cut_scene::start(world, play) {
         Ok(()) => Stage::InviteCutScene,
         Err(reason) => {
             error!("[gate] PlayInviteCutSceneAsync: {reason}");
@@ -1337,17 +1344,17 @@ fn execute_change_gate_process(
     };
     info!("[gate] TryShowGoHomeCutSceneAsync: leave cut-scene {cut_scene} {timeline}; DestroySpawnedNetworkNPCObject (multiplayer: nothing here)");
     dispose_npc_all(world, "TryShowGoHomeCutSceneAsync");
-    let play = CastPlay {
-        caller: CastCaller::GoHome,
+    let play = CutSceneRequest {
+        caller: go_home_caller(),
         units: vec![unit],
         cut_scene_id: cut_scene,
         timeline,
         start: gate,
-        use_already_exist_character: false,
+        take_over_present_npcs: false,
         hide_player: true,
         show_ui: true,
     };
-    match crate::cutscene::play_async(world, play) {
+    match crate::cut_scene::start(world, play) {
         Ok(()) => Stage::GoHome {
             gate: id,
             skin,
@@ -2123,60 +2130,84 @@ fn step_down(visitor: &mut Visitor, request: &mut StartTimeline, reason: &str) -
     true
 }
 
-/// The cut-scene's start callback (`onStartFadeIn`), at `SetupInternal`.
-pub fn cut_scene_started(world: &mut World, cast: &Cast) {
-    match cast.play.caller {
-        CastCaller::GoHome => {
-            // OnStartCutSceneAsync(targetCharacterId): the NPCs of other
-            // units (none remain after DisposeNPCAll).
-            let target = cast.play.units.first().copied().unwrap_or(0);
-            let others = crate::npc::gate_entries::on_start_cut_scene(world, target);
-            info!(
-                "[gate] OnStartCutSceneAsync(unit {target}): HideAndCancelObjective on {others:?}"
-            );
-        }
-        CastCaller::Invite => {
-            info!("[gate] PlayInviteCutSceneAsync: no start callback");
-        }
-        // These callers own separate callbacks in cutscene.rs. Return here
-        // as well so this gate entry cannot publish duplicate side effects.
-        CastCaller::Birthday | CastCaller::Tutorial => return,
+/// The gate's invite cut-scene as a caller
+/// (`ScreenLayerMysekaiGateInvitationPresenter.PlayInviteCutSceneAsync`).
+fn invite_caller() -> CutSceneCaller {
+    CutSceneCaller {
+        name: "PlayInviteCutSceneAsync".into(),
+        voice_bank: None,
+        layer_fades: true,
+        restores_bgm: true,
+        creates_npcs: false,
+        on_started: invite_started,
+        on_ended: invite_ended,
+        on_returned: invite_returned,
     }
+}
+
+/// The gate's go-home cut-scene as a caller
+/// (`MysekaiGateUtility.TryShowGoHomeCutSceneAsync`).
+fn go_home_caller() -> CutSceneCaller {
+    CutSceneCaller {
+        name: "TryShowGoHomeCutSceneAsync".into(),
+        voice_bank: None,
+        layer_fades: true,
+        restores_bgm: true,
+        creates_npcs: false,
+        on_started: go_home_started,
+        on_ended: go_home_ended,
+        on_returned: go_home_returned,
+    }
+}
+
+/// The invite cut-scene's start (`onStartFadeIn`, at `SetupInternal`): it
+/// has no start callback.
+fn invite_started(world: &mut World, _report: &CutSceneReport) {
+    info!("[gate] PlayInviteCutSceneAsync: no start callback");
+    log_joystick_before_cut_scene(world);
+}
+
+/// The go-home cut-scene's start (`onStartFadeIn`, at `SetupInternal`).
+fn go_home_started(world: &mut World, report: &CutSceneReport) {
+    // OnStartCutSceneAsync(targetCharacterId): the NPCs of other
+    // units (none remain after DisposeNPCAll).
+    let target = report.request.units.first().copied().unwrap_or(0);
+    let others = crate::npc::gate_entries::on_start_cut_scene(world, target);
+    info!("[gate] OnStartCutSceneAsync(unit {target}): HideAndCancelObjective on {others:?}");
+    log_joystick_before_cut_scene(world);
+}
+
+fn log_joystick_before_cut_scene(world: &World) {
     info!(
         "[gate] joystick enabled before the cut-scene state: {:?}",
         joystick(world)
     );
 }
 
-/// The cut-scene's end callback, inside `EndAsync` after the view is disposed.
-pub fn cut_scene_end_callback(world: &mut World, cast: &Cast) {
-    match cast.play.caller {
-        CastCaller::Invite => {
-            let mut units = Vec::new();
-            for (unit, avatar) in cast.avatars() {
-                let disposed = crate::cutscene::dispose_avatar(world, avatar);
-                info!("[gate] OnEndCutScene: DisposeNPC(the cut-scene avatar of unit {unit}): {disposed}; Yield");
-                units.push(unit);
-            }
-            let frame = frame(world);
-            if let Some(mut flow) = world.get_resource_mut::<GateFlow>() {
-                flow.create_after_yield = Some((units, frame));
-            }
-        }
-        CastCaller::GoHome => {
-            for (_, avatar) in cast.avatars() {
-                crate::cutscene::dispose_avatar(world, avatar);
-            }
-            dispose_npc_all(world, "OnEndGoHomeCutScene");
-        }
-        // These callers own separate callbacks in cutscene.rs. Return here
-        // as well so this gate entry cannot publish duplicate side effects.
-        CastCaller::Birthday | CastCaller::Tutorial => (),
+/// The invite cut-scene's end callback, inside `EndAsync` after the view is
+/// disposed.
+fn invite_ended(world: &mut World, report: &CutSceneReport) {
+    let mut units = Vec::new();
+    for &(unit, avatar) in &report.avatars {
+        let disposed = crate::cut_scene::dispose_avatar(world, avatar);
+        info!("[gate] OnEndCutScene: DisposeNPC(the cut-scene avatar of unit {unit}): {disposed}; Yield");
+        units.push(unit);
+    }
+    let frame = frame(world);
+    if let Some(mut flow) = world.get_resource_mut::<GateFlow>() {
+        flow.create_after_yield = Some((units, frame));
     }
 }
 
-/// `CutSceneExecutor.PlayAsync` returned (after the presenter's fade out,
-/// or at once when its load was refused).
+/// The go-home cut-scene's end callback, inside `EndAsync` after the view is
+/// disposed.
+fn go_home_ended(world: &mut World, report: &CutSceneReport) {
+    for &(_, avatar) in &report.avatars {
+        crate::cut_scene::dispose_avatar(world, avatar);
+    }
+    dispose_npc_all(world, "OnEndGoHomeCutScene");
+}
+
 /// Each frame of this flow's cut-scene: the cast avatars' parent, whether
 /// it stays put, and which avatars carry a cloth runtime.
 fn watch_cast_space(world: &mut World) {
@@ -2185,7 +2216,7 @@ fn watch_cast_space(world: &mut World) {
             &CharacterUnitId,
             Option<&ChildOf>,
             Has<crate::cloth_runtime::ClothRuntime>,
-        ), With<crate::cutscene::CutSceneAvatar>>()
+        ), With<crate::cut_scene::CutSceneAvatar>>()
         .iter(world)
         .map(|(unit, parent, cloth)| (unit.0, parent.map(ChildOf::parent), cloth))
         .collect();
@@ -2244,7 +2275,38 @@ fn watch_cast_space(world: &mut World) {
     world.resource_mut::<GateFlow>().cast_space = Some(space);
 }
 
-pub fn cut_scene_returned(world: &mut World, cast: Cast) {
+/// The invite cut-scene returned: the flow goes on with the white-in.
+fn invite_returned(world: &mut World, report: &CutSceneReport) {
+    let Some(stage) = cut_scene_returned(world, report) else {
+        return;
+    };
+    let next = match stage {
+        Stage::InviteCutScene => white_in(world),
+        other => other,
+    };
+    world.resource_mut::<GateFlow>().stage = next;
+}
+
+/// The go-home cut-scene returned: the flow changes the gate.
+fn go_home_returned(world: &mut World, report: &CutSceneReport) {
+    let Some(stage) = cut_scene_returned(world, report) else {
+        return;
+    };
+    let next = match stage {
+        Stage::GoHome { gate, skin, change } => {
+            info!("[gate] TryShowGoHomeCutSceneAsync: true; ExecuteChangeGateProcessAsync: ChangeUIScreen(home) (UI)");
+            change_gate(world, gate, skin, change)
+        }
+        other => other,
+    };
+    world.resource_mut::<GateFlow>().stage = next;
+}
+
+/// `CutSceneExecutor.PlayAsync` returned (after the presenter's fade out,
+/// or at once when its load was refused): the avatars are disposed of and
+/// the flow's stage is taken for the caller to go on from; none without a
+/// flow.
+fn cut_scene_returned(world: &mut World, report: &CutSceneReport) -> Option<Stage> {
     if let Some(space) = world
         .get_resource_mut::<GateFlow>()
         .and_then(|mut flow| flow.cast_space.take())
@@ -2254,35 +2316,24 @@ pub fn cut_scene_returned(world: &mut World, cast: Cast) {
             space.frames, space.root, space.drift_translation, space.drift_degrees, space.cloth
         );
     }
-    let outcome = cast.outcome.clone().unwrap_or(Ok(()));
+    let outcome = report.outcome.clone().unwrap_or(Ok(()));
 
-    for (_, avatar) in cast.avatars() {
-        crate::cutscene::dispose_avatar(world, avatar);
+    for &(_, avatar) in &report.avatars {
+        crate::cut_scene::dispose_avatar(world, avatar);
     }
     info!(
         "[gate] {}: CutSceneExecutor.PlayAsync returned {outcome:?} (joystick enabled {:?})",
-        cast.play.caller.name(),
+        report.request.caller.name,
         joystick(world)
     );
-    let Some(mut flow) = world.get_resource_mut::<GateFlow>() else {
-        return;
-    };
-    let stage = std::mem::replace(&mut flow.stage, Stage::Idle);
-    let next = match (cast.play.caller, stage) {
-        (CastCaller::Invite, Stage::InviteCutScene) => white_in(world),
-        (CastCaller::GoHome, Stage::GoHome { gate, skin, change }) => {
-            info!("[gate] TryShowGoHomeCutSceneAsync: true; ExecuteChangeGateProcessAsync: ChangeUIScreen(home) (UI)");
-            change_gate(world, gate, skin, change)
-        }
-        (_, other) => other,
-    };
-    world.resource_mut::<GateFlow>().stage = next;
+    let mut flow = world.get_resource_mut::<GateFlow>()?;
+    Some(std::mem::replace(&mut flow.stage, Stage::Idle))
 }
 
 pub fn install(app: &mut App) {
     app.init_resource::<GateModelPackages>()
         .add_systems(Startup, start)
-        .add_systems(Update, advance.after(crate::cutscene::advance))
+        .add_systems(Update, advance.after(crate::cut_scene::CutSceneSystems))
         .add_systems(Update, read_gate_answer.after(advance));
 }
 

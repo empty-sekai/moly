@@ -896,16 +896,16 @@ fn step(world: &mut World, run: &mut Run, op: &Op) -> Result<bool, String> {
                 .get(&20)
                 .ok_or("tutorial cut-scene 20 is absent")?
                 .clone();
-            let root = crate::cutscene::scene_root(world);
-            crate::cutscene::play_async(
+            let root = crate::cut_scene::scene_root(world);
+            crate::cut_scene::start(
                 world,
-                crate::cutscene::CastPlay {
-                    caller: crate::cutscene::CastCaller::Tutorial,
+                crate::cut_scene::CutSceneRequest {
+                    caller: cut_scene_caller(),
                     units: vec![21],
                     cut_scene_id: 20,
                     timeline,
                     start: root,
-                    use_already_exist_character: true,
+                    take_over_present_npcs: true,
                     hide_player: false,
                     show_ui: true,
                 },
@@ -950,10 +950,26 @@ fn step(world: &mut World, run: &mut Run, op: &Op) -> Result<bool, String> {
     }
 }
 
-pub(crate) fn start_fade_in_callback(world: &mut World, _cast: &crate::cutscene::Cast) {
+/// The tutorial as a cut-scene caller
+/// (`MysekaiTutorialProcessor.PlayTutorialCutSceneAsync`): its voice bank,
+/// and the cut-scene screen faded at once.
+fn cut_scene_caller() -> crate::cut_scene::CutSceneCaller {
+    crate::cut_scene::CutSceneCaller {
+        name: "MysekaiTutorialProcessor.PlayTutorialCutSceneAsync".into(),
+        voice_bank: Some("mysekai/talk/tutorial/voice".into()),
+        layer_fades: false,
+        restores_bgm: true,
+        creates_npcs: false,
+        on_started: start_fade_in_callback,
+        on_ended: end_fade_out_callback,
+        on_returned: cut_scene_returned,
+    }
+}
+
+fn start_fade_in_callback(world: &mut World, _report: &crate::cut_scene::CutSceneReport) {
     crate::screen_fade::fade_in(world, 0.0, 1.0, "Tutorial Execute1_1 start fade");
 }
-pub(crate) fn end_fade_out_callback(world: &mut World, _cast: &crate::cutscene::Cast) {
+fn end_fade_out_callback(world: &mut World, _report: &crate::cut_scene::CutSceneReport) {
     let result: Result<(), String> = (|| {
         let data = processor_data(world)?;
         let entity = actor(world, 21)?;
@@ -964,8 +980,8 @@ pub(crate) fn end_fade_out_callback(world: &mut World, _cast: &crate::cutscene::
     }
     world.resource_mut::<Processor>().input_lock_elapsed = Some(0.0);
 }
-pub(crate) fn cut_scene_returned(world: &mut World, cast: &crate::cutscene::Cast) {
-    let outcome = cast
+fn cut_scene_returned(world: &mut World, report: &crate::cut_scene::CutSceneReport) {
+    let outcome = report
         .outcome
         .clone()
         .unwrap_or_else(|| Err("tutorial cut-scene returned without an outcome".into()));
@@ -1096,6 +1112,6 @@ pub fn install(app: &mut App) {
             Update,
             update
                 .after(crate::ui_layers::advance)
-                .after(crate::cutscene::advance),
+                .after(crate::cut_scene::CutSceneSystems),
         );
 }

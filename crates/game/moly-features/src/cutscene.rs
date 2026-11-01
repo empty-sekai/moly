@@ -69,9 +69,10 @@
 //! current site keeps its floor grid until it next loads (the displayed
 //! level is written for that load).
 //!
-//! The same presenter plays the gate's cut-scenes ([`play_async`]): the view
-//! at the gate's transform, a cast bound to the unit tracks, the gate's own
-//! clips, the view's Control clips and the fade colours of the view; see
+//! The same presenter plays cut-scenes with a cast for any caller
+//! ([`crate::cut_scene::start`]): the view at the start object's transform,
+//! a cast bound to the unit tracks, the gate's own clips when the start is a
+//! gate, the view's Control clips and the fade colours of the view; see
 //! `cast`.
 
 use std::collections::{HashMap, HashSet};
@@ -103,9 +104,10 @@ mod cast;
 mod hidden_effects;
 mod screen;
 
-pub use cast::{
-    dispose_avatar, Cast, CastCaller, CastPlay, CutSceneAvatar, CutSceneCastLease,
+use crate::cut_scene::{
+    CutScenePlayer, CutSceneRequest, CutSceneSystems, HomeScreenStartAnimation,
 };
+use crate::input_claims::{Channels, InputChannel, InputClaims, CUT_SCENE, HOME_SITE_PERFORM};
 
 const PACKAGE_PREFIX: &str = "mysekai__cut_scene__";
 /// `PlayableDirector.Play` has no timeout.
@@ -126,13 +128,6 @@ const LOAD_REPORT_REAL: f64 = 30.0;
 /// `EffectBehaviour.OnBehaviourPlay`: a clip time past this float first
 /// fast-forwards the root particle.
 const SIMULATE_AFTER: f32 = 0.1;
-
-/// `ScreenLayerMysekaiHome.OnFinishStartAnimation`: the home screen became
-/// current (the entry's home setup, a door or cannon arrival at home).
-#[derive(Message, Clone, Copy, Debug)]
-pub struct HomeScreenStartAnimation {
-    pub caller: &'static str,
-}
 
 /// A virtual camera of the prefab: its GameObject, world pose (source frame,
 /// relative to the prefab root) and lens.
@@ -328,32 +323,32 @@ enum Stage {
 
 /// `PlayHomeSitePerformAsync` in flight (the home screen's `_isExecuting`).
 #[derive(Resource)]
-pub struct HomePerform {
+struct HomePerform {
     stage: Stage,
 }
 
 /// A cast caller's `CutSceneExecutor.PlayAsync` in flight.
 #[derive(Resource)]
-pub struct CastPerform {
+struct CastPerform {
     stage: Stage,
 }
 
-/// `CutSceneExecutor.PlayAsync` for a cast caller: finds the cut-scene root,
-/// `MysekaiMagicaClothManager.RequestReset` (logged only), then
-/// `FadeAndSetUpAsync` loads the package's view. The caller hears back
-/// through [`crate::gate_flow`] when the presenter's fade out has finished
-/// (or the load was refused).
-pub fn play_async(world: &mut World, play: CastPlay) -> Result<(), String> {
+/// The installed [`CutScenePlayer`]: `CutSceneExecutor.PlayAsync` for a cast
+/// caller. It finds the cut-scene root, `MysekaiMagicaClothManager.RequestReset`
+/// (logged only), then `FadeAndSetUpAsync` loads the package's view. The
+/// caller hears back through its callbacks; the last runs when the
+/// presenter's fade out has finished (or the load was refused).
+fn play(world: &mut World, play: CutSceneRequest) -> Result<(), String> {
     if world.contains_resource::<HomePerform>() || world.contains_resource::<CastPerform>() {
         return Err("another cut-scene is being played".into());
     }
     info!(
         "[cutscene] {}: CutSceneExecutor.PlayAsync(characterUnitIds {:?}, cutSceneId {}, startTransform {:?}, useAlreadyExistCharacter {}, hidePlayer {}, showUI {}): CutSceneRoot found (created at zero with default rotation and scale); MagicaCloth RequestReset (logged only); FadeAndSetUpAsync: bundle mysekai/cut_scene/{}",
-        play.caller.name(),
+        play.caller.name,
         play.units,
         play.cut_scene_id,
         play.start,
-        play.use_already_exist_character,
+        play.take_over_present_npcs,
         play.hide_player,
         play.show_ui,
         play.timeline
@@ -379,6 +374,7 @@ pub fn play_async(world: &mut World, play: CastPlay) -> Result<(), String> {
         reported: 0,
         view_spawned: false,
     };
+    hold_scene(world, CUT_SCENE, true);
     world.insert_resource(CastPerform {
         stage: Stage::Load(Box::new(load)),
     });
@@ -441,6 +437,7 @@ fn play_home_site_perform(world: &mut World, caller: &str) {
     match unlock.filter(|_| need) {
         None => after_cutscene_step(world),
         Some(unlock) => {
+            hold_scene(world, HOME_SITE_PERFORM, true);
             world.insert_resource(HomePerform {
                 stage: Stage::WaitUi {
                     unlock,
@@ -462,16 +459,30 @@ fn after_cutscene_step(world: &mut World) {
 pub fn advance(world: &mut World) {
     if let Some(mut perform) = world.remove_resource::<HomePerform>() {
         let done = step(world, &mut perform.stage);
-        if !done {
+        if done {
+            hold_scene(world, HOME_SITE_PERFORM, false);
+        } else {
             world.insert_resource(perform);
         }
     }
     if let Some(mut perform) = world.remove_resource::<CastPerform>() {
         let done = step(world, &mut perform.stage);
-        if !done {
+        if done {
+            hold_scene(world, CUT_SCENE, false);
+        } else {
             world.insert_resource(perform);
         }
     }
+}
+
+/// Publishes whether `holder` holds the scene ([`InputChannel::Scene`]): from
+/// a performance's start to its end, across the steps that take it out and
+/// put it back.
+fn hold_scene(world: &mut World, holder: &'static str, held: bool) {
+    let channels = Channels::NONE.with(InputChannel::Scene, held);
+    world
+        .resource_mut::<InputClaims>()
+        .publish_channels(holder, channels);
 }
 
 fn step(world: &mut World, slot: &mut Stage) -> bool {
@@ -600,16 +611,14 @@ fn step(world: &mut World, slot: &mut Stage) -> bool {
 fn screen_cast(caller: &Caller, timeline: &str) -> screen::ScreenCast {
     match caller {
         Caller::Cast(cast) => screen::ScreenCast {
-            caller: cast.play.caller.name(),
-            voice_bank: match cast.play.caller {
-                CastCaller::Tutorial => Some(crate::audio::cutscene::bundle_package(&format!("mysekai/talk/tutorial/voice/{timeline}"))),
-                CastCaller::Birthday => Some(crate::audio::cutscene::bundle_package(&format!("mysekai/talk/birthday/voice/{timeline}"))),
-                _ => None,
-            },
+            caller: cast.play.caller.name.to_string(),
+            voice_bank: cast.play.caller.voice_bank.as_ref().map(|bank| {
+                crate::audio::cutscene::bundle_package(&format!("{bank}/{timeline}"))
+            }),
             members: cast.members(),
         },
         _ => screen::ScreenCast {
-            caller: "PlayUnlockSiteLevelCutScene",
+            caller: "PlayUnlockSiteLevelCutScene".to_owned(),
             voice_bank: None,
             members: Vec::new(),
         },
@@ -618,13 +627,7 @@ fn screen_cast(caller: &Caller, timeline: &str) -> screen::ScreenCast {
 
 /// `CutSceneExecutor.PlayAsync` returned to a cast caller.
 fn cast_returned(world: &mut World, cast: cast::Cast) {
-    match cast.play.caller {
-        CastCaller::Birthday => birthday::cut_scene_returned(world, &cast),
-        CastCaller::Tutorial => crate::tutorial::cut_scene_returned(world, &cast),
-        CastCaller::Invite | CastCaller::GoHome => {
-            crate::gate_flow::cut_scene_returned(world, cast)
-        }
-    }
+    (cast.play.caller.on_returned)(world, &cast.report());
 }
 
 #[derive(Resource, Clone, Copy)]
@@ -1842,7 +1845,7 @@ fn presenter_fade_in(world: &mut World, plan: &Plan) {
         }
         _ => [0.0; 4],
     };
-    let duration = match &plan.caller { Caller::Cast(cast) if cast.play.caller == CastCaller::Tutorial => 0.0, _ => LAYER_FADE };
+    let duration = match &plan.caller { Caller::Cast(cast) if !cast.play.caller.layer_fades => 0.0, _ => LAYER_FADE };
     crate::screen_fade::cutscene_fade_in(world, color, duration, "CutScenePresenter.FadeInAsync");
 }
 
@@ -1850,13 +1853,7 @@ fn presenter_fade_in(world: &mut World, plan: &Plan) {
 fn setup_internal(world: &mut World, plan: &mut Plan) -> Play {
     // The caller's `onStartFadeInCallBack`, awaited first in `SetupInternal`.
     if let Caller::Cast(cast) = &plan.caller {
-        match cast.play.caller {
-            CastCaller::Birthday => birthday::start_fade_in_callback(world, cast),
-            CastCaller::Tutorial => crate::tutorial::start_fade_in_callback(world, cast),
-            CastCaller::Invite | CastCaller::GoHome => {
-                crate::gate_flow::cut_scene_started(world, cast)
-            }
-        }
+        (cast.play.caller.on_started)(world, &cast.report());
     }
     // Setup: ChangeState(CutScene) -> CutSceneGameState.OnEnter.
     game_state::enter(world, GameStateType::CutScene, "CutScenePresenter.Setup");
@@ -2543,8 +2540,8 @@ fn end_async(world: &mut World, plan: &mut Plan, play: &Play) {
     if let Caller::Cast(cast) = &mut plan.caller {
         let definition = plan.definition.clone();
         cast::after_dispose(world, cast, &definition);
-        if cast.play.caller == CastCaller::Birthday {
-            info!("[cutscene] EndAsync(restoreBGM false): the cut-scene's BGM plays on; the birthday party hands it back at its close-down");
+        if !cast.play.caller.restores_bgm {
+            info!("[cutscene] EndAsync(restoreBGM false): the cut-scene's BGM plays on; {} hands it back", cast.play.caller.name);
         } else {
             crate::audio::cutscene::release_bgm(
                 world,
@@ -2558,7 +2555,7 @@ fn end_async(world: &mut World, plan: &mut Plan, play: &Play) {
         crate::screen_fade::cutscene_fade_out_color(
             world,
             end,
-            if cast.play.caller == CastCaller::Tutorial { 0.0 } else { LAYER_FADE },
+            if cast.play.caller.layer_fades { LAYER_FADE } else { 0.0 },
             "CutScenePresenter.FadeOutAsync",
         );
         return;
@@ -2573,26 +2570,17 @@ fn end_async(world: &mut World, plan: &mut Plan, play: &Play) {
 pub fn install(app: &mut App) {
     birthday::install(app);
     birthday_party::install(app);
-    app.add_message::<HomeScreenStartAnimation>().add_systems(
-        Update,
-        (
-            home_started,
-            advance.after(crate::fixture_activity_timeline::advance),
-            crate::site::apply_obstacle_level,
-        ),
-    );
-}
-
-/// SceneMysekai.CreateCutSceneRoot creates an unparented GameObject, names it
-/// CutSceneRoot and sets position zero. Its default rotation/scale are kept.
-#[derive(Resource)]
-struct SceneRoot(Entity);
-
-pub fn scene_root(world: &mut World) -> Entity {
-    if let Some(root) = world.get_resource::<SceneRoot>().map(|root|root.0) {
-        if world.get_entity(root).is_ok() { return root; }
-    }
-    let entity = world.spawn((Name::new("CutSceneRoot"), Transform::IDENTITY, GlobalTransform::IDENTITY)).id();
-    world.insert_resource(SceneRoot(entity));
-    entity
+    app.insert_resource(CutScenePlayer { start: play })
+        .init_resource::<InputClaims>()
+        .add_message::<HomeScreenStartAnimation>()
+        .add_systems(
+            Update,
+            (
+                home_started,
+                advance
+                    .in_set(CutSceneSystems)
+                    .after(crate::fixture_activity_timeline::advance),
+                crate::site::apply_obstacle_level,
+            ),
+        );
 }

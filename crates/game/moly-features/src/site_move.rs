@@ -1084,7 +1084,7 @@ impl SiteMove {
         if self.to_category == "housing_home" {
             // SetupScreenLayerMysekaiHome: ChangeUIScreen(MysekaiHome).
             world.write_message(LayerCommand::Change(LayerId::HomeField));
-            world.write_message(crate::cutscene::HomeScreenStartAnimation {
+            world.write_message(crate::cut_scene::HomeScreenStartAnimation {
                 caller: "a cannon arrival at home",
             });
         }
@@ -1101,7 +1101,7 @@ impl SiteMove {
         world.remove_resource::<NestedOuter>();
         world.write_message(LayerCommand::Change(LayerId::HomeField));
         if self.from_category == "housing_home" {
-            world.write_message(crate::cutscene::HomeScreenStartAnimation {
+            world.write_message(crate::cut_scene::HomeScreenStartAnimation {
                 caller: "a refused cannon move",
             });
         }

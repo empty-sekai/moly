@@ -185,7 +185,7 @@ fn npc_ai(world: &mut World) -> Value {
         Has<crate::npc_objective::controller::NpcDisplayOnly>,
     ), (
         Without<crate::player::PlayerControlled>,
-        Without<crate::cutscene::CutSceneAvatar>,
+        Without<moly_features::cut_scene::CutSceneAvatar>,
     )>();
     let mut live: Vec<Value> = units
         .iter(world)
