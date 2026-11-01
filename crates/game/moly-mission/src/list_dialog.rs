@@ -865,4 +865,3 @@ pub fn first_row(
         .position(|sheet| sheet.id == state.current_sheet)
         .unwrap_or(0)
 }
-

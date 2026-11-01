@@ -2033,7 +2033,7 @@ fn character_silhouette(
         if inner.next_probe == 0 {
             inner.next_probe = PROBE_FIRST_FRAME;
         }
-        
+
         match probe_interval() {
             Some(interval) if inner.frames_drawn >= inner.next_probe => {
                 inner.next_probe = inner.frames_drawn + interval;

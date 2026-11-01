@@ -2206,7 +2206,7 @@ fn switch_materials(
                     let tally = &mut state.tally;
                     let (materials_count, entities_count) = match site_material.key.family {
                         SiteFamily::FieldObject => {
-                            
+
                             (&mut tally.fieldobject_materials, &mut tally.fieldobject_entities)
                         }
                         SiteFamily::Ground => (&mut tally.ground_materials, &mut tally.ground_entities),

@@ -1490,7 +1490,7 @@ fn resolve_rug(name: &str, extras: &serde_json::Value, main_tex: Handle<Image>) 
 /// Orders the four unique vertices of the zero-write surface into a planar
 /// convex ring (by planar polar angle about the centroid, counter-clockwise
 /// seen from the normal of the first edge). The ring order is a precondition
-/// of the fragment's "point inside the convex quad" test; non-planar / 
+/// of the fragment's "point inside the convex quad" test; non-planar /
 /// degenerate / non-convex input is refused here by name — a shape the data
 /// should not contain, never silently approximated.
 fn order_clip_quad(points: [Vec3; 4]) -> Result<[Vec3; 4], String> {

@@ -1310,4 +1310,3 @@ pub(super) fn release_refused(world: &mut World, cast: &mut Cast) {
         }
     }
 }
-

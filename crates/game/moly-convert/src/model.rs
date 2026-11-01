@@ -770,7 +770,7 @@ impl<'a> ItemModel<'a> {
         let left = self.convertible_count(ctx);
         let affordable = self.affordable_converts(ctx);
         let by_resources = if limited { left.min(affordable) } else { affordable };
-        
+
         if limited {
             master.once_convert_limit.min(by_resources).max(1)
         } else {

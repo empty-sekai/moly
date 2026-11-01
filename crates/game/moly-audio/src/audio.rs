@@ -1397,7 +1397,7 @@ fn parse_streams(loops: &serde_json::Value, base: &str) -> Streams {
             }
         }
     }
-    
+
 
     Streams(streams.into_iter().map(|(k, (_, v))| (k, v)).collect())
 }
