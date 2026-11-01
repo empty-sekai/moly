@@ -163,6 +163,44 @@ pub struct CharacterKey {
     pub fog: bool,
 }
 
+/// One eye texture pair: the atlas bound to `_MainTex` and the mask bound to
+/// `_EyebrowTex`.
+#[derive(Debug, Clone)]
+pub struct EyeTextures {
+    pub main: Handle<Image>,
+    pub eyebrow: Option<Handle<Image>>,
+}
+
+/// The eye slot's texture pairs. An eye pattern row's `TextureIndex` 0 is the
+/// material's own pair (`default`); N >= 1 is `additional[N - 1]`. An index
+/// with no pair falls back to 0.
+#[derive(Debug, Clone)]
+pub struct EyeTextureSets {
+    pub default: EyeTextures,
+    pub additional: Vec<EyeTextures>,
+    /// The index whose pair the material currently holds.
+    current: i32,
+    /// The last unusable index reported, so a repeated request reports once.
+    last_fallback_reported: i32,
+}
+
+impl EyeTextureSets {
+    fn new(default: EyeTextures, additional: Vec<EyeTextures>) -> Self {
+        Self { default, additional, current: 0, last_fallback_reported: 0 }
+    }
+
+    fn usable(&self, index: i32) -> bool {
+        index == 0 || (index > 0 && index as usize <= self.additional.len())
+    }
+
+    /// Every texture handle the sets hold.
+    pub fn handles(&self) -> impl Iterator<Item = &Handle<Image>> {
+        std::iter::once(&self.default)
+            .chain(self.additional.iter())
+            .flat_map(|set| std::iter::once(&set.main).chain(set.eyebrow.iter()))
+    }
+}
+
 /// 角色 toon 材质资产。按名独立成类，不与站点的 SiteMaterial 混。
 #[derive(Debug, Clone, TypePath, Asset)]
 pub struct CharacterMaterial {
@@ -185,6 +223,44 @@ pub struct CharacterMaterial {
     pub body_mask_tex: Option<Handle<Image>>,
     /// 眉贴图；只有带 `_EyebrowTex` 槽的材质有它。
     pub eyebrow_tex: Option<Handle<Image>>,
+    /// The eye slot's texture pairs; `main_tex` and `eyebrow_tex` hold the
+    /// pair the current eye pattern selects. Other slots have none.
+    pub eye_textures: Option<EyeTextureSets>,
+}
+
+impl CharacterMaterial {
+    /// The view's eye texture change for a pattern row's `TextureIndex`:
+    /// the main texture and eyebrow mask become the selected pair (a pair
+    /// without a mask keeps the material's own mask). Returns whether the
+    /// textures changed.
+    pub fn select_eye_texture(&mut self, requested: i32) -> bool {
+        let Some(sets) = self.eye_textures.as_mut() else {
+            return false;
+        };
+        let index = if sets.usable(requested) {
+            requested
+        } else {
+            if sets.last_fallback_reported != requested {
+                warn!(
+                    "eye texture set {requested} is not available ({} additional sets); using the material's own pair",
+                    sets.additional.len()
+                );
+                sets.last_fallback_reported = requested;
+            }
+            0
+        };
+        if index == sets.current {
+            return false;
+        }
+        sets.current = index;
+        let pair = match index {
+            0 => &sets.default,
+            n => &sets.additional[n as usize - 1],
+        };
+        self.main_tex = pair.main.clone();
+        self.eyebrow_tex = pair.eyebrow.clone().or_else(|| sets.default.eyebrow.clone());
+        true
+    }
 }
 
 impl AsBindGroup for CharacterMaterial {
@@ -600,7 +676,12 @@ fn write_env_buffer(
 struct RigFile {
     textures: Vec<String>,
     slots: HashMap<String, MaterialSlot>,
+    /// The additional eye texture sets as (eye atlas URI, eyebrow mask URI).
+    eye_texture_sets: Vec<(String, Option<String>)>,
 }
+
+/// The material slot that carries the eye atlas.
+const EYE_SLOT: &str = "eye";
 
 /// 解析骨架档案的 JSON 原串。材质槽的形状与站点 sidecar 同构
 /// （浮点表/颜色表/纹理表），但纹理槽是 URI 直指、由顶层表折成下标。
@@ -708,7 +789,29 @@ fn parse_rig(raw: &str, file: &str) -> Result<RigFile, String> {
             },
         );
     }
-    Ok(RigFile { textures, slots })
+    let eye_texture_sets = match value.get("eyeTextureSets") {
+        None => Vec::new(),
+        Some(sets) => sets
+            .as_array()
+            .ok_or_else(|| format!("{file} 的 eyeTextureSets 不是数组"))?
+            .iter()
+            .map(|set| {
+                let eye = set
+                    .get("eye")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| format!("{file} 的 eyeTextureSets 项缺 eye 字符串"))?;
+                let mask = match set.get("eyebrowMask") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(serde_json::Value::String(uri)) => Some(uri.clone()),
+                    Some(_) => {
+                        return Err(format!("{file} 的 eyeTextureSets 项的 eyebrowMask 不是字符串"));
+                    }
+                };
+                Ok((eye.to_string(), mask))
+            })
+            .collect::<Result<_, String>>()?,
+    };
+    Ok(RigFile { textures, slots, eye_texture_sets })
 }
 
 /// 从档案槽建材质资产：标量与门全过律的 `resolve`，纹理按 URI 直装载。
@@ -749,6 +852,22 @@ fn build_material(
     let eyebrow_tex = resolved
         .eyebrow
         .map(|eyebrow| load(eyebrow.tex));
+    let main_handle = load(main_tex);
+    let eye_textures = (slot.name == EYE_SLOT).then(|| {
+        let load_uri = |uri: &str| {
+            moly_assets::residency::load_image(server, AssetPath::from(format!("moly://{uri}")))
+        };
+        EyeTextureSets::new(
+            EyeTextures { main: main_handle.clone(), eyebrow: eyebrow_tex.clone() },
+            rig.eye_texture_sets
+                .iter()
+                .map(|(eye, mask)| EyeTextures {
+                    main: load_uri(eye),
+                    eyebrow: mask.as_deref().map(load_uri),
+                })
+                .collect(),
+        )
+    });
     let params = CharacterParams {
         shader_usage: resolved.character_shader_usage as f32,
         // 眉标量缺席时槽写零：变体已按纹理槽关掉，死支路不消费。
@@ -791,9 +910,10 @@ fn build_material(
         lip_pattern: None,
         lip_pattern_revision: 0,
         eye_pattern: None,
-        main_tex: load(main_tex),
+        main_tex: main_handle,
         body_mask_tex: resolved.body_mask_tex.map(load),
         eyebrow_tex,
+        eye_textures,
     })
 }
 
@@ -823,6 +943,8 @@ fn build_eye_overlay(base: &CharacterMaterial, render_device: &RenderDevice) -> 
         main_tex: base.main_tex.clone(),
         body_mask_tex: base.body_mask_tex.clone(),
         eyebrow_tex: base.eyebrow_tex.clone(),
+        // The overlay copies the slot's textures every frame.
+        eye_textures: None,
     })
 }
 
@@ -1056,7 +1178,8 @@ pub fn plan_textures(plan: &ToonPlan, server: &AssetServer) -> PlanTextures {
     for (_, _, material) in &plan.parts {
         let textures = std::iter::once(&material.main_tex)
             .chain(material.body_mask_tex.iter())
-            .chain(material.eyebrow_tex.iter());
+            .chain(material.eyebrow_tex.iter())
+            .chain(material.eye_textures.iter().flat_map(EyeTextureSets::handles));
         for texture in textures {
             match server.load_state(texture) {
                 LoadState::Failed(err) => return PlanTextures::Failed(format!("{err:?}")),
@@ -1203,17 +1326,27 @@ pub fn sync_eye_overlay(
 ) {
     for toon in &toons {
         for (source, overlay) in &toon.overlays {
-            let Some(params) = materials.get(source).map(|material| material.params) else {
+            let Some((params, main_tex, eyebrow_tex)) = materials.get(source).map(|material| {
+                (material.params, material.main_tex.clone(), material.eyebrow_tex.clone())
+            }) else {
                 continue;
             };
-            let stale = materials
-                .get(overlay)
-                .is_some_and(|material| material.params.byte_array() != params.byte_array());
-            if !stale {
+            let Some(current) = materials.get(overlay) else {
                 continue;
-            }
-            if let Some(material) = materials.get_mut_untracked(overlay) {
-                material.params = params;
+            };
+            let textures_stale = current.main_tex != main_tex || current.eyebrow_tex != eyebrow_tex;
+            let params_stale = current.params.byte_array() != params.byte_array();
+            if textures_stale {
+                // A texture change rebuilds the bind group, so it is a tracked write.
+                if let Some(mut material) = materials.get_mut(overlay) {
+                    material.params = params;
+                    material.main_tex = main_tex;
+                    material.eyebrow_tex = eyebrow_tex;
+                }
+            } else if params_stale {
+                if let Some(material) = materials.get_mut_untracked(overlay) {
+                    material.params = params;
+                }
             }
         }
     }

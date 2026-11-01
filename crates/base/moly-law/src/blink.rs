@@ -37,6 +37,9 @@ pub struct EyePattern {
     pub open: i32,
     pub close: i32,
     pub blink_enabled: bool,
+    /// Which eye texture set the row draws from: 0 is the eye material's own
+    /// texture pair, N >= 1 the avatar view's additional set N - 1.
+    pub texture: i32,
 }
 
 /// The blink's integer draws (`UnityEngine.Random.Range(int, int)`).

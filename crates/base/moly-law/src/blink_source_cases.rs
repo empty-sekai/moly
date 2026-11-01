@@ -27,7 +27,7 @@ const STEP_CASES: &[StepCase] = &[
     StepCase {
         name: "disabled",
         enabled: false,
-        pattern: EyePattern { open: 1, close: 5, blink_enabled: true },
+        pattern: EyePattern { open: 1, close: 5, blink_enabled: true, texture: 0 },
         cancel_at_entry: false,
         cancel_after: None,
         events: &[Ev::Eye(1)],
@@ -36,7 +36,7 @@ const STEP_CASES: &[StepCase] = &[
     StepCase {
         name: "pattern_no_blink",
         enabled: true,
-        pattern: EyePattern { open: 18, close: 6, blink_enabled: false },
+        pattern: EyePattern { open: 18, close: 6, blink_enabled: false, texture: 0 },
         cancel_at_entry: false,
         cancel_after: None,
         events: &[Ev::Eye(18), Ev::Range(3000, 5000, 3777)],
@@ -45,7 +45,7 @@ const STEP_CASES: &[StepCase] = &[
     StepCase {
         name: "single",
         enabled: true,
-        pattern: EyePattern { open: 1, close: 5, blink_enabled: true },
+        pattern: EyePattern { open: 1, close: 5, blink_enabled: true, texture: 0 },
         cancel_at_entry: false,
         cancel_after: None,
         events: &[Ev::Eye(5), Ev::Range(100, 150, 120), Ev::Eye(1), Ev::Range(100, 150, 130), Ev::Range(0, 2, 0), Ev::Range(3000, 5000, 4000)],
@@ -54,7 +54,7 @@ const STEP_CASES: &[StepCase] = &[
     StepCase {
         name: "double",
         enabled: true,
-        pattern: EyePattern { open: 1, close: 5, blink_enabled: true },
+        pattern: EyePattern { open: 1, close: 5, blink_enabled: true, texture: 0 },
         cancel_at_entry: false,
         cancel_after: None,
         events: &[Ev::Eye(5), Ev::Range(100, 150, 120), Ev::Eye(1), Ev::Range(100, 150, 130), Ev::Range(0, 2, 1), Ev::Eye(5), Ev::Range(100, 150, 110), Ev::Eye(1), Ev::Range(100, 150, 140), Ev::Range(3000, 5000, 4000)],
@@ -63,7 +63,7 @@ const STEP_CASES: &[StepCase] = &[
     StepCase {
         name: "double_edges",
         enabled: true,
-        pattern: EyePattern { open: 19, close: 7, blink_enabled: true },
+        pattern: EyePattern { open: 19, close: 7, blink_enabled: true, texture: 0 },
         cancel_at_entry: false,
         cancel_after: None,
         events: &[Ev::Eye(7), Ev::Range(100, 150, 100), Ev::Eye(19), Ev::Range(100, 150, 149), Ev::Range(0, 2, 1), Ev::Eye(7), Ev::Range(100, 150, 149), Ev::Eye(19), Ev::Range(100, 150, 100), Ev::Range(3000, 5000, 4999)],
@@ -72,7 +72,7 @@ const STEP_CASES: &[StepCase] = &[
     StepCase {
         name: "cancel_at_entry",
         enabled: true,
-        pattern: EyePattern { open: 1, close: 5, blink_enabled: true },
+        pattern: EyePattern { open: 1, close: 5, blink_enabled: true, texture: 0 },
         cancel_at_entry: true,
         cancel_after: None,
         events: &[],
@@ -81,7 +81,7 @@ const STEP_CASES: &[StepCase] = &[
     StepCase {
         name: "cancel_during_close",
         enabled: true,
-        pattern: EyePattern { open: 1, close: 5, blink_enabled: true },
+        pattern: EyePattern { open: 1, close: 5, blink_enabled: true, texture: 0 },
         cancel_at_entry: false,
         cancel_after: Some(0),
         events: &[Ev::Eye(5), Ev::Range(100, 150, 120)],
@@ -90,7 +90,7 @@ const STEP_CASES: &[StepCase] = &[
     StepCase {
         name: "cancel_during_long_wait",
         enabled: true,
-        pattern: EyePattern { open: 1, close: 5, blink_enabled: true },
+        pattern: EyePattern { open: 1, close: 5, blink_enabled: true, texture: 0 },
         cancel_at_entry: false,
         cancel_after: Some(2),
         events: &[Ev::Eye(5), Ev::Range(100, 150, 120), Ev::Eye(1), Ev::Range(100, 150, 130), Ev::Range(0, 2, 0), Ev::Range(3000, 5000, 3000)],
@@ -127,49 +127,49 @@ struct CadenceCase {
 const CADENCE_CASES: &[CadenceCase] = &[
     CadenceCase {
         name: "double_then_single_60Hz",
-        pattern: EyePattern { open: 1, close: 5, blink_enabled: true },
+        pattern: EyePattern { open: 1, close: 5, blink_enabled: true, texture: 0 },
         draws: &[120, 130, 1, 110, 140, 4000, 101, 149, 0, 3000],
         dt: Dt::Fixed(0x3C888889),
         writes: &[(0, 5), (8, 1), (16, 5), (23, 1), (273, 5), (280, 1)],
     },
     CadenceCase {
         name: "double_then_single_30Hz",
-        pattern: EyePattern { open: 1, close: 5, blink_enabled: true },
+        pattern: EyePattern { open: 1, close: 5, blink_enabled: true, texture: 0 },
         draws: &[120, 130, 1, 110, 140, 4000, 101, 149, 0, 3000],
         dt: Dt::Fixed(0x3D088889),
         writes: &[(0, 5), (4, 1), (8, 5), (12, 1), (138, 5), (142, 1)],
     },
     CadenceCase {
         name: "double_then_single_var",
-        pattern: EyePattern { open: 1, close: 5, blink_enabled: true },
+        pattern: EyePattern { open: 1, close: 5, blink_enabled: true, texture: 0 },
         draws: &[120, 130, 1, 110, 140, 4000, 101, 149, 0, 3000],
         dt: Dt::Variable,
         writes: &[(0, 5), (7, 1), (14, 5), (21, 1), (202, 5), (207, 1)],
     },
     CadenceCase {
         name: "long_3000_60Hz",
-        pattern: EyePattern { open: 1, close: 5, blink_enabled: true },
+        pattern: EyePattern { open: 1, close: 5, blink_enabled: true, texture: 0 },
         draws: &[120, 130, 0, 3000, 120, 130, 0, 3000],
         dt: Dt::Fixed(0x3C888889),
         writes: &[(0, 5), (8, 1), (197, 5), (205, 1)],
     },
     CadenceCase {
         name: "long_4999_60Hz",
-        pattern: EyePattern { open: 1, close: 5, blink_enabled: true },
+        pattern: EyePattern { open: 1, close: 5, blink_enabled: true, texture: 0 },
         draws: &[120, 130, 0, 4999, 120, 130, 0, 4999],
         dt: Dt::Fixed(0x3C888889),
         writes: &[(0, 5), (8, 1), (316, 5), (324, 1)],
     },
     CadenceCase {
         name: "no_blink_pattern_60Hz",
-        pattern: EyePattern { open: 18, close: 6, blink_enabled: false },
+        pattern: EyePattern { open: 18, close: 6, blink_enabled: false, texture: 0 },
         draws: &[3777, 3000],
         dt: Dt::Fixed(0x3C888889),
         writes: &[(0, 18), (227, 18)],
     },
     CadenceCase {
         name: "double_then_single_4Hz",
-        pattern: EyePattern { open: 1, close: 5, blink_enabled: true },
+        pattern: EyePattern { open: 1, close: 5, blink_enabled: true, texture: 0 },
         draws: &[120, 130, 1, 110, 140, 3000, 101, 149, 0, 3000],
         dt: Dt::Fixed(0x3E800000),
         writes: &[(0, 5), (1, 1), (2, 5), (3, 1), (16, 5), (17, 1)],
@@ -268,7 +268,7 @@ fn interval_varies_with_the_draw() {
         let draws = [120, 130, 0, long, 120, 130, 0, long];
         let case = CadenceCase {
             name: "arm",
-            pattern: EyePattern { open: 1, close: 5, blink_enabled: true },
+            pattern: EyePattern { open: 1, close: 5, blink_enabled: true, texture: 0 },
             draws: Box::leak(Box::new(draws)),
             dt: Dt::Fixed(0x3C888889),
             writes: &[],

@@ -476,12 +476,16 @@ fn parse_facial(text: &str) -> FacialTables {
             .get("BlinkEnabled")
             .and_then(|v| v.as_i64().or_else(|| v.as_bool().map(i64::from)))
             .unwrap_or_else(|| panic!("眼表行 {name} 缺 BlinkEnabled"));
+        // Tables from clients that predate the column have no `TextureIndex`;
+        // those rows all draw from the eye material's own texture pair.
+        let texture = row.get("TextureIndex").and_then(|v| v.as_i64()).unwrap_or(0);
         eye.insert(
             name.to_owned(),
             EyePattern {
                 open: open as i32,
                 close: close as i32,
                 blink_enabled: blink != 0,
+                texture: texture as i32,
             },
         );
     }
@@ -810,7 +814,8 @@ pub fn apply_eye(
 }
 
 /// `ChangeEyePattern`: the view's pattern becomes the row (`FindBy`'s
-/// zero-valued row when the name is absent) and its open cell is written.
+/// zero-valued row when the name is absent), its texture set is selected and
+/// its open cell is written.
 pub fn apply_eye_pattern(
     materials: &mut Assets<CharacterMaterial>,
     handle: &Handle<CharacterMaterial>,
@@ -819,6 +824,7 @@ pub fn apply_eye_pattern(
     let pattern = crate::npc_view::pattern_or_zero(pattern);
     if let Some(material) = materials.get_mut(handle).map(|asset| asset.into_inner()) {
         material.eye_pattern = Some(pattern);
+        material.select_eye_texture(pattern.texture);
     }
     apply_eye(materials, handle, Some(&pattern.open))
 }
