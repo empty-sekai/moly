@@ -147,7 +147,7 @@ test("public resources support changing the configured HTTPS origin without rebu
     assert.throws(() => resourceOrigin(value));
 });
 test("production object-store roots are explicit and use logical keys without /moly", () => {
-  const root = "https://resources.example/";
+  const root = "https://resources.example/publication/";
   assert.equal(resourceBase(root), root);
   assert.equal(
     resourceDirectory(
@@ -171,9 +171,7 @@ test("production object-store roots are explicit and use logical keys without /m
       "https://resources.example/other/",
     ),
   );
-  assert.throws(() =>
-    resourceBase("https://resources.example/publication"),
-  );
+  assert.throws(() => resourceBase("https://resources.example/publication"));
 });
 test("wrong source snapshot rejects pending Play without admitting any action", () => {
   const d = driver({ region: "jp", version: "6.8.1" });
@@ -360,7 +358,7 @@ test("production S3 resource_base keeps the iframe same-origin and emits the ful
   const env = dom();
   let handle;
   try {
-    const root = "https://resources.example/";
+    const root = "https://resources.example/publication/";
     handle = mountStage(env.target, {
       ...options,
       assets: root + "snapshots/cn-test/assets/",
