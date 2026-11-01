@@ -152,6 +152,43 @@ exclusive rows; the Japanese server is enabled.
 - Each character acts according to its own persona, starting with Emu Otori.
 - A human can take over at any time.
 
+## After 0.0.6: story staging
+
+Story scenes are staged again with 3D sets, SD characters and a camera: lines, voices and timing
+come from the script, while sets, blocking and camera work are written scene by scene. It is a
+plugin; the original mode does not change. Four steps, in dependency order:
+
+**1. Set and video output**
+- A separate shooting scene: original furniture and custom models can be placed at any position,
+  rotation and scale, and the site terrain can be hidden. A set is saved as a file and reloads
+  when the file changes.
+- Custom lights: point, spot and area lights with colour, intensity and shadows; a glowing screen
+  lights its surroundings.
+- The camera follows a shot list shot by shot: position, look-at target, field of view, depth of
+  field, easing and handheld shake; hard cuts and transitions.
+- Frames are rendered at a fixed frame rate and muxed with the audio into a video; the same input
+  gives the same result.
+
+**2. Actors, lines and sound**
+- SD characters follow the shot list: they walk to marks, turn, look at targets, play motions and
+  expressions, and move their mouths with the voice; poses such as sitting, resting on a desk and
+  typing.
+- Dialogue box, speaker name, full-screen text and location captions; voices, BGM and sound
+  effects play and fade on the timeline.
+
+**3. Custom assets**
+- Custom glTF models, textures and motions can be imported, with materials that match the
+  original toon shading; custom assets live in their own directory outside the resource directory.
+- New motions on the SD skeleton.
+- Runtime images rendered onto a model's screen surface, for example a chat window or a flickering
+  screen.
+
+**4. Custom scenes and weather**
+- Custom weather presets: sky, fog, lighting and floating particles; the original weather does
+  not change.
+- Screen effects: fade to white or black, flicker, colour grading, vignette and depth of field.
+- Places that have no 3D model in the original are built from custom assets and custom weather.
+
 ## Later plugins (unscheduled, in dependency order)
 
 **1. Agent interface**
