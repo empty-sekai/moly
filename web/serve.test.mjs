@@ -77,6 +77,19 @@ function cancelResponse(url) {
   });
 }
 
+/** This process's environment, without a player-data template. */
+function withoutPlayerApi() {
+  const rest = { ...process.env };
+  delete rest.MOLY_PLAYER_API;
+  return rest;
+}
+
+/** The status and text of one GET, sent straight to the server. */
+async function playerApiResponse(url) {
+  const response = await fetch(url, { redirect: "error" });
+  return { status: response.status, body: await response.text() };
+}
+
 async function stopChild(child) {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
   const exited = once(child, "exit");
@@ -150,7 +163,7 @@ test(
     child = spawn(process.execPath, [path.join(here, "serve.mjs"), "0"], {
       cwd: here,
       env: {
-        ...process.env,
+        ...withoutPlayerApi(),
         MOLY_ASSET_ROOT: assetRoot,
         MOLY_ASSET_PACK_ROOT: packRoot,
       },
@@ -309,5 +322,72 @@ test(
         );
       },
     );
+
+    await t.test(
+      "player data without a configured template is refused, not forwarded",
+      async () => {
+        const result = await playerApiResponse(`${base}player-api/cn/12345`);
+        assert.equal(result.status, 503);
+        assert.match(result.body, /MOLY_PLAYER_API/);
+      },
+    );
+  },
+);
+
+test(
+  "development server refuses player data without MOLY_PLAYER_API",
+  { timeout: 30_000 },
+  async (t) => {
+    const assetRoot = await mkdtemp(
+      path.join(await realpath(tmpdir()), "moly-serve-test-"),
+    );
+    const canonicalRoot = await realpath(assetRoot);
+    t.after(async () => {
+      const resolved = await realpath(assetRoot);
+      assert.equal(resolved, canonicalRoot);
+      await rm(resolved, {
+        recursive: true,
+        force: true,
+        maxRetries: 3,
+        retryDelay: 100,
+      });
+    });
+    const child = spawn(process.execPath, [path.join(here, "serve.mjs"), "0"], {
+      cwd: here,
+      env: { ...withoutPlayerApi(), MOLY_ASSET_ROOT: assetRoot },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let output = "";
+    t.after(() => stopChild(child));
+    const base = await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`Server did not start: ${output}`)),
+        15_000,
+      );
+      const fail = (error) => {
+        clearTimeout(timer);
+        reject(error);
+      };
+      child.once("error", fail);
+      child.once("exit", (code) =>
+        fail(new Error(`Server exited before listening (${code}): ${output}`)),
+      );
+      child.stdout.on("data", (chunk) => {
+        output = (output + chunk.toString()).slice(-16_384);
+        const match = output.match(/serving on (http:\/\/127\.0\.0\.1:\d+\/)/);
+        if (match) {
+          clearTimeout(timer);
+          resolve(match[1]);
+        }
+      });
+      child.stderr.on("data", (chunk) => {
+        output = (output + chunk.toString()).slice(-16_384);
+      });
+    });
+    assert.match(output, /MOLY_PLAYER_API is not set/);
+    const result = await playerApiResponse(`${base}player-api/cn/12345`);
+    assert.equal(result.status, 503);
+    assert.match(result.body, /MOLY_PLAYER_API/);
   },
 );

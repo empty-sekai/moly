@@ -1,0 +1,244 @@
+# Example moly.toml.
+#
+# Every key is listed here as a comment, so this file is an empty, valid
+# configuration that changes nothing. Copy the lines you need into
+# moly.toml (in the data directory, or the file named by MOLY_CONFIG) and
+# remove the leading `#` and the space after it.
+#
+# For each key, the environment variable named in docs/configuration.md wins
+# over the value in the file. Addresses below are examples. The [dev]
+# switches take a quoted string that the switch itself parses.
+
+[paths]
+
+# The settings file. Default: `settings.json` in the data directory.
+# settings = ""
+
+[resources]
+
+# The resource root directory. Default: the version selected in the launcher, else the newest installed one.
+# root = "resources"
+# A public asset store directory read over HTTPS instead of a local resource root. Setting both is refused.
+# store = "https://resources.example/asset-store/"
+# The catalog release (a lowercase SHA-256) read from the resource root or the asset store.
+# catalog = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+# Where documents and files read from `resources.store` are kept. Created when missing.
+# cache = "cache"
+# The address resources are downloaded from, ending with `/`.
+# base = "https://resources.example/"
+# Where the launcher installs resources. Default: the `resources` directory beside the data directory.
+# dir = "resources"
+# The installed resource version the game starts with. Default: the newest complete install.
+# snapshot = "1"
+# The address of the storage that remote resource files are read from.
+# storage = "https://storage.example/"
+# The storage tried when `resources.storage` does not answer.
+# storage_mirror = "https://storage-mirror.example/"
+
+[masters]
+
+# The first master table source: an address template with a `{repo}` path segment, which is replaced by the region's repository name.
+# repository = "https://masters.example/{repo}/"
+# The repository name of the `jp` region in `masters.repository`.
+# repository_jp = "example-jp"
+# The repository name of the `cn` region in `masters.repository`.
+# repository_cn = "example-cn"
+# The repository name of the `tw` region in `masters.repository`.
+# repository_tw = "example-tw"
+# The repository name of the `kr` region in `masters.repository`.
+# repository_kr = "example-kr"
+# The repository name of the `en` region in `masters.repository`.
+# repository_en = "example-en"
+# The second master table source.
+# base = "https://masters-base.example/"
+# The third master table source.
+# mirror = "https://masters-mirror.example/"
+
+[player_data]
+
+# The player data address template, with `{region}` and `{target_user_id}` placeholders.
+# api = "https://players.example/api/{region}/mysekai/{target_user_id}"
+# The region of the player data: `cn` or `jp`.
+# region = "jp"
+# Fetches and previews the data of this user id at start.
+# uid = "123456789012345678"
+# Imports this player data file at start. Set at most one of `uid` and `file`.
+# file = "player-data.json"
+
+[server]
+# The server the game connects to. Default: the local server `http://127.0.0.1:15800`.
+# url = "http://127.0.0.1:15800"
+
+# The server's listen address (`host:port`).
+# listen = "127.0.0.1:15800"
+# The server's control port.
+# control_port = 15801
+# The directory the server saves player documents in. Unset: documents are kept in memory only.
+# data = "server"
+
+[update]
+
+# The release source the launcher checks for program updates. Default: the program's own release source.
+# source = "https://updates.example/repos/example/moly"
+
+[launcher]
+
+# Parallel transfers while downloading. Default: 16.
+# jobs = 16
+# The game program. Default: the one beside the launcher.
+# game = "moly-app"
+
+[display]
+
+# Hides every HUD, button and dialog view; the scene, the balloons and the talk window remain.
+# hide_hud = false
+# Hides the player's own body.
+# hide_player = false
+
+[text]
+
+# The source text catalogue file the display translation reads. Unset: the original text is shown.
+# source = "text/source.json"
+# An official translation overlay file applied over `text.source`.
+# official = "text/official.json"
+# A community translation overlay file applied over `text.source`.
+# community = "text/community.json"
+# The locale of the display translation. Default: `zh-CN`.
+# locale = "zh-CN"
+
+[dev]
+
+# window = false # Starts the developer window instead of the game.
+# check_systems = "" # `1` reports every system parameter conflict and exits instead of starting the game.
+# portraits_out = "portraits" # Exports character portraits into this directory, with its own settings file there, instead of starting normally.
+# portrait_unit = "" # Limits the portrait export to this source unit id.
+# action_button_autowalk_secs = "" # A window (`<until>` or `<from>:<until>` seconds) in which the player is walked to each character and fixture and the action button is tapped; unset: the autowalk is off.
+# audio_mock_music_record = "" # Sets the default document's `userMysekaiMusicPlayFixtureSettings` from `site:record:vocal` entries separated by commas; a malformed entry stops the start with a panic. Unset: the document's own settings.
+# avatar_mock_accessory = "" # The accessory bundle name the developer avatar wears, turned into its master id once the masters resolve; a name no master row holds is logged. Unset: the document's own accessory.
+# avatar_mock_coordinate = "" # The coordinate bundle name the developer avatar wears, turned into its master id once the masters resolve; a name no master row holds is logged. Unset: the document's own coordinate.
+# avatar_mock_costume = "" # The costume bundle name the developer avatar wears, turned into its master id once the masters resolve; a name no master row holds is logged. Unset: the document's own costume.
+# avatar_mock_skin_color = "" # The skin colour code the developer avatar wears, turned into its master id once the masters resolve; a code no master row holds is logged. Unset: the document's own skin colour.
+# balloon_order_no_layer = "" # Feeds 0 as every balloon's root z, so balloons keep the constant layer instead of being ranked by distance from the camera; the negative arm of the layer-order check. Unset: balloons are ranked by distance.
+# balloon_order_run_id = "" # A run id written into the layer-order probe's first log line together with the version. Unset: the line is not written.
+# balloon_order_secs = "" # Spawns a pair of overlapping probe balloons that leave after this many seconds to check balloon layer order (headless acceptance). Read by moly_world::balloon; unset or 0: no probes.
+# bgm_select_taps = "" # Comma-separated `<seconds>=<target>` taps on the BGM select screen (`x:y`, `back`, `status`, `vocal`, `cell:<n>`); unset: no taps.
+# birthday_close_secs = "" # Seconds after the party's close confirm shows before its OK is tapped; unset: no tap.
+# birthday_confirm_secs = "" # Seconds after the birthday confirm shows before its OK is tapped; unset: no tap.
+# birthday_end_secs = "" # Seconds after start before the housing screen's end-party button is tapped once its UI shows it; unset: no tap.
+# birthday_now_ms = "" # Fixes the server clock at this epoch millisecond, a positive integer, on the default document; any other value stops the start with a panic. Unset: the clock runs from the real time.
+# birthday_party_action = "" # `<seconds>[:<fixture>]`: places the player beside a party fixture that many seconds after start and taps its birthday cut-scene button; unset: no press.
+# camera_autofps_secs = "" # The FPS smoke hook's window in seconds: synthetic pinch and drag input is fed through the real camera dispatch (pinch in to FPS, drag inside FPS, pinch out) so the transitions can be read from the log. Unset or 0: no synthetic input.
+# camera_autogesture_secs = "" # The gesture smoke script's window in seconds: in the Normal camera state four phases drive pitch and distance to their limits through the real camera rules; the script stays off while the FPS hook is on. Unset or 0: no script.
+# camera_autoreset = "" # Instrument `<state>:<seconds>`: once per entry into that camera state, the camera reset runs after `seconds` as the reset button runs it. A value without both parts is ignored. Unset: no automatic reset.
+# control_port = "" # Opens the control surface's HTTP endpoint on that port at 127.0.0.1; unset: no HTTP endpoint; anything but a port number stops the start.
+# convert_mock_request = "" # Answers a native convert request: `start:slot:item:count[:choice]`, `receive:slot:count` or `shorten:slot:price`; a malformed value stops the start with a panic. Unset: no convert request is made.
+# craft_apply_secs = "" # Seconds after the craft screen opens before the apply button is pressed; unset: no press.
+# craft_confirm_secs = "" # Seconds after the craft confirm shows before its OK is tapped; unset: no tap.
+# craft_mock_materials = "" # Sets `userMysekaiMaterials` rows from comma-separated `id:quantity` entries (an id of at least 1, a quantity of at least 0); a malformed entry stops the start with a panic. Unset: the document's own materials.
+# craft_mock_request = "" # Makes the home action's craft request a craft of `blueprintId[:quantity[:textureId[:blueprintTermId]]]`; a malformed value stops the start with a panic. Unset: the home action's request is answered as sent.
+# craft_result_close_secs = "" # Seconds after the craft result dialog shows before a tap on its close area; unset: no tap.
+# craft_select = "" # `blueprint[xcount]`: the craft selection made when the craft screen opens; unset: no selection.
+# craft_stage_result = "" # `<count>[,first]`: stages the result dialogs for the selected blueprint without a craft request; unset: no staging.
+# craft_tap_apply = "" # Taps the craft screen's apply button three seconds after it opens when set; unset: no tap.
+# craft_tap_cell = "" # The recycled cell slot tapped two seconds after the craft screen opens; unset: none.
+# craft_tap_tab = "" # The tab cell index tapped at its drawn centre one second after the craft screen opens; unset: none.
+# delivery_autoplay = "" # Instrument: `hold[,close]` in seconds walks the player to the delivery drops and into the place circle, holds the delivery button `hold` seconds and closes each awaited dialog after `close` seconds (default 1.5). Unset: no autoplay.
+# director_script = "director.script" # Queues this director script file when a native run starts; unset: no script is queued.
+# door_walk_after = "" # The seconds of app time the door walk waits before it starts; unset: it starts at once.
+# door_walk_offset = "" # `x,z` metres the door walk's goal is shifted by; unset: the goal is the door itself.
+# door_walk_secs = "" # Walks the player to the site's door until that many seconds of app time and taps the door's button; unset or zero: no door walk.
+# edit_autoplay = "" # The seconds after the joystick opens before the edit autoplay sends one layout edit (an empty value means 3); unset: no autoplay.
+# edit_autoplay_catalog = "" # Comma-separated catalog indices the edit autoplay puts (a trailing `d` also decides the put); unset: `2,0`.
+# edit_autoplay_clean_up = "" # Presses the remove-all button and its confirmation before saving; unset: nothing is removed.
+# edit_autoplay_clean_up_hold = "" # Seconds the edit autoplay waits with the remove-all confirmation open before its clean-up button; unset: no hold.
+# edit_autoplay_hold = "" # Seconds the edit autoplay idles after the camera buttons with nothing selected, so an outside drag reaches the edit camera; unset: no hold.
+# edit_autoplay_return_base = "" # Picks the stack run's base fixture once more and sends it to storage before saving; unset: it is left in place.
+# edit_autoplay_stack = "" # `<uid>,<uid>`: the fixture the stack run picks first and the fixture it is dragged onto; unset: the usual pick.
+# edit_autoplay_wait_tweet = "" # The edit autoplay waits (up to 120 s) for a visible tweet balloon before the edit button; unset: it enters at once.
+# effect_sample = "" # Also samples each system's live put-effect particles every 0.25 s after a put; unset: no samples.
+# effect_trace = "" # Traces each effect instance's draws every frame; unset: no trace.
+# emoticon_items = "" # A showcase carousel of emotes: comma-separated item names from the archive, refused with a panic when a name is not in the archive or the list is empty. Unset: no carousel.
+# emoticon_show_secs = "" # The seconds each showcase emote is shown. Unset or not a number: 6.
+# fixture_clock_now = "" # Pins the fixture clock's local time to `HH:MM` on native builds so clock gimmicks can be verified at a known hour; a malformed value is refused with a panic. Unset: the device's local clock.
+# fixture_direction = "" # Smoke knob that rewrites the facing of every placed fixture to 0=Front, 1=Left, 2=Back or 3=Right; a value outside 0..3 or not an integer is refused with a panic. Unset or empty: the table's own Front facing is kept.
+# fixture_preview = "" # The developer model preview to add to the placement table, `surface-<n>` or `gimmick-<n>` in developer builds. Unset: no preview.
+# fixture_walk_after = "" # The seconds of app time the fixture walk waits before it starts; unset: it starts at once.
+# fixture_walk_hold = "" # The seconds the played fixture timeline runs before the walk pushes the joystick to end it; unset: 8 seconds.
+# fixture_walk_id = "" # The id of the placed fixture the walk targets; unset: the nearest placed fixture with a player timeline row.
+# fixture_walk_secs = "" # Arms the fixture walk until that many seconds of app time; unset or zero: the walk never starts.
+# fixture_walk_tap = "" # The `x,y` window position of the timeline button the fixture walk taps; unset: the walk stops without tapping.
+# fixture_walk_via = "" # `x,z;x,z` waypoints the fixture walk passes in order before the target; unset: it walks straight to the target.
+# gate_change = "" # `<gateId>[/<skinId>]:<group>,...`: makes the gate change request with those unit groups; unset: no request from the instrument.
+# gate_invite = "" # `<unit>[,pass]`: makes the gate's reserve request for that unit (optionally granting a pass first); unset: no request from the instrument.
+# get_resource_autoclose_secs = "" # Seconds after a get-resource dialog shows before a tap on its close area; unset: no tap.
+# get_resource_notice = "" # `type:id:qty[,...]`: calls NoticeCollectItem for each once the get-resource inputs are ready; unset: none.
+# get_resource_notice_secs = "" # Seconds after the inputs are ready before the get-resource instrument fires; unset: 0.
+# get_resource_reward_dialogs = "" # Comma-separated reward dialog ids (251, 263, 452) shown as their delivery caller shows them; unset: none.
+# get_resource_sketch = "" # The blueprint id whose sketch result dialog is shown once the inputs are ready; unset: none.
+# harvest_autoplay = "" # Instrument: a comma-separated plan of harvest kinds (`wood`, `mineral`, `plant`, `other`, `toolbox`, `driftage`, each optionally `kind:N` for N swings); it walks to each object, presses the action button and gathers the drops, writing the player's own inputs. Unset: no autoplay.
+# harvest_mock_material_possession = "" # The material quantity the harvest possession mock seats until a reply carries one; unset: 0.
+# harvest_mock_phenomena = "" # States the document's learned phenomena from comma-separated `mysekaiPhenomenaId:obtainedAt` entries; a malformed entry stops the start with a panic. Unset: the document's own rows.
+# harvest_mock_tools = "" # States the document's tools from comma-separated `toolId:quantity:durability` entries; a malformed entry stops the start with a panic. Unset: the document's own tools.
+# harvest_summary_mock_player_total_exp = "" # The mock player total experience the harvest summary panel starts from; a value that is not an int is logged and ignored. Unset: 100000.
+# harvest_summary_mock_trip_exp = "" # The mock experience the server's replies add over one harvest trip; a value that is not an int is logged and ignored. Unset: 120.
+# home_action_autoplay = "" # `craft|canvas|sketch|screen`: walks to the nearest craft tool and runs that home action; unset: no autoplay.
+# home_action_autoplay_after = "" # Seconds after the joystick opens before the home action autoplay starts; unset: 2.
+# home_action_autoplay_skip = "" # Seconds after the home action request before skip is pressed, when that long into the sequence; unset: no skip.
+# home_action_sketch_blueprint = "" # The blueprint id the home action autoplay sketches; unset: no target.
+# info_mock_access_permission = "" # The info panel's mock access permission (all/friend_only/reject/review); unset: all.
+# info_mock_fixture_joint_put_limit = "" # The info panel's mock joint fixture put limit; unset: 10.
+# info_mock_fixture_put_limit = "" # The info panel's mock fixture put limit; unset: 20.
+# inventory_recycle_confirm_secs = "" # Seconds after the inventory recycle confirmation shows before its OK is tapped; unset: no tap.
+# joystick_autosmoke_secs = "" # Injects the scripted joystick touch cycle until that many seconds of app time; unset or zero: no injection.
+# learn_phenomena_autotap_secs = "" # Seconds after the learn-phenomena open animation before the thumbnail and then the close area are tapped; unset: no taps.
+# library_open = "" # Opens the content library when its talks are ready; unset: it stays closed.
+# library_qa_out = "library-qa.json" # Writes the content library's QA telemetry JSON to this file every 0.5 s; unset: no file is written (the browser export still works).
+# menu_mock_crystal_shop_allowed = "" # Whether the menu's mock allows the crystal shop; unset: true.
+# menu_mock_sketch_available = "" # Whether the menu's mock makes sketch available; unset: true.
+# menu_mock_stamina_boost = "" # Overlays this boost stamina pool on the default document's `userMysekaiStamina`. Unset: the document's own value.
+# menu_mock_stamina_enhance = "" # Overlays this enhance stamina pool on the default document's `userMysekaiStamina`. Unset: the document's own value.
+# menu_mock_stamina_max = "" # Not applied: the stamina gauge maximum is the master `maxStamina`; when set, a warning says so. Unset: no warning.
+# menu_mock_stamina_normal = "" # Overlays this normal stamina pool on the default document's `userMysekaiStamina`. Unset: the document's own value.
+# menu_mock_total_exp = "" # Overlays this total experience on the default document's `userMysekaiGamedata.totalExp` and clears its rank, so the rank follows the experience; a value that is not an integer is logged and the document keeps its value. Unset: the document's own value.
+# menu_mock_visiting = "" # The menu's mock visiting state (true/1 or false/0); unset: false.
+# music_mock_owned_records = "" # The music records the mock user owns, comma-separated record ids obtained at the server clock; an id that is not an integer, or named twice, stops the start with a panic. Unset: the user owns no record.
+# notice_collect_autoplay = "" # How many scripted NoticeCollectItem calls the collect notice sends two seconds after its cells are ready (a non-number sends all); unset: none.
+# npc_entry_probe = "" # A ;-separated script of gate and cut-scene entry steps (SECONDS:OP[:UNIT[:ARG]]) driven in developer builds, one log line per step. Unset: no steps run.
+# npc_harness_dir = "harness" # The acceptance harness directory: cases are read from `<dir>/in/<name>.json` and results written to `<dir>/out/<name>.json`. The harness drivers stop with a panic naming the key when it is unset.
+# npc_hfsm_scope = "" # The units whose NPC machine the controller drives (unit ids separated by commas or spaces, or `all`). Unset: the controller has no scope; on a jp source of version 7 or later it enables itself for every unit.
+# npc_hfsm_trace = "" # Writes the NPC machine's per-decision, per-transition and per-recovery log lines; `1`, `true`, `yes` or `on` switch them on. Unset or any other value: only the constructor and report lines.
+# oc_model = "player.vrm" # A VRM or glTF model file the player wears from the start on native builds; an empty value is ignored. Unset: the player keeps the server's avatar body.
+# oc_unit = "" # The unit id of the character body the player wears from the start on native builds; a value that is not a unit id is refused and logged. Unset: the server's avatar body.
+# offline_home_level = "" # The home site's offline level a native start uses; unset: the site's saved level.
+# option_mock_user_config = "" # `<true|false>,<all|id_search|reject>`: the mock user config the option screen reads; unset: the user config is null.
+# partvoice_probe_secs = "" # After this many seconds of app time a one-shot composed part-voice segment is injected through the real talk chain to exercise the playback, missing-cue, fixture and gate-reject arms; a value that is not a number is warned about and turns the probe off. Unset: no injection.
+# pick_npc_tap_secs = "" # Injects a tap on each present character's screen position in turn until that many seconds of app time; unset: no taps.
+# player_autowalk_diagonal = "" # When positive, the autowalk direction is the normalized diagonal instead of +X; unset: +X.
+# player_autowalk_secs = "" # Composes a fixed walk (then dash) input for that many seconds after startup; unset: no autowalk.
+# player_talk_autotap_secs = "" # Instrument: for `<until>` or `<from>:<until>` seconds of app time, a synthetic tap on an on-screen NPC with a general-talk candidate is fed through the real pick and talk chain every few seconds. Unset or not a number: no taps.
+# player_talk_stack_tap_secs = "" # A window (`<until>` or `<from>:<until>` seconds) in which the stack head's Talk button request is written for the character under it; unset: the probe is off.
+# procedural_debug = "" # Prints the first particle whose position, velocity or axis differs from the native row; unset: no debug output.
+# rank_change = "" # `<prev>,<current>`: delivers a rank change before the first site loads; unset: no rank change.
+# room_level = "" # The room level a native start uses; unset: the site's saved level.
+# scene_content = "" # `compact` or `full`: how much of a site's content is loaded at a native start; unset: compact.
+# screenshot_dir = "screenshots" # The directory a requested frame capture is written to. Unset: captures go to `screenshots`.
+# seed = "" # The world seed, a decimal u64: every random stream draws a fixed sequence from it, so a run can be repeated. Unset: each draw takes fresh platform random bytes.
+# shadow_probe_interval = "" # The frames between shadow-map depth accounts on native (at least 1); unset: no native accounts run.
+# silhouette_probe_interval = "" # The native interval, in replayed frames, between silhouette stencil read-backs; the first read-back comes on frame 10 and a value of 0 is ignored. Unset: no native read-back.
+# site = "" # The site type a native start enters; unset: the saved preferred site, else the home site.
+# sitemap_autoclick_secs = "" # Seconds before the site map instrument opens the map and taps a site's icon; unset: no auto click.
+# sitemap_autoclick_site = "" # The site type the site map instrument taps; unset: no auto click.
+# sitemap_auto_unlock_secs = "" # Seconds before the site map instrument runs the first locked icon's open animation once; unset: nothing.
+# site_extension_dev = "" # Plays one site expansion clip from these `;`-separated `key=value` pairs through the developer hook; unset: the hook plays nothing.
+# site_move_landing_draw = "" # Replaces the site move's landing draw with this value (the failed landing is one of the draws); unset: a random draw.
+# site_tour_route = "" # The smoke tour's route: a comma-separated list of site types visited in that order instead of the master-row order; an unsupported site type stops the start with a panic. Unset: master-row order.
+# site_tour_secs = "" # The smoke-tour instrument's dwell time in seconds: the game loads each site in turn unattended and exits cleanly after the last one; a value of 0 or not a number counts as off. Unset: no tour.
+# step_item = "" # `<bundle>|<file>` of a step item: once the avatar is wired the step item sequence runs once to check the service alone; a value without `|` is logged as an error. Unset: no sequence.
+# talk_auto_advance = "" # Set to `1`: a talk line advances as soon as its own voice has played out, without a tap, for unattended recordings. Any other value or unset: a tap advances the line.
+# talk_tap_at_secs = "" # Smoke input: a comma-separated list of app times in seconds at which a tap on the talk window is set synthetically; parts that are not numbers are skipped. Unset or empty: no taps.
+# talk_voice_probe_lines = "" # The number of voice lines in the synthetic talk segment; a value that is not a positive integer is warned about and the default is used. Unset: 3.
+# talk_voice_probe_secs = "" # After this many seconds of app time a one-shot synthetic talk segment with voice lines is injected through the real talk chain, once no conversation plays; a value that is not a number is warned about and turns the probe off. Unset: no injection.
+# visitor_units = "" # Replaces the roster of visitors the home site boots with: a comma-separated list of unit ids; parts that are not numbers are skipped, and an empty list leaves the gate rows. Unset: the roster comes from the gate rows.
+# walk_bake_threads = "" # How many row bands the walk-field collider bake may spread over, clamped to 1..8 (0 and 1 keep it on one thread); a value that is not a number counts as unset. Unset: the machine's available parallelism, capped at 8.
+# walk_probe = "" # QA probe: for every walk-field generation, logs the door locators' static path queries and the agent path for each `from>to` pair given here (x,z coordinates). Unset: no probe.
+# window_hidden = "" # Starts a native run with the window hidden for headless batches; any value hides the window. Unset: the window is shown.

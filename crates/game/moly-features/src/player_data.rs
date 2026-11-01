@@ -15,8 +15,9 @@ use crate::{
     site::{SiteSelection, Sites},
 };
 
-pub const DEFAULT_PLAYER_API: &str =
-    "https://haruki-api.menardi.top/api/{region}/mysekai/{target_user_id}";
+/// The browser's player-data route: the page's own origin serves it.
+#[cfg(target_arch = "wasm32")]
+const BROWSER_PLAYER_API: &str = "/player-api/{region}/{target_user_id}";
 const PROFILE: &str = "ImportedPlayerData";
 const BACKUP: &str = "PlayerDataImportBackup";
 
@@ -71,7 +72,9 @@ pub struct PlayerDataImport {
     pub status: String,
     pub busy: bool,
     pub action: Option<ImportAction>,
-    api: String,
+    /// The player-data template, with `{region}` and `{target_user_id}`, or
+    /// none when the configuration names none.
+    api: Option<String>,
     inbox: Inbox,
     read_task: Option<ReadTask>,
     generation: u64,
@@ -88,12 +91,12 @@ pub struct PlayerDataImport {
 impl Default for PlayerDataImport {
     fn default() -> Self {
         #[cfg(not(target_arch = "wasm32"))]
-        let api = DEFAULT_PLAYER_API;
+        let api = None;
         #[cfg(target_arch = "wasm32")]
-        let api = "/player-api/{region}/{target_user_id}";
+        let api = Some(String::from(BROWSER_PLAYER_API));
         Self { uid: String::new(), region: "cn".into(),
             status: "Enter a player UID or choose a Mysekai JSON file. Import keeps a recoverable layout backup.".into(),
-            busy: false, action: None, api: api.into(), inbox: Default::default(), read_task: None,
+            busy: false, action: None, api, inbox: Default::default(), read_task: None,
             generation: 0, pending: None, preview: None, requests: None, catalog: None, exploration: None, last_error: false,
             published: None }
     }
@@ -109,7 +112,7 @@ impl PlayerDataImport {
             {
                 return Err("Player API must be an HTTP(S) URL template containing {region} and {target_user_id}".into());
             }
-            self.api = api;
+            self.api = Some(api);
         }
         if let Some(region) = region {
             if !matches!(region.as_str(), "cn" | "jp") {
@@ -193,14 +196,20 @@ impl PlayerDataImport {
         {
             return Err("Player UID must contain 1–20 digits and cannot be zero".into());
         }
+        let Some(api) = &self.api else {
+            return Err(moly_config::ConfigError::Missing {
+                key: "player_data.api",
+                env: Some("MOLY_PLAYER_API"),
+            }
+            .to_string());
+        };
         let uid = uid.to_owned();
+        let url = api
+            .replace("{region}", &self.region)
+            .replace("{target_user_id}", &uid);
         self.cancel();
         self.busy = true;
         self.status = "Fetching player data...".into();
-        let url = self
-            .api
-            .replace("{region}", &self.region)
-            .replace("{target_user_id}", &uid);
         let (inbox, ticket, region) = (self.inbox.clone(), self.generation, self.region.clone());
         self.read_task = Some(player_data_io::fetch(url, move |result| {
             let result = result.map(|text| Some(Payload { text, region, uid: Some(uid), apply: false }));

@@ -15,7 +15,6 @@ use crate::AssetSource;
 
 pub use crate::asset_source::{
     is_canonical_directory, public_asset_parts, validate_asset_selection, RemoteBaseOverrides,
-    MASTER_BASE, MASTER_HARUKI_BASE, MASTER_MIRROR_BASE, STORAGE_BASE, STORAGE_MIRROR_BASE,
 };
 
 /// Native: the resource root, read by the same function the server reads.
@@ -23,20 +22,34 @@ pub use crate::asset_source::{
 pub use crate::asset_source::{resolve, resolve_remote};
 
 /// Pages and the browser game: the same bases the native entry reads, with
-/// each one required to be its canonical URL. The repository template itself
-/// is checked with a repository substituted for `{repo}`, which the URL of a
-/// `{repo}` segment would otherwise escape.
+/// each configured one required to be its canonical URL. A repository
+/// template is checked with a configured repository name (or `x` when none)
+/// substituted for `{repo}`, which the URL of a `{repo}` segment would
+/// otherwise escape. A base the configuration does not name is not checked
+/// and not read.
 #[cfg(target_arch = "wasm32")]
 pub fn canonical_bases(
     bases: crate::remote::RemoteBases,
 ) -> Result<crate::remote::RemoteBases, String> {
-    let checked = [
-        bases.storage.clone(),
-        bases.storage_mirror.clone(),
-        bases.master.clone(),
-        bases.master_mirror.clone(),
-        MASTER_HARUKI_BASE.replace("{repo}", crate::remote::Region::Jp.repository()),
-    ];
+    let mut checked: Vec<String> = [
+        bases.storage.as_deref(),
+        bases.storage_mirror.as_deref(),
+        bases.master.as_deref(),
+        bases.master_mirror.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::to_owned)
+    .collect();
+    if let Some(template) = &bases.master_repository {
+        checked.push(template.replace(
+            "{repo}",
+            bases
+                .repositories
+                .get(&crate::remote::Region::Jp)
+                .map_or("x", String::as_str),
+        ));
+    }
     for base in &checked {
         let url = web_sys::Url::new(base).map_err(|_| format!("Invalid remote base {base}"))?;
         if url.href() != *base || !url.search().is_empty() || !url.hash().is_empty() {
@@ -49,8 +62,9 @@ pub fn canonical_bases(
 }
 
 /// Pages: `?storage_base=`, `?storage_mirror_base=`, `?master_base=`,
-/// `?master_mirror_base=` and `?master_haruki_base=` (a template naming
-/// `{repo}`) replace the hosts.
+/// `?master_mirror_base=` (the hosts), `?master_repository=` (a template
+/// naming `{repo}`) and `?master_repository_jp=` … `?master_repository_en=`
+/// (each region's repository name) are the configuration's keys.
 #[cfg(target_arch = "wasm32")]
 pub fn resolve_remote() -> Result<crate::remote::RemoteBases, String> {
     let window =
@@ -66,7 +80,20 @@ pub fn resolve_remote() -> Result<crate::remote::RemoteBases, String> {
         params.get("storage_mirror_base"),
         params.get("master_base"),
         params.get("master_mirror_base"),
-        params.get("master_haruki_base"),
+        params.get("master_repository"),
+    );
+    let (
+        master_repository_jp,
+        master_repository_cn,
+        master_repository_tw,
+        master_repository_kr,
+        master_repository_en,
+    ) = (
+        params.get("master_repository_jp"),
+        params.get("master_repository_cn"),
+        params.get("master_repository_tw"),
+        params.get("master_repository_kr"),
+        params.get("master_repository_en"),
     );
     let bases = crate::asset_source::remote_bases(RemoteBaseOverrides {
         storage: storage.as_deref(),
@@ -74,6 +101,11 @@ pub fn resolve_remote() -> Result<crate::remote::RemoteBases, String> {
         master: master.as_deref(),
         master_mirror: master_mirror.as_deref(),
         master_repository: master_repository.as_deref(),
+        master_repository_jp: master_repository_jp.as_deref(),
+        master_repository_cn: master_repository_cn.as_deref(),
+        master_repository_tw: master_repository_tw.as_deref(),
+        master_repository_kr: master_repository_kr.as_deref(),
+        master_repository_en: master_repository_en.as_deref(),
     })?;
     canonical_bases(bases)
 }

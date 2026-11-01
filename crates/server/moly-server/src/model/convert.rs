@@ -94,9 +94,9 @@
 //! `convertLimit` and `onceConvertLimit` from it. A reply's `updated` is the
 //! sections that response changed.
 //!
-//! Native instrument: `MOLY_CONVERT_MOCK_REQUEST=start:slot:item:count[:choice]`,
-//! `receive:slot:count` or `shorten:slot:price`; game mode reads no
-//! environment variable.
+//! Native instrument: `dev.convert_mock_request` (`MOLY_CONVERT_MOCK_REQUEST`)
+//! `=start:slot:item:count[:choice]`, `receive:slot:count` or
+//! `shorten:slot:price`; game mode reads no instrument.
 
 use std::collections::BTreeSet;
 
@@ -1986,11 +1986,11 @@ fn grant_section(kind: &str) -> &'static str {
     }
 }
 
-/// The native instrument `MOLY_CONVERT_MOCK_REQUEST` as a request; a
-/// malformed entry stops loudly.
+/// The native instrument `dev.convert_mock_request`
+/// (`MOLY_CONVERT_MOCK_REQUEST`) as a request; a malformed entry stops loudly.
 pub(crate) fn instrument_request() -> Option<(i32, ConvertPost)> {
     const NAME: &str = "MOLY_CONVERT_MOCK_REQUEST";
-    let raw = super::instrument_env(NAME)?;
+    let raw = super::instrument_env(&moly_config::keys::DEV_CONVERT_MOCK_REQUEST)?;
     let parts: Vec<&str> = raw.split(':').map(str::trim).collect();
     let number = |index: usize, what: &str| -> i32 {
         parts

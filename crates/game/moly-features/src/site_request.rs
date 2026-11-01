@@ -25,7 +25,7 @@ fn parse_content(raw: Option<&str>) -> Result<OfflineSceneContent, String> {
     match raw.map(str::trim) {
         None | Some("compact") => Ok(OfflineSceneContent::Compact),
         Some("full") => Ok(OfflineSceneContent::Full),
-        _ => Err("scene_content must be compact or full".to_owned()),
+        _ => Err("dev.scene_content (MOLY_SCENE_CONTENT) must be compact or full".to_owned()),
     }
 }
 
@@ -53,24 +53,23 @@ pub fn game() -> SiteRequest {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn resolve() -> Result<SiteRequest, String> {
-    let env = |name: &str| -> Result<Option<String>, String> {
-        match std::env::var(name) {
-            Ok(value) => Ok(Some(value)),
-            Err(std::env::VarError::NotPresent) => Ok(None),
-            Err(_) => Err(format!("{name} is not Unicode")),
-        }
-    };
-    let site = match env("MOLY_SITE")? {
+    let site = match moly_config::text(&moly_config::keys::DEV_SITE) {
         Some(raw) if !raw.trim().is_empty() => raw.trim().to_owned(),
-        Some(_) => return Err("MOLY_SITE is set but empty; it names a site type".into()),
+        Some(_) => {
+            return Err("dev.site (MOLY_SITE) is set but empty; it names a site type".into());
+        }
         None => crate::player_data::preferred_site().unwrap_or_else(|| DEFAULT_SITE.to_owned()),
     };
-    let room_level = parse_level(env("MOLY_ROOM_LEVEL")?.as_deref(), "MOLY_ROOM_LEVEL")?;
-    let offline_home_level = parse_level(
-        env("MOLY_OFFLINE_HOME_LEVEL")?.as_deref(),
-        "MOLY_OFFLINE_HOME_LEVEL",
+    let room_level = parse_level(
+        moly_config::text(&moly_config::keys::DEV_ROOM_LEVEL).as_deref(),
+        "dev.room_level (MOLY_ROOM_LEVEL)",
     )?;
-    let content = parse_content(env("MOLY_SCENE_CONTENT")?.as_deref())?;
+    let offline_home_level = parse_level(
+        moly_config::text(&moly_config::keys::DEV_OFFLINE_HOME_LEVEL).as_deref(),
+        "dev.offline_home_level (MOLY_OFFLINE_HOME_LEVEL)",
+    )?;
+    let content =
+        parse_content(moly_config::text(&moly_config::keys::DEV_SCENE_CONTENT).as_deref())?;
     Ok(SiteRequest {
         site,
         room_level,

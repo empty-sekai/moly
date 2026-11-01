@@ -91,10 +91,11 @@ fn procedural_runtime(record: &Value) -> Result<Runtime, String> {
     Ok(system)
 }
 
-/// With `MOLY_PROCEDURAL_DEBUG` set, the first particle whose position,
-/// velocity or axis differs from the native row, in source coordinates.
+/// With `dev.procedural_debug` (`MOLY_PROCEDURAL_DEBUG`) set, the first
+/// particle whose position, velocity or axis differs from the native row, in
+/// source coordinates.
 fn debug_row(system: &Runtime, row: &Value, label: &str) {
-    if std::env::var_os("MOLY_PROCEDURAL_DEBUG").is_none() {
+    if moly_config::text(&moly_config::keys::DEV_PROCEDURAL_DEBUG).is_none() {
         return;
     }
     let particles = &row["particles"];

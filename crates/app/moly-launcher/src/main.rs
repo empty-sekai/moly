@@ -3,8 +3,12 @@
 //! installs program updates, and starts the game with them.
 //!
 //! The page in `ui/` draws everything; this program answers its commands.
-//! Settings live in the data directory's `launcher.json`, which the game also
+//! Settings live in the data directory's `moly.toml`, which the game also
 //! reads when it is started without configuration.
+//!
+//! The resource CDN is required to list or download resources: it is
+//! `resources.base` of `moly.toml`, or the address the page names. Without
+//! one, those commands refuse with the message that names the key.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -497,6 +501,13 @@ fn save_config(config: LauncherConfig) -> Result<Overview, String> {
     if config.jobs == 0 || config.jobs > 64 {
         return Err("parallel downloads must be between 1 and 64".into());
     }
+    // The page sends the address field as typed; an empty field leaves the
+    // configuration without one.
+    let mut config = config;
+    config.cdn = config
+        .cdn
+        .map(|cdn| cdn.trim().to_owned())
+        .filter(|cdn| !cdn.is_empty());
     config.save()?;
     overview_of(config)
 }
@@ -508,9 +519,24 @@ struct SnapshotView {
     version: String,
 }
 
-/// The installable snapshots `cdn` publishes.
+/// The resource CDN the configuration sets, refusing by name when it sets
+/// none. `requested` is the address the page has typed in already; it is used
+/// in place of the configured one.
+fn configured_cdn(config: &LauncherConfig, requested: Option<&str>) -> Result<String, String> {
+    let cdn = match requested.map(str::trim).filter(|cdn| !cdn.is_empty()) {
+        Some(cdn) => Some(cdn.to_owned()),
+        None => config.cdn.clone(),
+    };
+    cdn.ok_or_else(|| {
+        moly_config::ConfigError::Missing { key: "resources.base", env: None }.to_string()
+    })
+}
+
+/// The installable snapshots the resource CDN publishes: `cdn` when the page
+/// names one, else the configured one.
 #[tauri::command]
-async fn publication(cdn: String, state: State<'_, Launcher>) -> Result<Vec<SnapshotView>, String> {
+async fn publication(cdn: Option<String>, state: State<'_, Launcher>) -> Result<Vec<SnapshotView>, String> {
+    let cdn = configured_cdn(&LauncherConfig::load()?, cdn.as_deref())?;
     let fetched = tauri::async_runtime::spawn_blocking({
         let cdn = cdn.clone();
         move || install::fetch_publication(&cdn)

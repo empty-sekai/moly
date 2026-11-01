@@ -20,8 +20,8 @@
 //! topic: the displayed levels follow the rank and the local lists), and the
 //! site loader waits for it; natively the join delivers nothing and the
 //! sites keep their offline levels. Every later response that changes the
-//! rank delivers the pair. The native instrument
-//! `MOLY_RANK_CHANGE=<prev>,<current>` delivers a pair as the reply would,
+//! rank delivers the pair. The native instrument `dev.rank_change`
+//! (`MOLY_RANK_CHANGE=<prev>,<current>`) delivers a pair as the reply would,
 //! before the first site loads. Client state: [`MysekaiLocalSettings`] (the
 //! topic list and the unlocked site-level list); the server model seeds it
 //! from the browser game's local document and persists it there, and it
@@ -58,7 +58,7 @@ use crate::player::PlayerControlled;
 use crate::site::{SiteActive, SiteSelection};
 use law::{Masters, EXPANSION_TABLES};
 
-const INSTRUMENT: &str = "MOLY_RANK_CHANGE";
+const INSTRUMENT: &moly_config::Key = &moly_config::keys::DEV_RANK_CHANGE;
 /// `SiteActionExecutor.DEFAULT_FADE_OUT_TIME`.
 const FADE_OUT_TIME: f32 = 0.25;
 /// `SiteActionExecutor.DEFAULT_FADE_IN_TIME`.
@@ -122,7 +122,11 @@ fn parse_instrument() -> Option<PendingRankChange> {
             Some(PendingRankChange { prev, current })
         }
         _ => {
-            error!("[site-expansion] {INSTRUMENT}={raw:?} is not <prev>,<current> with positive ranks; no rank change is delivered");
+            error!(
+                "[site-expansion] {variable} ({switch})={raw:?} is not <prev>,<current> with positive ranks; no rank change is delivered",
+                variable = INSTRUMENT.path,
+                switch = INSTRUMENT.env.unwrap_or_default()
+            );
             None
         }
     }

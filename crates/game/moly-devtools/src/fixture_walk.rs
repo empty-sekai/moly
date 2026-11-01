@@ -1,18 +1,19 @@
 //! Instrument (off by default): walk the player to a furniture seat, tap its
 //! timeline button, let the timeline play, then end it with the joystick.
 //!
-//! `MOLY_FIXTURE_WALK_SECS` arms it until that many seconds of app time,
-//! from `MOLY_FIXTURE_WALK_AFTER` seconds. The target is the placed fixture
-//! whose id is `MOLY_FIXTURE_WALK_ID`, or else the nearest placed fixture
-//! with a player timeline row. The walk goes through the joystick's touch
-//! stream, as the action button's own walks do; once the button stack head
-//! is a timeline fixture button, the tap goes to the window's event stream at
-//! `MOLY_FIXTURE_WALK_TAP=x,y` (the button's window position), through the
-//! gesture and click path. `MOLY_FIXTURE_WALK_HOLD` seconds (default 8) after
-//! the session starts, a short joystick push asks the session to end
-//! (`request_end_from_input`). `MOLY_FIXTURE_WALK_VIA=x,z;x,z` first walks
-//! through those points (to go round other furniture). One walk per site
-//! generation. It lives in the devtools crate: it drives the field through the
+//! `dev.fixture_walk_secs` (`MOLY_FIXTURE_WALK_SECS`) arms it until that many
+//! seconds of app time, from `dev.fixture_walk_after` (`MOLY_FIXTURE_WALK_AFTER`)
+//! seconds. The target is the placed fixture whose id is `dev.fixture_walk_id`
+//! (`MOLY_FIXTURE_WALK_ID`), or else the nearest placed fixture with a player
+//! timeline row. The walk goes through the joystick's touch stream, as the
+//! action button's own walks do; once the button stack head is a timeline
+//! fixture button, the tap goes to the window's event stream at
+//! `dev.fixture_walk_tap` (`MOLY_FIXTURE_WALK_TAP=x,y`, the button's window
+//! position), through the gesture and click path. `dev.fixture_walk_hold`
+//! (`MOLY_FIXTURE_WALK_HOLD`) seconds (default 8) after the session starts, a
+//! short joystick push asks the session to end (`request_end_from_input`).
+//! `dev.fixture_walk_via` (`MOLY_FIXTURE_WALK_VIA=x,z;x,z`) first walks through
+//! those points (to go round other furniture). One walk per site generation. It lives in the devtools crate: it drives the field through the
 //! joystick and the action button, both of which are above the world.
 
 use bevy::{
@@ -67,8 +68,8 @@ pub struct FixtureWalk {
     last_log: f32,
 }
 
-fn env_secs(name: &str) -> Option<f32> {
-    std::env::var(name).ok()?.trim().parse::<f32>().ok()
+fn env_secs(key: &'static moly_config::Key) -> Option<f32> {
+    moly_config::text(key)?.trim().parse::<f32>().ok()
 }
 
 pub fn smoke_fixture_walk(
@@ -87,12 +88,16 @@ pub fn smoke_fixture_walk(
     time: Res<Time>,
     mut walk: Local<FixtureWalk>,
 ) {
-    let Some(armed) = env_secs("MOLY_FIXTURE_WALK_SECS").filter(|secs| *secs > 0.0) else {
+    let Some(armed) =
+        env_secs(&moly_config::keys::DEV_FIXTURE_WALK_SECS).filter(|secs| *secs > 0.0)
+    else {
         return;
     };
     let Some(tap) = tap_position() else {
         if walk.stage != Stage::Done {
-            warn!("[fixture-walk] MOLY_FIXTURE_WALK_TAP=x,y (the button's window position) is not set");
+            warn!(
+                "[fixture-walk] dev.fixture_walk_tap (MOLY_FIXTURE_WALK_TAP)=x,y (the button's window position) is not set"
+            );
             walk.stage = Stage::Done;
         }
         return;
@@ -130,7 +135,9 @@ pub fn smoke_fixture_walk(
             walk.pressing = false;
         }
     };
-    if now >= armed || now < env_secs("MOLY_FIXTURE_WALK_AFTER").unwrap_or(0.0) {
+    if now >= armed
+        || now < env_secs(&moly_config::keys::DEV_FIXTURE_WALK_AFTER).unwrap_or(0.0)
+    {
         release(walk, &mut touch);
         return;
     }
@@ -182,7 +189,9 @@ pub fn smoke_fixture_walk(
             if !session {
                 info!("[fixture-walk] the session ended before the end push; head {head:?}");
                 walk.stage = Stage::Done;
-            } else if now - since >= env_secs("MOLY_FIXTURE_WALK_HOLD").unwrap_or(8.0) {
+            } else if now - since
+                >= env_secs(&moly_config::keys::DEV_FIXTURE_WALK_HOLD).unwrap_or(8.0)
+            {
                 if joystick.enabled {
                     touch(FINGER, TouchPhase::Started, base);
                     walk.pressing = true;
@@ -234,8 +243,7 @@ pub fn smoke_fixture_walk(
                     info!("[fixture-walk] placed fixtures: {}", placed.join("; "));
                 }
                 walk.target = pick_target(&fixtures, &tables, player.translation);
-                walk.via = std::env::var("MOLY_FIXTURE_WALK_VIA")
-                    .ok()
+                walk.via = moly_config::text(&moly_config::keys::DEV_FIXTURE_WALK_VIA)
                     .map(|raw| {
                         raw.split(';')
                             .filter_map(|point| {
@@ -326,9 +334,10 @@ pub fn smoke_fixture_walk(
     }
 }
 
-/// The button's window position (`MOLY_FIXTURE_WALK_TAP=x,y`).
+/// The button's window position (`dev.fixture_walk_tap`,
+/// `MOLY_FIXTURE_WALK_TAP=x,y`).
 fn tap_position() -> Option<Vec2> {
-    let raw = std::env::var("MOLY_FIXTURE_WALK_TAP").ok()?;
+    let raw = moly_config::text(&moly_config::keys::DEV_FIXTURE_WALK_TAP)?;
     let (x, y) = raw.split_once(',')?;
     Some(Vec2::new(x.trim().parse().ok()?, y.trim().parse().ok()?))
 }
@@ -338,8 +347,7 @@ fn pick_target(
     tables: &FixtureActivityTables,
     player: Vec3,
 ) -> Option<(i32, Vec3)> {
-    let wanted = std::env::var("MOLY_FIXTURE_WALK_ID")
-        .ok()
+    let wanted = moly_config::text(&moly_config::keys::DEV_FIXTURE_WALK_ID)
         .and_then(|raw| raw.trim().parse::<i32>().ok());
     fixtures
         .iter()

@@ -54,11 +54,12 @@
 //! the visible rows and takes the rows under the scroll position, so a list
 //! of a thousand blueprints lays out a few dozen cells.
 //!
-//! Instrument (off by default; game mode reads none):
-//! `MOLY_CRAFT_TAP_TAB=<index>` taps that tab cell at its drawn centre one
-//! second after the screen opens, `MOLY_CRAFT_TAP_CELL=<slot>` taps that
-//! recycled cell two seconds after, and `MOLY_CRAFT_TAP_APPLY=1` taps the
-//! apply button one second later: the view's own tap path.
+//! Instrument (off by default; game mode reads none): `dev.craft_tap_tab`
+//! (`MOLY_CRAFT_TAP_TAB=<index>`) taps that tab cell at its drawn centre one
+//! second after the screen opens, `dev.craft_tap_cell`
+//! (`MOLY_CRAFT_TAP_CELL=<slot>`) taps that recycled cell two seconds after,
+//! and `dev.craft_tap_apply` (`MOLY_CRAFT_TAP_APPLY=1`) taps the apply button
+//! one second later: the view's own tap path.
 //!
 //! Named gaps: the 3D preview, the colour selector (its cell prefab is not
 //! exported), the fixture bonus view, the reaction count view, the system
@@ -1359,18 +1360,22 @@ pub fn place(
     let since = time.elapsed_secs() - state.opened_at;
     let target = if !state.tab_tapped && since >= 1.0 {
         state.tab_tapped = true;
-        crate::userdata::client::instrument_env("MOLY_CRAFT_TAP_TAB")
+        crate::userdata::client::instrument_env(&moly_config::keys::DEV_CRAFT_TAP_TAB)
             .and_then(|raw| raw.trim().parse::<usize>().ok())
             .and_then(|index| bindings.tabs.get(index))
             .map(|tab| ("tab cell", tab.button.clone()))
     } else {
         let target = match state.tapped {
-            0 if since >= 2.0 => crate::userdata::client::instrument_env("MOLY_CRAFT_TAP_CELL")
-                .and_then(|raw| raw.trim().parse::<usize>().ok())
-                .and_then(|slot| bindings.cells.get(slot))
-                .map(|cell| ("cell", cell.button.clone())),
-            1 if since >= 3.0 => crate::userdata::client::instrument_env("MOLY_CRAFT_TAP_APPLY")
-                .map(|_| ("apply button", bindings.apply_button.clone())),
+            0 if since >= 2.0 => {
+                crate::userdata::client::instrument_env(&moly_config::keys::DEV_CRAFT_TAP_CELL)
+                    .and_then(|raw| raw.trim().parse::<usize>().ok())
+                    .and_then(|slot| bindings.cells.get(slot))
+                    .map(|cell| ("cell", cell.button.clone()))
+            }
+            1 if since >= 3.0 => {
+                crate::userdata::client::instrument_env(&moly_config::keys::DEV_CRAFT_TAP_APPLY)
+                    .map(|_| ("apply button", bindings.apply_button.clone()))
+            }
             _ => None,
         };
         if state.tapped < 2 && since >= 2.0 + state.tapped as f32 {

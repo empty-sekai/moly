@@ -6,7 +6,8 @@
 //! Flow, each piece in its module:
 //! - `site`: the delivery site's scene objects (`DeliverySiteView` and the
 //!   views it references), the place and board collision circles and their
-//!   enter / exit message, and the `MOLY_DELIVERY_AUTOPLAY` instrument.
+//!   enter / exit message, and the `dev.delivery_autoplay`
+//!   (`MOLY_DELIVERY_AUTOPLAY`) instrument.
 //! - `screen`: `ScreenLayerMysekaiDelivery`'s view, presenter and model
 //!   (the gauge, the party cells, the delivery button and the information
 //!   button), following the screen manager's layer, and the controller's

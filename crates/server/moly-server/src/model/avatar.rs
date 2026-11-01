@@ -105,8 +105,10 @@ fn id_of(map: &Option<BTreeMap<i32, String>>, wanted: &str) -> Option<i32> {
 // Native instrument
 // ---------------------------------------------------------------------------
 
-/// The native instrument `MOLY_AVATAR_MOCK_*`: bundle names and a colour
-/// code, turned into ids once the masters resolve.
+/// The native instrument `dev.avatar_mock_coordinate`, `dev.avatar_mock_costume`,
+/// `dev.avatar_mock_accessory` and `dev.avatar_mock_skin_color`
+/// (`MOLY_AVATAR_MOCK_*`): bundle names and a colour code, turned into ids once
+/// the masters resolve.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct AvatarInstrument {
     pub(crate) coordinate: Option<String>,

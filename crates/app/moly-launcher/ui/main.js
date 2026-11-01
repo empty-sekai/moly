@@ -140,7 +140,7 @@ function renderPlay() {
 
 function renderSnapshots() {
   const list = $("snapshots");
-  $("cdn-line").textContent = state.overview ? state.overview.config.cdn : "—";
+  $("cdn-line").textContent = state.overview ? state.overview.config.cdn ?? "未设置" : "—";
   if (!state.snapshots.length) {
     list.innerHTML = `<li class="placeholder">${state.snapshotsError ?? "正在读取资源列表…"}</li>`;
     return;
@@ -359,9 +359,10 @@ function importedMessage(imported) {
   return message;
 }
 
-async function loadSnapshots(cdn = state.overview.config.cdn) {
+async function loadSnapshots(cdn = null) {
   state.snapshotsError = null;
   try {
+    await saveDraftCdn();
     state.snapshots = await invoke("publication", { cdn });
   } catch (error) {
     state.snapshots = [];
@@ -423,14 +424,14 @@ async function pollDownload() {
       // The resources may have moved with the home directory, so their sizes are read again.
       if (d.phase === "done" && d.snapshot === "home") {
         state.sizes.clear();
-        loadSnapshots();
+        if (state.overview?.config.cdn) loadSnapshots();
       }
       return;
     }
     const moving = d.kind === "migrate";
     if (moving && d.phase === "done") {
       state.sizes.clear();
-      loadSnapshots();
+      if (state.overview?.config.cdn) loadSnapshots();
     }
     if (d.phase === "done") toast(moving ? (d.note ? `资源已迁移：${d.note}` : "资源已迁移到新位置") : "资源已就绪");
     else if (d.phase === "cancelled") toast(moving ? "迁移已取消，资源仍在原来的位置" : "下载已取消，下次会从断点继续");
@@ -514,7 +515,7 @@ async function switchResources(to) {
   }
   state.sizes.clear();
   renderAll();
-  loadSnapshots();
+  if (state.overview.config.cdn) loadSnapshots();
   toast(`资源目录已切换到 ${to}`);
 }
 
@@ -606,12 +607,11 @@ async function pollUpdate() {
 
 /* ---------- settings ---------- */
 
-const DEFAULT_CDN = "https://assets.pjsk.moe/sekai-extra-assets/";
 let draftDir = null;
 
 function fillSettings() {
   const ov = state.overview;
-  $("cdn").value = ov.config.cdn;
+  $("cdn").value = ov.config.cdn ?? "";
   $("jobs").value = ov.config.jobs;
   $("jobs-value").textContent = ov.config.jobs;
   $("developer").checked = ov.config.developer;
@@ -639,11 +639,41 @@ function normalizedCdn() {
   return value;
 }
 
+/**
+ * Saves the address typed in the settings drawer, when it differs from the
+ * configured one, so that the download commands use it. Nothing is written
+ * when the field is empty; that leaves a stored address as it is.
+ */
+async function saveDraftCdn() {
+  const ov = state.overview;
+  if (!ov) return;
+  const typed = normalizedCdn();
+  if (!typed || typed === (ov.config.cdn ?? "")) return;
+  const config = { ...ov.config, cdn: typed };
+  try {
+    state.overview = await invoke("save_config", { config });
+    state.testedCdn = null;
+    state.sizes.clear();
+  } catch (error) {
+    toast(String(error), true);
+  }
+}
+
 async function testCdn() {
   const cdn = normalizedCdn();
   const result = $("cdn-result");
   result.className = "hint";
   result.textContent = "连接中…";
+  if (cdn) {
+    const config = { ...state.overview.config, cdn };
+    try {
+      state.overview = await invoke("save_config", { config });
+    } catch (error) {
+      result.className = "hint bad";
+      result.textContent = String(error);
+      return;
+    }
+  }
   try {
     const list = await invoke("publication", { cdn });
     state.testedCdn = cdn;
@@ -682,7 +712,7 @@ async function commitSettings(resourceDir, move = false) {
   const before = state.overview.config;
   const config = {
     ...before,
-    cdn: normalizedCdn(),
+    cdn: normalizedCdn() || null,
     jobs: Number($("jobs").value),
     developer: $("developer").checked,
     resource_dir: move ? before.resource_dir : resourceDir,
@@ -702,7 +732,7 @@ async function commitSettings(resourceDir, move = false) {
     state.testedCdn = null;
     if (reload) {
       state.sizes.clear();
-      loadSnapshots();
+      if (config.cdn) loadSnapshots();
     }
     renderAll();
     setTimeout(() => openSettings(false), 400);
@@ -743,7 +773,6 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") openSettings(false);
 });
 $("jobs").addEventListener("input", (event) => ($("jobs-value").textContent = event.target.value));
-$("cdn-default").addEventListener("click", () => ($("cdn").value = DEFAULT_CDN));
 $("cdn-test").addEventListener("click", testCdn);
 $("dir-pick").addEventListener("click", async () => {
   const picked = await invoke("pick_folder");

@@ -50,7 +50,8 @@
 //! ## Server values
 //!
 //! `UserConfig` (the online-status flag and the friend request status) is
-//! server state: `MOLY_OPTION_MOCK_USER_CONFIG=<true|false>,<all|id_search|reject>`.
+//! server state: `dev.option_mock_user_config`
+//! (`MOLY_OPTION_MOCK_USER_CONFIG=<true|false>,<all|id_search|reject>`).
 //! Without it the user config is null and the pages take the source's null
 //! branches (online status off, friend request and story favorite toggles
 //! left as `Awake` leaves them, all off) and `UpdateServerData` is not sent.
@@ -1152,8 +1153,8 @@ struct UserConfig {
 }
 
 fn user_config_mock() -> Option<UserConfig> {
-    const NAME: &str = "MOLY_OPTION_MOCK_USER_CONFIG";
-    let raw = std::env::var(NAME).ok()?;
+    const NAME: &moly_config::Key = &moly_config::keys::DEV_OPTION_MOCK_USER_CONFIG;
+    let raw = moly_config::text(NAME)?;
     let parsed = raw.split_once(',').and_then(|(login, friend)| {
         let display_login_status = match login.trim() {
             "true" => true,
@@ -1169,7 +1170,11 @@ fn user_config_mock() -> Option<UserConfig> {
         })
     });
     if parsed.is_none() {
-        warn!("[option] mock panel: {NAME}={raw:?} is not <true|false>,<all|id_search|reject>; the user config stays null");
+        warn!(
+            "[option] mock panel: {variable} ({switch})={raw:?} is not <true|false>,<all|id_search|reject>; the user config stays null",
+            variable = NAME.path,
+            switch = NAME.env.unwrap_or_default()
+        );
     }
     parsed
 }

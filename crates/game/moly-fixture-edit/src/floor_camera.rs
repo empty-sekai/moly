@@ -236,7 +236,7 @@ fn camera_fov(world: &mut World) -> Option<f32> {
 }
 
 fn instrument() -> bool {
-    std::env::var("MOLY_EDIT_AUTOPLAY").is_ok()
+    moly_config::text(&moly_config::keys::DEV_EDIT_AUTOPLAY).is_some()
 }
 
 /// `DoTweenCameraSetting` from the live model and the camera body's FOV.
@@ -740,8 +740,8 @@ pub fn input(
     }
 }
 
-/// Instrument (`MOLY_EDIT_AUTOPLAY`): the live camera across the edit
-/// camera's tweens and after the return to Normal.
+/// Instrument (`dev.edit_autoplay`, `MOLY_EDIT_AUTOPLAY`): the live camera
+/// across the edit camera's tweens and after the return to Normal.
 #[derive(Default)]
 pub struct Sampler {
     last_state: Option<CameraStateType>,

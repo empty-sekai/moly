@@ -581,9 +581,9 @@ pub fn bind_voice(
     let Some(sink) = sink else {
         if binding.player.take().is_some() {
             info!("[talkwin] the talk voice ended (SetIsPlayingVoice(false))");
-            // `MOLY_TALK_AUTO_ADVANCE=1`: a line advances as soon as its own
-            // voice has played out, without a tap — the pacing a recording
-            // needs, where nobody is there to click.
+            // `dev.talk_auto_advance` (`MOLY_TALK_AUTO_ADVANCE`) `1`: a line
+            // advances as soon as its own voice has played out, without a tap
+            // — the pacing a recording needs, where nobody is there to click.
             if auto_advance_on_voice_end() {
                 state.release_lead = Some(AUTO_ADVANCE_LEAD);
             }
@@ -844,8 +844,9 @@ pub fn read_click_input(
     }
 }
 
-/// The smoke input (`MOLY_TALK_TAP_AT_SECS`): at the named seconds, set the
-/// same latch a real tap does (the headless window takes no real clicks).
+/// The smoke input (`dev.talk_tap_at_secs`, `MOLY_TALK_TAP_AT_SECS`): at the
+/// named seconds, set the same latch a real tap does (the headless window
+/// takes no real clicks).
 pub fn smoke_tap(
     mut state: ResMut<TalkWindowState>,
     sessions: Option<ResMut<crate::player_talk::PlayerTalkSession>>,
@@ -855,8 +856,7 @@ pub fn smoke_tap(
     mut next: Local<usize>,
 ) {
     let times = schedule.get_or_insert_with(|| {
-        std::env::var("MOLY_TALK_TAP_AT_SECS")
-            .ok()
+        moly_config::text(&moly_config::keys::DEV_TALK_TAP_AT_SECS)
             .map(|raw| {
                 raw.split(',')
                     .filter_map(|t| t.trim().parse::<f64>().ok().map(|v| v.max(0.0) as f32))
@@ -1096,5 +1096,7 @@ impl TalkWindowState {
 
 fn auto_advance_on_voice_end() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("MOLY_TALK_AUTO_ADVANCE").ok().as_deref() == Some("1"))
+    *ON.get_or_init(|| {
+        moly_config::text(&moly_config::keys::DEV_TALK_AUTO_ADVANCE).as_deref() == Some("1")
+    })
 }

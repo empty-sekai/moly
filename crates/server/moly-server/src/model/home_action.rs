@@ -19,8 +19,9 @@
 //! **Not answered here** (named): the craft's material spend, fixture grant
 //! and experience, and the sketch's blueprint. The requests the home actions
 //! send carry no blueprint; the craft and sketch requests that carry one are
-//! [`super::craft`]'s. Natively, `MOLY_CRAFT_MOCK_REQUEST` names a blueprint
-//! for the home action's craft request, which [`super::craft`] then answers.
+//! [`super::craft`]'s. Natively, `dev.craft_mock_request`
+//! (`MOLY_CRAFT_MOCK_REQUEST`) names a blueprint for the home action's craft
+//! request, which [`super::craft`] then answers.
 
 use bevy::prelude::*;
 use serde_json::{json, Map, Value};

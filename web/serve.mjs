@@ -19,7 +19,7 @@ import {
 import { pipeline } from "node:stream/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { playerDataResponse, DEFAULT_PLAYER_API } from "./player-api.mjs";
+import { playerDataResponse } from "./player-api.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url)); // .../web
 const workspaceRoot = path.resolve(here, "..");
@@ -34,6 +34,16 @@ if (!assetRoot) {
 if (!statSync(assetRoot, { throwIfNoEntry: false })?.isDirectory()) {
   console.error(`serve: MOLY_ASSET_ROOT is not a directory: ${assetRoot}`);
   process.exit(1);
+}
+
+// 玩家数据只从 MOLY_PLAYER_API 给的模板转发；没有它 /player-api/ 每个请求
+// 都以命名消息拒绝，绝不回落到别的主机。
+const playerApi = (process.env.MOLY_PLAYER_API ?? "").trim();
+if (!playerApi) {
+  console.error(
+    "serve: MOLY_PLAYER_API is not set; /player-api/ requests will be refused " +
+      "(it is the player-data URL template with {region} and {target_user_id}).",
+  );
 }
 
 const port = Number(process.argv[2] ?? 8000);
@@ -167,7 +177,7 @@ const server = createServer(async (request, response) => {
         new Request(new URL(raw, "http://localhost"), {
           method: request.method,
         }),
-        process.env.MOLY_PLAYER_API ?? DEFAULT_PLAYER_API,
+        playerApi,
       );
       send(
         proxied.status,

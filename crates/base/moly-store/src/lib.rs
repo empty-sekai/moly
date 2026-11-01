@@ -30,9 +30,6 @@ pub mod update;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod upgrade;
 
-/// The resource CDN used when none is configured.
-pub const DEFAULT_CDN: &str = "https://assets.pjsk.moe/sekai-extra-assets/";
-
 /// A full lowercase SHA-256 in hex.
 pub fn is_sha256(value: &str) -> bool {
     value.len() == 64
@@ -95,7 +92,7 @@ mod tests {
 
     #[test]
     fn cdn_addresses_are_https_directories() {
-        assert!(check_cdn(DEFAULT_CDN).is_ok());
+        assert!(check_cdn("https://resources.example/").is_ok());
         assert!(check_cdn("http://127.0.0.1:8080/store/").is_ok());
         for bad in [
             "http://cdn.example/",

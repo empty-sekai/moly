@@ -122,7 +122,7 @@ const SURFACES: [(&str, [i8; 3], i32); 16] = [
 
 #[cfg(not(target_arch = "wasm32"))]
 fn selection() -> Option<String> {
-    std::env::var("MOLY_FIXTURE_PREVIEW").ok()
+    moly_config::text(&moly_config::keys::DEV_FIXTURE_PREVIEW)
 }
 
 // Optional gimmick examples use the same master dimensions and import path.

@@ -254,7 +254,7 @@ export function resourceOrigin(value) {
 }
 /**
  * Explicit public object-store root.  Unlike resourceOrigin this includes the
- * provider path (`/sekai-extra-assets/`).  Every remote asset and release URL
+ * provider path (`/publication/`).  Every remote asset and release URL
  * must be derived from this value; there is deliberately no CDN fallback.
  */
 export function resourceBase(value) {

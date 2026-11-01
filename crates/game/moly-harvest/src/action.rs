@@ -1912,7 +1912,8 @@ pub fn advance_camera_shake(
     shakes.running.retain(|tween| !tween.done());
 }
 
-/// Instrument (off by default): `MOLY_HARVEST_AUTOPLAY` names a plan of
+/// Instrument (off by default): `dev.harvest_autoplay`
+/// (`MOLY_HARVEST_AUTOPLAY`) names a plan of
 /// kinds (`wood`, `mineral`, `plant`, `other`, `toolbox`, `driftage`), each
 /// optionally `kind:N` for N swings. Per step it walks to the nearest
 /// unharvested object of the kind, holds the action button until the object
@@ -2018,7 +2019,7 @@ pub fn autoplay_press(
     learn: Option<Res<super::learn::LearnSiteEnvironmentActive>>,
 ) {
     if auto.plan.is_none() {
-        let Ok(raw) = std::env::var("MOLY_HARVEST_AUTOPLAY") else {
+        let Some(raw) = moly_config::text(&moly_config::keys::DEV_HARVEST_AUTOPLAY) else {
             auto.plan = Some(Vec::new());
             return;
         };
@@ -2031,14 +2032,18 @@ pub fn autoplay_press(
                     .split_once(':')
                     .map_or((entry.trim(), None), |(w, n)| (w, n.parse().ok()));
                 (
-                    kind_type(word)
-                        .unwrap_or_else(|| panic!("MOLY_HARVEST_AUTOPLAY: unknown kind {word}")),
+                    kind_type(word).unwrap_or_else(|| {
+                        panic!(
+                            "dev.harvest_autoplay (MOLY_HARVEST_AUTOPLAY): unknown kind {word}"
+                        )
+                    }),
                     count,
                 )
             })
             .collect();
         warn!(
-            "[harvest-auto] MOLY_HARVEST_AUTOPLAY instrument on: plan {plan:?} (walks and presses for the run log; off by default)"
+            "[harvest-auto] dev.harvest_autoplay (MOLY_HARVEST_AUTOPLAY) instrument on: \
+             plan {plan:?} (walks and presses for the run log; off by default)"
         );
         auto.plan = Some(plan);
     }

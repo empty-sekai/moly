@@ -893,17 +893,21 @@ fn boot_visitors(
         }
         groups.push((row.unit_group_id, expanded));
     }
-    // A named host switch: the characters the home site boots with, as unit
-    // ids. The gate's own rows still place them (the gate draws the gathering
-    // and the cells); this only says who is on the roster, which is what the
-    // conversation cast is read from.
-    if let Ok(text) = std::env::var("MOLY_VISITOR_UNITS") {
+    // A named developer switch (`dev.visitor_units`, `MOLY_VISITOR_UNITS`):
+    // the characters the home site boots with, as unit ids. The gate's own
+    // rows still place them (the gate draws the gathering and the cells); this
+    // only says who is on the roster, which is what the conversation cast is
+    // read from.
+    if let Some(text) = moly_config::text(&moly_config::keys::DEV_VISITOR_UNITS) {
         let named: Vec<u32> = text
             .split(',')
             .filter_map(|part| part.trim().parse::<u32>().ok())
             .collect();
         if !named.is_empty() {
-            info!("[server-panel] visit list from MOLY_VISITOR_UNITS: units {named:?} (the gate rows still place them)");
+            info!(
+                "[server-panel] visit list from dev.visitor_units (MOLY_VISITOR_UNITS): \
+                 units {named:?} (the gate rows still place them)"
+            );
             units = named;
         }
     }

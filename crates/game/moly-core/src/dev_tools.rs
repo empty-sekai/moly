@@ -4,6 +4,7 @@
 //! [`dev_tools`], or asks [`installed`] when it is a plain function.
 
 use bevy::prelude::*;
+use moly_config::Key;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Present while developer scaffolding is part of this application.
@@ -39,11 +40,11 @@ pub fn installed() -> bool {
     INSTALLED.load(Ordering::Relaxed)
 }
 
-/// A native instrument's time window from its variable: `<until>` (from the
-/// start) or `<from>:<until>`, in seconds of app time. `None` when unset or
-/// not numbers.
-pub fn instrument_window(name: &str) -> Option<(f32, f32)> {
-    let raw = std::env::var(name).ok()?;
+/// A native instrument's time window from the text of its key (a developer
+/// switch, read through the configuration): `<until>` (from the start) or
+/// `<from>:<until>`, in seconds of app time. `None` when unset or not numbers.
+pub fn instrument_window(key: &'static Key) -> Option<(f32, f32)> {
+    let raw = moly_config::text(key)?;
     let secs = |text: &str| {
         text.trim()
             .parse::<f64>()
@@ -56,9 +57,9 @@ pub fn instrument_window(name: &str) -> Option<(f32, f32)> {
     }
 }
 
-/// Whether `now` lies inside the instrument window of `name`.
-pub fn instrument_open(name: &str, now: f32) -> bool {
-    instrument_window(name).is_some_and(|(from, until)| from <= now && now < until)
+/// Whether `now` lies inside the instrument window of `key`.
+pub fn instrument_open(key: &'static Key, now: f32) -> bool {
+    instrument_window(key).is_some_and(|(from, until)| from <= now && now < until)
 }
 
 static GAME_MODE: AtomicBool = AtomicBool::new(false);
@@ -68,19 +69,20 @@ pub fn enter_game_mode() {
     GAME_MODE.store(true, Ordering::Relaxed);
 }
 
-/// The environment variable of a native instrument. Game mode reads none:
-/// every instrument is off there, and the server document is the only input.
-pub fn instrument_env(name: &str) -> Option<String> {
+/// The text of a native instrument's developer-switch key. Game mode reads
+/// none: every instrument is off there, and the server document is the only
+/// input.
+pub fn instrument_env(key: &'static Key) -> Option<String> {
     if GAME_MODE.load(Ordering::Relaxed) {
         return None;
     }
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = name;
+        let _ = key;
         None
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        std::env::var(name).ok()
+        moly_config::text(key)
     }
 }

@@ -64,19 +64,26 @@ pub struct GameSeed {
     pub asset_catalog: Option<String>,
     pub resource_base: Option<String>,
     pub resource_origin: Option<String>,
-    /// Replacements for the public storage and master hosts and their
-    /// mirrors (absent or null: the named hosts).
+    /// The storage and master hosts and their mirrors, the master repository
+    /// host (a template naming `{repo}`) and each region's repository name
+    /// (absent or null: the host or region is not configured and not read).
     pub storage_base: Option<String>,
     pub storage_mirror_base: Option<String>,
     pub master_base: Option<String>,
     pub master_mirror_base: Option<String>,
+    pub master_repository: Option<String>,
+    pub master_repository_jp: Option<String>,
+    pub master_repository_cn: Option<String>,
+    pub master_repository_tw: Option<String>,
+    pub master_repository_kr: Option<String>,
+    pub master_repository_en: Option<String>,
     pub writable: bool,
     settings: Option<String>,
     server: Option<String>,
     local: Option<String>,
 }
 
-const SEED_FIELDS: [&str; 17] = [
+const SEED_FIELDS: [&str; 23] = [
     "schemaVersion",
     "abi",
     "region",
@@ -92,6 +99,12 @@ const SEED_FIELDS: [&str; 17] = [
     "storageMirrorBase",
     "masterBase",
     "masterMirrorBase",
+    "masterRepository",
+    "masterRepositoryJp",
+    "masterRepositoryCn",
+    "masterRepositoryTw",
+    "masterRepositoryKr",
+    "masterRepositoryEn",
     "writable",
     "documents",
 ];
@@ -195,6 +208,12 @@ pub fn parse_game_seed(input: &str) -> Result<GameSeed, String> {
         storage_mirror_base: absent_or_text(seed, "storageMirrorBase")?,
         master_base: absent_or_text(seed, "masterBase")?,
         master_mirror_base: absent_or_text(seed, "masterMirrorBase")?,
+        master_repository: absent_or_text(seed, "masterRepository")?,
+        master_repository_jp: absent_or_text(seed, "masterRepositoryJp")?,
+        master_repository_cn: absent_or_text(seed, "masterRepositoryCn")?,
+        master_repository_tw: absent_or_text(seed, "masterRepositoryTw")?,
+        master_repository_kr: absent_or_text(seed, "masterRepositoryKr")?,
+        master_repository_en: absent_or_text(seed, "masterRepositoryEn")?,
         writable: flag(seed, "writable")?,
         settings,
         server,
@@ -237,6 +256,12 @@ pub fn native_game_seed() -> Result<GameSeed, String> {
         storage_mirror_base: None,
         master_base: None,
         master_mirror_base: None,
+        master_repository: None,
+        master_repository_jp: None,
+        master_repository_cn: None,
+        master_repository_tw: None,
+        master_repository_kr: None,
+        master_repository_en: None,
         writable,
         settings,
         server,

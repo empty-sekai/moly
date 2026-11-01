@@ -23,15 +23,16 @@ use crate::player::{DashMode, PlayerControlled, PlayerInput};
 /// Update: reads the input faces and composes the camera-relative move
 /// direction.
 ///
-/// Smoke hook (`MOLY_PLAYER_AUTOWALK_SECS`, a host-side instrument, like the
-/// emoticon's `MOLY_EMOTICON_SHOW_SECS`): when set to a positive number, a
-/// fixed input is composed for that many seconds after startup (a walk half
-/// then a dash half), for unattended checks of the movement rules — the
-/// keyboard face receives no events without window focus, so the check of the
-/// real input face remains a manual user test.
-/// `MOLY_PLAYER_AUTOWALK_DIAGONAL`, when positive, switches the direction to
-/// the normalized diagonal (1,0,1)/√2. Reading and composing the input (the
-/// keyboard and stick faces) is consumed only by this repository's schedule.
+/// Smoke hook (`dev.player_autowalk_secs`, `MOLY_PLAYER_AUTOWALK_SECS`, a
+/// host-side instrument, like the emoticon's `MOLY_EMOTICON_SHOW_SECS`): when
+/// set to a positive number, a fixed input is composed for that many seconds
+/// after startup (a walk half then a dash half), for unattended checks of the
+/// movement rules — the keyboard face receives no events without window
+/// focus, so the check of the real input face remains a manual user test.
+/// `dev.player_autowalk_diagonal` (`MOLY_PLAYER_AUTOWALK_DIAGONAL`), when
+/// positive, switches the direction to the normalized diagonal (1,0,1)/√2.
+/// Reading and composing the input (the keyboard and stick faces) is consumed
+/// only by this repository's schedule.
 pub fn read_input(
     keys: Res<ButtonInput<KeyCode>>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
@@ -103,20 +104,21 @@ pub fn read_input(
     // Smoke hook: without window focus the keyboard face receives no events,
     // so when the variable is set a fixed input drives the first half (walk)
     // and the second half (dash) to check that the movement rules really move.
-    // The direction is +X by default; MOLY_PLAYER_AUTOWALK_DIAGONAL set to a
-    // positive number switches to the **normalized** diagonal (1,0,1)/√2
+    // The direction is +X by default; dev.player_autowalk_diagonal
+    // (MOLY_PLAYER_AUTOWALK_DIAGONAL) set to a positive number switches to the
+    // **normalized** diagonal (1,0,1)/√2
     // (length 1, the same cap as HandleInput's length — this only varies the
     // direction; a deliberately unnormalized "diagonal walks about 40% faster"
     // would be wrong: the InputVec length never exceeds 1, the clamping in the
     // animation rate happens against the gathering field's top speed 2.0→1.8,
     // and the diagonal needs no inflation).
-    let autowalk_secs = match std::env::var("MOLY_PLAYER_AUTOWALK_SECS") {
-        Ok(raw) => raw.trim().parse::<f64>().unwrap_or(0.0).max(0.0) as f32,
-        Err(_) => 0.0,
+    let autowalk_secs = match moly_config::text(&moly_config::keys::DEV_PLAYER_AUTOWALK_SECS) {
+        Some(raw) => raw.trim().parse::<f64>().unwrap_or(0.0).max(0.0) as f32,
+        None => 0.0,
     };
-    let diagonal = match std::env::var("MOLY_PLAYER_AUTOWALK_DIAGONAL") {
-        Ok(raw) => raw.trim().parse::<f64>().unwrap_or(0.0) > 0.0,
-        Err(_) => false,
+    let diagonal = match moly_config::text(&moly_config::keys::DEV_PLAYER_AUTOWALK_DIAGONAL) {
+        Some(raw) => raw.trim().parse::<f64>().unwrap_or(0.0) > 0.0,
+        None => false,
     };
     let smoke_direction = if diagonal {
         Vec3::new(1.0, 0.0, 1.0).normalize()

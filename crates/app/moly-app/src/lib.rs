@@ -76,13 +76,16 @@ fn run_app(
         fail_loud(&message);
     }
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(directory) = std::env::var_os("MOLY_PORTRAITS_OUT") {
+    if let Some(directory) = moly_config::text(&moly_config::keys::DEV_PORTRAITS_OUT) {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir_all(&directory).expect("create portrait output directory");
         // This opt-in export process never writes the user's normal settings.
         std::env::set_var("MOLY_SETTINGS_FILE", directory.join("capture-settings.json"));
-        let only = std::env::var("MOLY_PORTRAIT_UNIT").ok()
-            .map(|value| value.parse::<u32>().expect("MOLY_PORTRAIT_UNIT must be a source unit ID"));
+        let only = moly_config::text(&moly_config::keys::DEV_PORTRAIT_UNIT).map(|value| {
+            value.parse::<u32>().unwrap_or_else(|_| {
+                panic!("{} must be a source unit ID", moly_config::keys::DEV_PORTRAIT_UNIT)
+            })
+        });
         moly_game::configure_browser_stage(&mut app);
         moly_game::configure_browser_library(&mut app);
         moly_game::portraits::configure(&mut app, directory, only);
@@ -114,28 +117,27 @@ fn run_app(
     app.run();
 }
 
-/// The developer window's display translation: `MOLY_TEXT_SOURCE` names a
-/// source catalogue file, `MOLY_TEXT_OFFICIAL` and `MOLY_TEXT_COMMUNITY`
-/// optional overlay files, `MOLY_TEXT_LOCALE` the locale (default `zh-CN`).
-/// Without `MOLY_TEXT_SOURCE` the window shows the original text.
+/// The developer window's display translation: `text.source`
+/// (`MOLY_TEXT_SOURCE`) names a source catalogue file, `text.official` and
+/// `text.community` optional overlay files, `text.locale` the locale (default
+/// `zh-CN`). Without `text.source` the window shows the original text.
 #[cfg(not(target_arch = "wasm32"))]
 fn configure_text_from_files() -> Result<(), String> {
-    let Some(source) = std::env::var_os("MOLY_TEXT_SOURCE") else {
+    use moly_config::{keys, text};
+    let Some(source) = text(&keys::TEXT_SOURCE) else {
         return Ok(());
     };
-    let read = |name: &std::ffi::OsStr| {
-        std::fs::read_to_string(name)
-            .map_err(|error| format!("{}: {error}", name.to_string_lossy()))
-    };
-    let optional = |key: &str| match std::env::var_os(key) {
+    let read =
+        |name: &str| std::fs::read_to_string(name).map_err(|error| format!("{name}: {error}"));
+    let optional = |key: &'static moly_config::Key| match text(key) {
         Some(path) => read(&path),
         None => Ok(String::new()),
     };
-    let locale = std::env::var("MOLY_TEXT_LOCALE").unwrap_or_else(|_| "zh-CN".to_owned());
+    let locale = text(&keys::TEXT_LOCALE).unwrap_or_else(|| "zh-CN".to_owned());
     moly_game::text_localization::configure(
         &read(&source)?,
-        &optional("MOLY_TEXT_OFFICIAL")?,
-        &optional("MOLY_TEXT_COMMUNITY")?,
+        &optional(&keys::TEXT_OFFICIAL)?,
+        &optional(&keys::TEXT_COMMUNITY)?,
         &locale,
     )
 }
@@ -233,9 +235,9 @@ fn run_native_game() {
     moly_game::configure_browser_game(&mut app, seed);
     clean_view::install(&mut app).unwrap_or_else(|message| fail_loud(&message));
     install_link(&mut app);
-    // `MOLY_CHECK_SYSTEMS=1` reports every system parameter conflict and
-    // exits instead of starting the game.
-    if std::env::var("MOLY_CHECK_SYSTEMS").as_deref() == Ok("1") {
+    // `dev.check_systems = "1"` (`MOLY_CHECK_SYSTEMS=1`) reports every system
+    // parameter conflict and exits instead of starting the game.
+    if moly_config::text(&moly_config::keys::DEV_CHECK_SYSTEMS).as_deref() == Some("1") {
         let (checked, rejected) = moly_game::system_access::conflicts(&mut app);
         for line in &rejected {
             eprintln!("[system-access] {line}");

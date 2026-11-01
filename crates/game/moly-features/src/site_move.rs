@@ -555,14 +555,14 @@ fn admit(world: &mut World, request: SiteMoveRequest, frame: u64) {
     speed_lines::arm(world);
 }
 
-/// Tour instrument, not a source value: `MOLY_SITE_MOVE_LANDING_DRAW=<n>`
-/// replaces the landing draw with `n` (the failed landing is 3 of the 100
-/// draws, so a run otherwise rarely reaches it). A value outside the draw's
-/// range is refused.
-const LANDING_DRAW_ENV: &str = "MOLY_SITE_MOVE_LANDING_DRAW";
+/// Tour instrument, not a source value: `dev.site_move_landing_draw`
+/// (`MOLY_SITE_MOVE_LANDING_DRAW=<n>`) replaces the landing draw with `n` (the
+/// failed landing is 3 of the 100 draws, so a run otherwise rarely reaches
+/// it). A value outside the draw's range is refused.
+const LANDING_DRAW_ENV: &moly_config::Key = &moly_config::keys::DEV_SITE_MOVE_LANDING_DRAW;
 
 fn forced_landing_draw() -> Option<i32> {
-    let raw = std::env::var(LANDING_DRAW_ENV).ok()?;
+    let raw = moly_config::text(LANDING_DRAW_ENV)?;
     let (min, max) = timeline::LANDING_RANGE;
     let roll = raw
         .trim()
@@ -570,9 +570,17 @@ fn forced_landing_draw() -> Option<i32> {
         .ok()
         .filter(|roll| (min..max).contains(roll))
         .unwrap_or_else(|| {
-            panic!("{LANDING_DRAW_ENV}={raw}: not a draw of Random.Range({min}, {max})")
+            panic!(
+                "{variable} ({switch})={raw}: not a draw of Random.Range({min}, {max})",
+                variable = LANDING_DRAW_ENV.path,
+                switch = LANDING_DRAW_ENV.env.unwrap_or_default()
+            )
         });
-    warn!("[site-move] landing draw forced to {roll} by the {LANDING_DRAW_ENV} instrument");
+    warn!(
+        "[site-move] landing draw forced to {roll} by the {variable} ({switch}) instrument",
+        variable = LANDING_DRAW_ENV.path,
+        switch = LANDING_DRAW_ENV.env.unwrap_or_default()
+    );
     Some(roll)
 }
 

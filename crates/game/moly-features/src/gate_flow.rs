@@ -54,13 +54,15 @@
 //! store through [`crate::userdata::client::client_update_talk_list`]. Native request
 //! instruments (the gate screens' requests; those screens are the UI
 //! group's):
-//! - `MOLY_GATE_INVITE=<unit>[,pass]`: the reserve request for the selected
-//!   unit (the unit group of a single unit has the unit's id); `pass` first
-//!   gives the user a colorful pass through the server panel's edit (the
-//!   product default has none, and the reserve needs one);
-//! - `MOLY_GATE_CHANGE=<mysekaiGateId>[/<mysekaiGateSkinId>]:<group>,...`:
-//!   the gate change, with the server's answer stated (the new gate, its
-//!   skin and the visiting unit groups are server values).
+//! - `dev.gate_invite` (`MOLY_GATE_INVITE`) = `<unit>[,pass]`: the reserve
+//!   request for the selected unit (the unit group of a single unit has the
+//!   unit's id); `pass` first gives the user a colorful pass through the
+//!   server panel's edit (the product default has none, and the reserve needs
+//!   one);
+//! - `dev.gate_change` (`MOLY_GATE_CHANGE`) =
+//!   `<mysekaiGateId>[/<mysekaiGateSkinId>]:<group>,...`: the gate change,
+//!   with the server's answer stated (the new gate, its skin and the visiting
+//!   unit groups are server values).
 //!
 //! Each request is made once the home site stands with its gate and its
 //! visitors placed and the client has joined, after a 2 s settle (a product
@@ -109,8 +111,8 @@ use moly_link::ServerLink;
 use moly_protocol::api::{GateChangeRequest, GateReserveRequest};
 use moly_protocol::{Call, Reply};
 
-const INVITE: &str = "MOLY_GATE_INVITE";
-const CHANGE: &str = "MOLY_GATE_CHANGE";
+const INVITE: &moly_config::Key = &moly_config::keys::DEV_GATE_INVITE;
+const CHANGE: &moly_config::Key = &moly_config::keys::DEV_GATE_CHANGE;
 const FIXTURE_INDEX: &str = "moly://fixture-models/index.json";
 const INVITE_CONDITION: &str = "mysekai_character_talk_character_invite_game_character_unit_id";
 const LEAVE_CONDITION: &str = "mysekai_character_talk_character_leave_game_character_unit_id";
@@ -505,7 +507,11 @@ fn parse_instruments() -> Option<Request> {
         return match unit.trim().parse::<i32>() {
             Ok(unit) if unit > 0 => Some(Request::Reserve { unit, grant_pass }),
             _ => {
-                error!("[gate] {INVITE}={raw:?} is not <unit>[,pass]; no reserve request is made");
+                error!(
+                    "[gate] {variable} ({switch})={raw:?} is not <unit>[,pass]; no reserve request is made",
+                    variable = INVITE.path,
+                    switch = INVITE.env.unwrap_or_default()
+                );
                 None
             }
         };
@@ -531,7 +537,11 @@ fn parse_instruments() -> Option<Request> {
                 Some(Request::Change { gate, skin, groups })
             }
             _ => {
-                error!("[gate] {CHANGE}={raw:?} is not <gateId>[/<skinId>]:<group>,...; no gate change request is made");
+                error!(
+                    "[gate] {variable} ({switch})={raw:?} is not <gateId>[/<skinId>]:<group>,...; no gate change request is made",
+                    variable = CHANGE.path,
+                    switch = CHANGE.env.unwrap_or_default()
+                );
                 None
             }
         };

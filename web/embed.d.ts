@@ -179,7 +179,7 @@ export interface MountOptions {
   view: "stage";
   src: string;
   assets?: string;
-  /** Explicit HTTPS object-store prefix, e.g. https://assets.pjsk.moe/sekai-extra-assets/. */
+  /** Explicit HTTPS object-store prefix, e.g. https://resources.example/moly/. */
   resourceBase?: string;
   resourceOrigin?: string;
   region?: MolyRegion;

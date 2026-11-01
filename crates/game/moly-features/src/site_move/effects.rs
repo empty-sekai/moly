@@ -845,9 +845,10 @@ impl EffectPools {
         }
     }
 
-    /// `MOLY_EFFECT_SAMPLE=1` (an instrument, off by default): every 0.25 s
-    /// after an emit, the copy's live particles, the particles born so far
-    /// and its playing systems, until nothing is left (at most 8 s).
+    /// `dev.effect_sample` (`MOLY_EFFECT_SAMPLE=1`, an instrument, off by
+    /// default): every 0.25 s after an emit, the copy's live particles, the
+    /// particles born so far and its playing systems, until nothing is left
+    /// (at most 8 s).
     fn sample(&mut self, world: &World, index: usize) {
         let copy = &mut self.copies[index];
         let (Some(played_at), true) = (copy.played_at, copy.planned) else {
@@ -895,9 +896,11 @@ impl EffectPools {
 fn sample_enabled() -> bool {
     static SAMPLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *SAMPLE.get_or_init(|| {
-        let on = std::env::var("MOLY_EFFECT_SAMPLE").is_ok_and(|value| value == "1");
+        let on = moly_config::text(&moly_config::keys::DEV_EFFECT_SAMPLE).as_deref() == Some("1");
         if on {
-            warn!("[effect-sample] MOLY_EFFECT_SAMPLE=1: live particle samples of played effect copies on (instrument)");
+            warn!(
+                "[effect-sample] dev.effect_sample (MOLY_EFFECT_SAMPLE=1): live particle samples of played effect copies on (instrument)"
+            );
         }
         on
     })
@@ -990,7 +993,8 @@ impl Effects {
         self.flying.or(self.stopped)
     }
 
-    /// Per-frame trace of the flying copy's draws (`MOLY_EFFECT_TRACE=1`).
+    /// Per-frame trace of the flying copy's draws (`dev.effect_trace`,
+    /// `MOLY_EFFECT_TRACE=1`).
     pub fn advance(&mut self, world: &mut World, _dt: f32) {
         if let Some(root) = self.flying {
             trace_draws(world, "Flying", root);
@@ -1068,10 +1072,10 @@ fn enable_renderers_named(world: &mut World, name: &str, kind: u16, draws: &[(En
     );
 }
 
-/// Per-frame trace of an effect instance's draws (`MOLY_EFFECT_TRACE=1`,
-/// an instrument; off by default): the renderer's enabled flag, the draw's
-/// inherited visibility and the live particle count of its system after the
-/// last particle step.
+/// Per-frame trace of an effect instance's draws (`dev.effect_trace`,
+/// `MOLY_EFFECT_TRACE=1`, an instrument; off by default): the renderer's
+/// enabled flag, the draw's inherited visibility and the live particle count
+/// of its system after the last particle step.
 pub fn trace_draws(world: &World, label: &str, root: Entity) {
     if !trace_enabled() {
         return;
@@ -1103,10 +1107,10 @@ pub fn trace_draws(world: &World, label: &str, root: Entity) {
 pub fn trace_enabled() -> bool {
     static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *TRACE.get_or_init(|| {
-        let on = std::env::var("MOLY_EFFECT_TRACE").is_ok_and(|value| value == "1");
+        let on = moly_config::text(&moly_config::keys::DEV_EFFECT_TRACE).as_deref() == Some("1");
         if on {
             warn!(
-                "[effect-trace] MOLY_EFFECT_TRACE=1: per-frame effect draw trace on (instrument)"
+                "[effect-trace] dev.effect_trace (MOLY_EFFECT_TRACE=1): per-frame effect draw trace on (instrument)"
             );
         }
         on

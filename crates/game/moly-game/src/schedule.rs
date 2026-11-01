@@ -583,7 +583,8 @@ pub fn install(app: &mut App) {
                     // then its own click, after the action buttons' click.
                     action_button::dash::place,
                     action_button::dash::click,
-                    // NPC 臂冒烟口（MOLY_PICK_NPC_TAP_SECS）：名册成员的
+                    // NPC 臂冒烟口（`dev.pick_npc_tap_secs`，
+                    // `MOLY_PICK_NPC_TAP_SECS`）：名册成员的
                     // 世界位投影点按，走同一条拾取链过配对门。
                     pick::smoke_npc_autotap,
                     // 玩家对话冒烟口同拍注入（候选成员的世界位投影点按，
@@ -741,7 +742,8 @@ pub fn install(app: &mut App) {
                         )
                             .chain(),
                         balloon::tick.after(balloon::after_edit_reaction),
-                        // 层序探针（MOLY_BALLOON_ORDER_SECS > 0 才活）：造一对
+                        // 层序探针（`dev.balloon_order_secs`，
+                        // `MOLY_BALLOON_ORDER_SECS` > 0 才活）：造一对
                         // 同屏点重叠的探针气泡，到秒数自动退出（无头验收）。
                         balloon::order_smoke.after(balloon::tick),
                     ),

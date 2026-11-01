@@ -8,6 +8,12 @@
 //! Which host a consumer tries first, and whether it falls back to the others,
 //! is the consumer's rule.
 //!
+//! The bases and the regions' repository names are configuration
+//! (`resources.storage`, `resources.storage_mirror`, `masters.base`,
+//! `masters.mirror`, `masters.repository`, `masters.repository_jp` …
+//! `masters.repository_en`); a host or a region whose key is not configured
+//! is not read, and a read through it fails with a message naming the key.
+//!
 //! On native the whole transfer, request and body, runs on the blocking
 //! thread pool through `ureq`, so a slow or stalled host never holds a thread
 //! of the asset task pool. It fails as `TimedOut` when it has not completed
@@ -35,6 +41,7 @@ use bevy::asset::io::{
 };
 use bevy::asset::{AssetApp, AssetPath};
 use bevy::prelude::Resource;
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -47,19 +54,24 @@ pub const MASTER_FIRST_BYTE_MS: i32 = 10_000;
 /// product's own asset requests.
 pub const NATIVE_READ_MS: u64 = 60_000;
 
-/// The admitted bases, each a canonical HTTPS directory ending in `/`.
+/// The admitted bases and repository names. Each configured base is a
+/// canonical HTTPS directory ending in `/`; `None` means the configuration
+/// names none, and that host is not read.
 ///
-/// `master` names the master host, whose per-region directory is `jp` or `cn`
-/// to match it. `master_repository` names the first master host, whose path
-/// names the region's repository: a table of `cn` there is
-/// `haruki-sekai-sc-master/main/master/<table>.json`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// `master` names the master host, whose per-region directory is the
+/// region's (`jp`, `cn`, …). `master_repository` names the template of the
+/// repository host: its `{repo}` segment is replaced by the region's
+/// `repositories` name, and a region with none there is not read.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RemoteBases {
-    pub storage: String,
-    pub storage_mirror: String,
-    pub master: String,
-    pub master_mirror: String,
-    pub master_repository: String,
+    pub storage: Option<String>,
+    pub storage_mirror: Option<String>,
+    pub master: Option<String>,
+    pub master_mirror: Option<String>,
+    pub master_repository: Option<String>,
+    /// The repository name of each region on the repository host, by the key
+    /// that configures it (`masters.repository_cn`).
+    pub repositories: BTreeMap<Region, String>,
 }
 
 /// One admitted host, each an asset source of its own.
@@ -105,13 +117,29 @@ impl Remote {
         )
     }
 
-    fn base(self, bases: &RemoteBases) -> &str {
+    /// Whether the configuration names the host's base.
+    pub fn names(self, bases: &RemoteBases) -> bool {
+        self.base(bases).is_some()
+    }
+
+    fn base(self, bases: &RemoteBases) -> Option<&str> {
         match self {
-            Remote::Storage => &bases.storage,
-            Remote::StorageMirror => &bases.storage_mirror,
-            Remote::Master => &bases.master,
-            Remote::MasterMirror => &bases.master_mirror,
-            Remote::MasterRepository => &bases.master_repository,
+            Remote::Storage => bases.storage.as_deref(),
+            Remote::StorageMirror => bases.storage_mirror.as_deref(),
+            Remote::Master => bases.master.as_deref(),
+            Remote::MasterMirror => bases.master_mirror.as_deref(),
+            Remote::MasterRepository => bases.master_repository.as_deref(),
+        }
+    }
+
+    /// The configuration key (`section.name`) of the host's base.
+    pub fn key(self) -> &'static str {
+        match self {
+            Remote::Storage => moly_config::keys::STORAGE_BASE.path,
+            Remote::StorageMirror => moly_config::keys::STORAGE_MIRROR.path,
+            Remote::Master => moly_config::keys::MASTER_BASE.path,
+            Remote::MasterMirror => moly_config::keys::MASTER_MIRROR.path,
+            Remote::MasterRepository => moly_config::keys::MASTER_REPOSITORY.path,
         }
     }
 }
@@ -174,15 +202,15 @@ impl Region {
         ALL.into_iter().find(|region| region.directory() == name)
     }
 
-    /// The region's repository on the repository host: the path's
-    /// repository segment.
-    pub fn repository(self) -> &'static str {
+    /// The configuration key of the region's repository name on the
+    /// repository host (`masters.repository_cn`).
+    pub fn repository_key(self) -> &'static str {
         match self {
-            Self::Jp => "haruki-sekai-master",
-            Self::Cn => "haruki-sekai-sc-master",
-            Self::Tw => "haruki-sekai-tc-master",
-            Self::Kr => "haruki-sekai-kr-master",
-            Self::En => "haruki-sekai-en-master",
+            Self::Jp => moly_config::keys::MASTER_REPOSITORY_JP.path,
+            Self::Cn => moly_config::keys::MASTER_REPOSITORY_CN.path,
+            Self::Tw => moly_config::keys::MASTER_REPOSITORY_TW.path,
+            Self::Kr => moly_config::keys::MASTER_REPOSITORY_KR.path,
+            Self::En => moly_config::keys::MASTER_REPOSITORY_EN.path,
         }
     }
 
@@ -221,10 +249,12 @@ pub fn master_directory_table(region: Region, table: &str) -> String {
     format!("{}/master/{table}.json", region.directory())
 }
 
-/// The master path of `table` below the region's repository
-/// (`haruki-sekai-master/main/master/musicVocals.json`).
+/// The master path of `table` on the repository host: the region directory,
+/// then the repository's `main` branch (`jp/main/master/musicVocals.json`).
+/// The host's `{repo}` template takes the region's configured repository
+/// name in place of the first segment.
 pub fn master_repository_table(region: Region, table: &str) -> String {
-    format!("{}/main/master/{table}.json", region.repository())
+    format!("{}/main/master/{table}.json", region.directory())
 }
 
 /// One master table of a region on a master host, by its upstream table name
@@ -239,26 +269,30 @@ pub fn master_table(host: Remote, region: Region, table: &str) -> AssetPath<'sta
     AssetPath::from(format!("{}://{path}", host.source()))
 }
 
-/// A region's `versions/current_version.json` on a master host.
+/// A region's `versions/current_version.json` on a master host
+/// (`jp/versions/current_version.json`; on the repository host below the
+/// region's `main` branch).
 pub fn master_version(host: Remote, region: Region) -> AssetPath<'static> {
     debug_assert!(host.is_master());
     let path = match host {
         Remote::MasterRepository => {
-            format!("{}/main/versions/current_version.json", region.repository())
+            format!("{}/main/versions/current_version.json", region.directory())
         }
         _ => format!("{}/versions/current_version.json", region.directory()),
     };
     AssetPath::from(format!("{}://{path}", host.source()))
 }
 
-/// A table in an immutable commit of the admitted repository host. The
-/// source identity reader validates the full commit and its repository before
-/// calling this; it never names a different host or a moving mirror.
+/// A table in an immutable commit of the repository host
+/// (`jp/<commit>/master/<table>.json`; `{repo}` is the region's configured
+/// repository name). The source identity reader validates the full commit and
+/// its repository before calling this; it never names a different host or a
+/// moving mirror.
 pub(crate) fn master_table_at(region: Region, commit: &str, table: &str) -> AssetPath<'static> {
     AssetPath::from(format!(
         "{}://{}/{commit}/master/{table}.json",
         Remote::MasterRepository.source(),
-        region.repository()
+        region.directory()
     ))
 }
 
@@ -267,7 +301,7 @@ pub(crate) fn master_version_at(region: Region, commit: &str) -> AssetPath<'stat
     AssetPath::from(format!(
         "{}://{}/{commit}/versions/current_version.json",
         Remote::MasterRepository.source(),
-        region.repository()
+        region.directory()
     ))
 }
 
@@ -276,7 +310,8 @@ pub(crate) fn master_version_at(region: Region, commit: &str) -> AssetPath<'stat
 pub struct RemoteAdmission(Arc<RwLock<Option<RemoteBases>>>);
 
 impl RemoteAdmission {
-    fn set(&self, bases: RemoteBases) {
+    /// Admits `bases`; [`admit`] does this for a built app.
+    pub(crate) fn set(&self, bases: RemoteBases) {
         *self
             .0
             .write()
@@ -291,29 +326,92 @@ impl RemoteAdmission {
             .clone()
     }
 
-    fn base(&self, remote: Remote) -> Option<String> {
-        self.bases().map(|bases| remote.base(&bases).to_owned())
+    /// The admitted base of a host, or `None` when no base was admitted; the
+    /// configuration not naming one for the host is refused by its key.
+    fn base(&self, remote: Remote) -> Result<Option<String>, String> {
+        let Some(bases) = self.bases() else {
+            return Ok(None);
+        };
+        remote
+            .base(&bases)
+            .map(|base| Some(base.to_owned()))
+            .ok_or_else(|| unconfigured(remote.key()))
     }
 
-    /// The HTTPS URL a remote asset path is read from, once admitted.
-    pub fn url(&self, path: &AssetPath) -> Option<String> {
-        let source = path.source().as_str()?;
-        let remote = Remote::ALL
+    /// Whether `remote` may be read: nothing was admitted yet (the consumer
+    /// decides), or the admitted configuration names its base.
+    pub(crate) fn reads(&self, remote: Remote) -> bool {
+        self.base(remote).is_ok()
+    }
+
+    /// The admitted base of `remote`, `None` before any admission, or the
+    /// refusal naming its key when the configuration names none.
+    #[cfg(test)]
+    pub(crate) fn admitted_base(&self, remote: Remote) -> Result<Option<String>, String> {
+        self.base(remote)
+    }
+
+    /// The admitted repository name of a region, or the refusal naming the
+    /// key that configures it.
+    pub fn repository(&self, region: Region) -> Result<String, String> {
+        self.bases()
+            .as_ref()
+            .and_then(|bases| bases.repositories.get(&region).cloned())
+            .ok_or_else(|| unconfigured(region.repository_key()))
+    }
+
+    /// The HTTPS URL a remote asset path is read from, once admitted. A path
+    /// that names no remote host, or whose host or region is not configured,
+    /// is refused by name.
+    pub fn url(&self, path: &AssetPath) -> Result<String, String> {
+        let Some(source) = path.source().as_str() else {
+            return Err(format!("{path} names no asset source"));
+        };
+        let Some(remote) = Remote::ALL
             .into_iter()
-            .find(|remote| remote.source() == source)?;
-        join(&self.base(remote)?, path.path().to_str()?)
+            .find(|remote| remote.source() == source)
+        else {
+            return Err(format!("{path} names no remote host"));
+        };
+        let Some(base) = self.base(remote)? else {
+            return Err("no remote base was admitted".into());
+        };
+        let relative = path
+            .path()
+            .to_str()
+            .ok_or_else(|| format!("{path} is not a plain relative path"))?;
+        join(&base, relative, |region| self.repository(region))
+            .map_err(|reason| format!("{path}: {reason}"))
     }
 }
 
+/// The refusal of a key that names no address.
+fn unconfigured(key: &'static str) -> String {
+    let env = moly_config::key(key).and_then(|key| key.env);
+    moly_config::ConfigError::Missing { key, env }.to_string()
+}
+
 /// `base` followed by `relative`. A base that names `{repo}` (the repository
-/// host's template) takes the first segment of `relative` there, and the rest
-/// of `relative` after it.
-fn join(base: &str, relative: &str) -> Option<String> {
+/// host's template) takes there the configured repository name of the region
+/// the first segment of `relative` names (`jp/…`), and the rest of `relative`
+/// after it. `repository` refuses by name when the region has no configured
+/// repository name.
+fn join(
+    base: &str,
+    relative: &str,
+    repository: impl FnOnce(Region) -> Result<String, String>,
+) -> Result<String, String> {
     if !base.contains("{repo}") {
-        return Some(format!("{base}{relative}"));
+        return Ok(format!("{base}{relative}"));
     }
-    let (repo, rest) = relative.split_once('/')?;
-    Some(format!("{}{rest}", base.replace("{repo}", repo)))
+    let (directory, rest) = relative.split_once('/').ok_or_else(|| {
+        format!("{relative} names no region directory below the repository host")
+    })?;
+    let region = Region::from_directory(directory).ok_or_else(|| {
+        format!("{relative} names no region directory below the repository host")
+    })?;
+    let repo = repository(region)?;
+    Ok(format!("{}{rest}", base.replace("{repo}", &repo)))
 }
 
 /// Registers the sources; must run before `AssetPlugin` is built.
@@ -360,14 +458,17 @@ impl RemoteReader {
         let base = self
             .admission
             .base(self.remote)
+            .map_err(&refuse)?
             .ok_or_else(|| refuse("no base was admitted".into()))?;
         let host_and_path = base
             .strip_prefix("https://")
             .ok_or_else(|| refuse(format!("the admitted base {base} is not HTTPS")))?;
         let relative =
             plain_relative(path).ok_or_else(|| refuse("not a plain relative path".into()))?;
-        let joined = join(host_and_path, &relative)
-            .ok_or_else(|| refuse(format!("{relative} names no repository")))?;
+        let joined = join(host_and_path, &relative, |region| {
+            self.admission.repository(region)
+        })
+        .map_err(|reason| refuse(reason))?;
         Ok(PathBuf::from(joined))
     }
 }
@@ -587,38 +688,117 @@ mod native {
 mod master_pin_tests {
     use super::*;
 
+    /// Every key a refusal or a read names is declared in the configuration.
+    #[test]
+    fn the_remote_keys_are_declared() {
+        for host in Remote::ALL {
+            assert!(moly_config::key(host.key()).is_some(), "{}", host.key());
+        }
+        for region in ALL {
+            assert!(moly_config::key(region.repository_key()).is_some());
+        }
+    }
+
+    fn admitted(overrides: crate::asset_source::RemoteBaseOverrides<'_>) -> RemoteAdmission {
+        let admission = RemoteAdmission::default();
+        admission.set(crate::asset_source::remote_bases(overrides).unwrap());
+        admission
+    }
+
     #[test]
     fn commit_paths_stay_below_the_admitted_repository_template() {
-        let bases = crate::asset_source::remote_bases(crate::asset_source::RemoteBaseOverrides {
-            master_repository: Some("https://mirror.example/owner/{repo}/"),
+        let admission = admitted(crate::asset_source::RemoteBaseOverrides {
+            master_repository: Some("https://masters.example/{repo}/"),
+            master_repository_jp: Some("example-jp"),
             ..Default::default()
-        })
-        .unwrap();
-        let admission = RemoteAdmission::default();
-        admission.set(bases);
+        });
         let commit = "0123456789abcdef0123456789abcdef01234567";
         assert_eq!(
             admission.url(&master_table_at(Region::Jp, commit, "mysekaiFixtures")),
-            Some(format!(
-                "https://mirror.example/owner/haruki-sekai-master/{commit}/master/mysekaiFixtures.json"
+            Ok(format!(
+                "https://masters.example/example-jp/{commit}/master/mysekaiFixtures.json"
             ))
         );
         assert_eq!(
             admission.url(&master_version_at(Region::Jp, commit)),
-            Some(format!(
-                "https://mirror.example/owner/haruki-sekai-master/{commit}/versions/current_version.json"
+            Ok(format!(
+                "https://masters.example/example-jp/{commit}/versions/current_version.json"
             ))
         );
         assert_eq!(
-            admission.url(&master_table(
-                Remote::MasterRepository,
-                Region::Jp,
-                "mysekaiFixtures"
-            )),
-            Some(
-                "https://mirror.example/owner/haruki-sekai-master/main/master/mysekaiFixtures.json"
-                    .to_owned()
-            )
+            admission.url(&master_table(Remote::MasterRepository, Region::Jp, "mysekaiFixtures")),
+            Ok("https://masters.example/example-jp/main/master/mysekaiFixtures.json".to_owned())
         );
+        assert_eq!(
+            admission.url(&master_version(Remote::MasterRepository, Region::Jp)),
+            Ok("https://masters.example/example-jp/main/versions/current_version.json".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_region_without_a_configured_repository_name_refuses_by_key() {
+        let admission = admitted(crate::asset_source::RemoteBaseOverrides {
+            master_repository: Some("https://masters.example/{repo}/"),
+            master_repository_jp: Some("example-jp"),
+            ..Default::default()
+        });
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        for path in [
+            master_table_at(Region::Cn, commit, "mysekaiFixtures"),
+            master_version_at(Region::Cn, commit),
+            master_table(Remote::MasterRepository, Region::Cn, "mysekaiFixtures"),
+            master_version(Remote::MasterRepository, Region::Cn),
+        ] {
+            let url = admission.url(&path).unwrap_err();
+            assert!(url.contains("masters.repository_cn"), "{url}");
+        }
+    }
+
+    #[test]
+    fn the_other_master_hosts_read_the_region_directory() {
+        let admission = admitted(crate::asset_source::RemoteBaseOverrides {
+            master: Some("https://masters.example/"),
+            ..Default::default()
+        });
+        assert_eq!(
+            admission.url(&master_table(Remote::Master, Region::Cn, "configs")),
+            Ok("https://masters.example/cn/master/configs.json".to_owned())
+        );
+        assert_eq!(
+            admission.url(&master_version(Remote::Master, Region::Cn)),
+            Ok("https://masters.example/cn/versions/current_version.json".to_owned())
+        );
+        // A host the configuration does not name is not read.
+        let url = admission
+            .url(&master_table(Remote::MasterMirror, Region::Jp, "configs"))
+            .unwrap_err();
+        assert!(url.contains("masters.mirror"), "{url}");
+    }
+
+    #[test]
+    fn an_unconfigured_storage_base_refuses_by_key_and_variable() {
+        let admission = admitted(crate::asset_source::RemoteBaseOverrides::default());
+        let path = storage_asset(Remote::Storage, Region::Jp, "music/long/a.mp3");
+        let url = admission.url(&path).unwrap_err();
+        assert!(
+            url.contains("resources.storage") && url.contains("MOLY_STORAGE_BASE"),
+            "{url}"
+        );
+    }
+
+    #[test]
+    fn a_configured_storage_base_serves_its_region_directory() {
+        let admission = admitted(crate::asset_source::RemoteBaseOverrides {
+            storage: Some("https://storage.example/"),
+            ..Default::default()
+        });
+        assert_eq!(
+            admission.url(&storage_asset(Remote::Storage, Region::Jp, "music/long/a.mp3")),
+            Ok(format!(
+                "https://storage.example/{}/music/long/a.mp3",
+                Region::Jp.storage_directory()
+            ))
+        );
+        assert!(admission.url(&storage_asset(Remote::StorageMirror, Region::Jp, "a")).is_err());
     }
 }

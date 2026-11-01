@@ -19,7 +19,7 @@ pub struct Installed {
     pub region: String,
     pub version: String,
     pub catalog: String,
-    /// The CDN it was downloaded from.
+    /// The CDN it was downloaded from, as configured then.
     pub cdn: String,
     /// Seconds since the Unix epoch when the last install finished.
     pub installed_at: u64,
@@ -86,7 +86,7 @@ mod tests {
             region: region.into(),
             version: "1".into(),
             catalog: format!("{id:0>64}"),
-            cdn: crate::DEFAULT_CDN.into(),
+            cdn: "https://resources.example/".into(),
             installed_at: at,
             bytes: 1,
         }

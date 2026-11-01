@@ -1039,7 +1039,8 @@ pub fn start_selected(
 // ---------------------------------------------------------------------------
 
 /// 合成对话的默认行数：字典序前 3 条 talk-voice cue，演示行→cue→包→时长
-/// 全链足够，也不把冒烟拖长。`MOLY_TALK_VOICE_PROBE_LINES` 可覆写行数
+/// 全链足够，也不把冒烟拖长。`dev.talk_voice_probe_lines`
+/// （`MOLY_TALK_VOICE_PROBE_LINES`）可覆写行数
 /// （逐行放行节奏的账目要更多行才推得开），非法值响亮告警后按默认。
 const VOICE_PROBE_LINES_DEFAULT: usize = 3;
 
@@ -1047,14 +1048,13 @@ const VOICE_PROBE_LINES_DEFAULT: usize = 3;
 #[derive(Component)]
 pub struct VoiceProbeGate;
 
-/// Update：`MOLY_TALK_VOICE_PROBE_SECS` 给定秒数后，挂门牌让真实选取
-/// 让行，等无会话在播时注入一个一次性合成段（show 窗体步 + N 条 voice
-/// 行 + 点跳按窗体点击闩放行；N 默认 3，
-/// `MOLY_TALK_VOICE_PROBE_LINES` 覆写），走与
-/// 真对话同一条步进/分发/起播通路——talk voice
-/// 的起播链冒烟就从这来（fixture-talks 语料的 voice cue 与提取语料零
-/// 交集，真实对话全走缺 cue 支，那是另一条必验路径）。无该环境变量时
-/// 注入口自关，零开销；变量的非法值响亮告警后同样关闭。
+/// Update：`dev.talk_voice_probe_secs`（`MOLY_TALK_VOICE_PROBE_SECS`）给定
+/// 秒数后，挂门牌让真实选取让行，等无会话在播时注入一个一次性合成段
+/// （show 窗体步 + N 条 voice 行 + 点跳按窗体点击闩放行；N 默认 3，
+/// `dev.talk_voice_probe_lines` 覆写），走与真对话同一条步进/分发/起播
+/// 通路——talk voice 的起播链冒烟就从这来（fixture-talks 语料的 voice cue
+/// 与提取语料零交集，真实对话全走缺 cue 支，那是另一条必验路径）。无该
+/// 开关时注入口自关，零开销；开关的非法值响亮告警后同样关闭。
 pub fn voice_probe(
     mut commands: Commands,
     time: Res<Time>,
@@ -1068,15 +1068,18 @@ pub fn voice_probe(
     if *done {
         return;
     }
-    let secs = match std::env::var("MOLY_TALK_VOICE_PROBE_SECS") {
-        Err(_) => {
+    let secs = match moly_config::text(&moly_config::keys::DEV_TALK_VOICE_PROBE_SECS) {
+        None => {
             *done = true;
             return;
         }
-        Ok(raw) => match raw.parse::<f32>() {
+        Some(raw) => match raw.parse::<f32>() {
             Ok(secs) => secs,
             Err(_) => {
-                warn!("[talk-voice] MOLY_TALK_VOICE_PROBE_SECS={raw:?} 不是数，注入口关闭");
+                warn!(
+                    "[talk-voice] dev.talk_voice_probe_secs (MOLY_TALK_VOICE_PROBE_SECS)={raw:?} \
+                     不是数，注入口关闭"
+                );
                 *done = true;
                 return;
             }
@@ -1096,13 +1099,15 @@ pub fn voice_probe(
     if active.is_some() || player_session.is_some() {
         return;
     }
-    let lines = match std::env::var("MOLY_TALK_VOICE_PROBE_LINES") {
-        Err(_) => VOICE_PROBE_LINES_DEFAULT,
-        Ok(raw) => match raw.parse::<usize>() {
+    let lines = match moly_config::text(&moly_config::keys::DEV_TALK_VOICE_PROBE_LINES) {
+        None => VOICE_PROBE_LINES_DEFAULT,
+        Some(raw) => match raw.parse::<usize>() {
             Ok(n) if n > 0 => n,
             _ => {
                 warn!(
-                    "[talk-voice] MOLY_TALK_VOICE_PROBE_LINES={raw:?} 不是正整数，按默认 {VOICE_PROBE_LINES_DEFAULT} 行"
+                    "[talk-voice] dev.talk_voice_probe_lines \
+                     (MOLY_TALK_VOICE_PROBE_LINES)={raw:?} 不是正整数，\
+                     按默认 {VOICE_PROBE_LINES_DEFAULT} 行"
                 );
                 VOICE_PROBE_LINES_DEFAULT
             }
@@ -1190,8 +1195,8 @@ pub fn voice_probe(
 #[derive(Component)]
 pub struct PartVoiceProbeGate;
 
-/// Update: after `MOLY_PARTVOICE_PROBE_SECS` seconds, injects a one-shot composed
-/// segment. Material is chosen from the real corpus (first hit in candidate-table
+/// Update: after `dev.partvoice_probe_secs` (`MOLY_PARTVOICE_PROBE_SECS`)
+/// seconds, injects a one-shot composed segment. Material is chosen from the real corpus (first hit in candidate-table
 /// order, deterministic), with four arms:
 /// ① the mysekai main chain voice step (speaker→two bundles→stream table) — the
 ///    playback arm;
@@ -1224,15 +1229,18 @@ pub fn partvoice_probe(
     if *done {
         return;
     }
-    let secs = match std::env::var("MOLY_PARTVOICE_PROBE_SECS") {
-        Err(_) => {
+    let secs = match moly_config::text(&moly_config::keys::DEV_PARTVOICE_PROBE_SECS) {
+        None => {
             *done = true;
             return;
         }
-        Ok(raw) => match raw.parse::<f32>() {
+        Some(raw) => match raw.parse::<f32>() {
             Ok(secs) => secs,
             Err(_) => {
-                warn!("[partvoice] MOLY_PARTVOICE_PROBE_SECS={raw:?} 不是数，注入口关闭");
+                warn!(
+                    "[partvoice] dev.partvoice_probe_secs (MOLY_PARTVOICE_PROBE_SECS)={raw:?} \
+                     不是数，注入口关闭"
+                );
                 *done = true;
                 return;
             }

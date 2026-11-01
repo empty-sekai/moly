@@ -1,0 +1,939 @@
+# Direct reads of MOLY_* environment variables outside moly-config.
+#
+# Every other setting is a moly-config key (see docs/configuration.md); tools/config/check.py
+# fails on a read that is not listed here and on an entry whose read is gone.
+
+[[read]]
+file = "crates/app/moly-android/src/lib.rs"
+variable = "MOLY_RESOURCE_BASE"
+reason = "build-time setting of the Android package"
+
+[[read]]
+file = "crates/app/moly-android/src/lib.rs"
+variable = "MOLY_SERVER_URL"
+reason = "build-time setting of the Android package, also passed to the game through the environment"
+
+[[read]]
+file = "crates/app/moly-server-host/src/main.rs"
+variable = "MOLY_SERVER_ADMIN"
+reason = "a secret, kept out of the configuration file"
+
+[[read]]
+file = "crates/base/moly-law/src/carve/obstacle.rs"
+variable = "MOLY_CARVE_HULL_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/carve/polymesh.rs"
+variable = "MOLY_NAV_MOVE_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/fixture/mip.rs"
+variable = "MOLY_ASSET_ROOT"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/armf.rs"
+variable = "MOLY_ARMF_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/autonomous_emission.rs"
+variable = "MOLY_AUTONOMOUS_NATIVE_DIR"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/autonomous_emission.rs"
+variable = "MOLY_EMISSION_CURVE_CALLS_BITFLIP"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/autonomous_emission.rs"
+variable = "MOLY_EMISSION_LOAD_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/autonomous_emission.rs"
+variable = "MOLY_EMISSION_TWO_CONSTANTS_RECEIPT"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/collision_mesh/box_sweep.rs"
+variable = "MOLY_BOX_BOUNDS_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/collision_mesh/box_sweep.rs"
+variable = "MOLY_BOX_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/collision_mesh/convex_cook.rs"
+variable = "MOLY_CONVEX_COOK_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/collision_mesh/convex_sweep.rs"
+variable = "MOLY_CONVEX_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/collision_mesh/overlap.rs"
+variable = "MOLY_POOL_BOUNDS_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/collision_mesh/static_pruner.rs"
+variable = "MOLY_PRUNER_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/collision_mesh/tests.rs"
+variable = "MOLY_BV4_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/collision_mesh/tests.rs"
+variable = "MOLY_SCENE_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/collision_mesh/tests.rs"
+variable = "MOLY_SCENE_ROWS_KEEP"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/collision_planes.rs"
+variable = "MOLY_PLANES_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/collision_query/tests.rs"
+variable = "MOLY_COLLISION_MULTI_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/collision_query/tests.rs"
+variable = "MOLY_COLLISION_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/collision_response.rs"
+variable = "MOLY_COLLISION_RESPONSE_SAMPLES"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/color.rs"
+variable = "MOLY_GRADIENT_NONFINITE_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/corpus.rs"
+variable = "MOLY_ASSET_ROOT"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/current_size/tests.rs"
+variable = "MOLY_SIZE_POLYNOMIAL_RECEIPT"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/current_size/tests.rs"
+variable = "MOLY_SIZE_RECEIPT"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/current_size/tests.rs"
+variable = "MOLY_SIZE_WEIGHTED_RECEIPT"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/curve.rs"
+variable = "MOLY_CURVE_CACHE_WINDOWS_NATIVE"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/curve.rs"
+variable = "MOLY_CURVE_EVALUATION_NATIVE"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/curve.rs"
+variable = "MOLY_CURVE_SHORT_SIDE_NATIVE"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/curve.rs"
+variable = "MOLY_WEIGHTED_CURVE_NATIVE"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/curve.rs"
+variable = "MOLY_WEIGHTED_SEGMENT_NATIVE"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/custom_data.rs"
+variable = "MOLY_CURVE_CACHE_MODULE_NATIVE"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/death_event/tests.rs"
+variable = "MOLY_DEATH_EVENT_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/device_libm.rs"
+variable = "MOLY_DEVICE_LIBM_NATIVE"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/frame_time.rs"
+variable = "MOLY_DISTANCE_RECEIPT"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/frame_time.rs"
+variable = "MOLY_FLAGS5_RECEIPT"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/frame_time.rs"
+variable = "MOLY_TIMESTEP_FUZZ"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/frame_time.rs"
+variable = "MOLY_TIMESTEP_RECEIPT"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/inherit/tests.rs"
+variable = "MOLY_INHERIT_PARENT_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/initial.rs"
+variable = "MOLY_INITIAL_EVIDENCE_DIR"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/limit_velocity.rs"
+variable = "MOLY_CLAMP_MAGNITUDE_NATIVE"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/main_duration.rs"
+variable = "MOLY_DURATION_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/mesh_selection.rs"
+variable = "MOLY_MESH_SELECT_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/mesh_selection.rs"
+variable = "MOLY_MESH_SELECT_ROWS_CONTROLS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/mesh_transform.rs"
+variable = "MOLY_MESH_AXIS_NATIVE_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/noise.rs"
+variable = "MOLY_NOISE_AXES_BITFLIP"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/owner.rs"
+variable = "MOLY_HIER_OWNER_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/owner.rs"
+variable = "MOLY_OWNER_RECEIPT"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/owner.rs"
+variable = "MOLY_SCALE_OWNER_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/ring_lifecycle_samples.rs"
+variable = "MOLY_RING_LIFECYCLE_NATIVE"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/rotation_by_speed.rs"
+variable = "MOLY_RBS_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/rotation_by_speed.rs"
+variable = "MOLY_RBS_ROWS_CONTROLS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/schema.rs"
+variable = "MOLY_INITIAL_CLAMP_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/shape_birth.rs"
+variable = "MOLY_SHAPE_BIRTH_NATIVE_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/size.rs"
+variable = "MOLY_SIZE_CALLS_NATIVE"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/sort.rs"
+variable = "MOLY_PARTICLE_DEPTH_SORT_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/sort.rs"
+variable = "MOLY_SORT_MUTANT"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/sub_emission.rs"
+variable = "MOLY_SUB_EMISSION_NATIVE_DIR"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/texture_sheet.rs"
+variable = "MOLY_UV_CURVE_TIME_NATIVE"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/trail.rs"
+variable = "MOLY_TRAIL_RECORD_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/particle/trail_geometry.rs"
+variable = "MOLY_TRAIL_GEOMETRY_ROWS"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/powf.rs"
+variable = "MOLY_FMA_SAMPLES"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/ui/custom_button.rs"
+variable = "MOLY_INTERVAL_COMPARE_IN"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/ui/custom_button.rs"
+variable = "MOLY_INTERVAL_COMPARE_OUT"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/ui/graphic_tap_effect.rs"
+variable = "MOLY_TWEEN_COMPARE_IN"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/ui/graphic_tap_effect.rs"
+variable = "MOLY_TWEEN_COMPARE_OUT"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/weather/color_lerp.rs"
+variable = "MOLY_COLOR_LERP_NATIVE"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/weather/corpus.rs"
+variable = "MOLY_ASSET_ROOT"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/weather/light_pass.rs"
+variable = "MOLY_LIGHT_PASS_SAFE_NATIVE"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/weather/lut.rs"
+variable = "MOLY_ASSET_ROOT"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/weather/lut.rs"
+variable = "MOLY_LUT_APPLY_ORACLE"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/base/moly-law/src/weather/lut.rs"
+variable = "MOLY_LUT_ORACLE"
+reason = "test input; moly-law has no dependencies"
+
+[[read]]
+file = "crates/engine/moly-assets/src/source_shader/material/tests.rs"
+variable = "MOLY_NATIVE_SCALAR_CORPUS"
+reason = "test input"
+
+[[read]]
+file = "crates/engine/moly-assets/src/source_shader/material/tests.rs"
+variable = "MOLY_SOURCE_SHADER_CORPUS"
+reason = "test input"
+
+[[read]]
+file = "crates/engine/moly-assets/src/source_shader/tests.rs"
+variable = "MOLY_SOURCE_SHADER_CORPUS"
+reason = "test input"
+
+[[read]]
+file = "crates/engine/moly-assets/src/weather_icons.rs"
+variable = "MOLY_WEATHER_SOURCE_ROOT"
+reason = "test input"
+
+[[read]]
+file = "crates/engine/moly-assets/src/weather_timeline.rs"
+variable = "MOLY_WEATHER_SOURCE_ROOT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-devtools/src/npc_harness/mod.rs"
+variable = "MOLY_ASSET_ROOT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-features/src/footstep/phase.rs"
+variable = "MOLY_FOOT_MANIFEST"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-features/src/footstep/surface.rs"
+variable = "MOLY_FOOT_REFERENCE"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-features/src/menu_shell/ui_source_compare.rs"
+variable = "MOLY_CAMERA_COMPARE_IN"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-features/src/menu_shell/ui_source_compare.rs"
+variable = "MOLY_CAMERA_COMPARE_OUT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-features/src/menu_shell/ui_source_compare.rs"
+variable = "MOLY_TMP_COMPARE_IN"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-features/src/menu_shell/ui_source_compare.rs"
+variable = "MOLY_TMP_COMPARE_OUT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-features/src/menu_shell/ui_source_compare.rs"
+variable = "MOLY_UI_COMPARE_IN"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-features/src/menu_shell/ui_source_compare.rs"
+variable = "MOLY_UI_COMPARE_OUT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-fixture-edit/src/tests.rs"
+variable = "MOLY_EDITOR_TEST_CHILD"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/fixture_timeline_particles.rs"
+variable = "MOLY_DIRECTOR_RECEIPT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/fixture_timeline_particles.rs"
+variable = "MOLY_DIRECTOR_RECEIPT_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_geometry.rs"
+variable = "MOLY_MESH_FLIP_NATIVE"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/birth_samples.rs"
+variable = "MOLY_PARTICLE_BIRTH_DEATH_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/birth_samples.rs"
+variable = "MOLY_PARTICLE_BIRTH_DEATH_SAMPLES"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/birth_samples.rs"
+variable = "MOLY_PARTICLE_BIRTH_NORMAL_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/birth_samples.rs"
+variable = "MOLY_PARTICLE_BIRTH_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/birth_samples.rs"
+variable = "MOLY_PARTICLE_BIRTH_SAMPLES"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/child.rs"
+variable = "MOLY_CHILD_COMMAND_CURRENT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/child.rs"
+variable = "MOLY_CHILD_COMMAND_EFFECTS"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/collision_samples.rs"
+variable = "MOLY_COLLISION_ROWS"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/collision_samples.rs"
+variable = "MOLY_COLLISION_SCENE_LABEL"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/custom_samples.rs"
+variable = "MOLY_PARTICLE_CUSTOM_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/custom_samples.rs"
+variable = "MOLY_PARTICLE_CUSTOM_SAMPLES"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/force_samples.rs"
+variable = "MOLY_PARTICLE_FORCE_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/force_samples.rs"
+variable = "MOLY_PARTICLE_FORCE_SAMPLES"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/frame_samples.rs"
+variable = "MOLY_BIRTHS_RECEIPT_CONTROLS"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/frame_samples.rs"
+variable = "MOLY_BIRTHS_RECEIPT_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/frame_samples.rs"
+variable = "MOLY_EMISSION_CURVE_BITFLIP"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/frame_samples.rs"
+variable = "MOLY_EMISSION_CURVE_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/frame_samples.rs"
+variable = "MOLY_INITIAL_CURVES_BITFLIP"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/frame_samples.rs"
+variable = "MOLY_INITIAL_CURVES_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/frame_samples.rs"
+variable = "MOLY_PLAW_DISTANCE_MODULES_CONTROLS"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/frame_samples.rs"
+variable = "MOLY_PLAW_DISTANCE_MODULES_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/frame_samples.rs"
+variable = "MOLY_PLAW_START_DELAY_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/frame_samples.rs"
+variable = "MOLY_PLAY_AFTER_STOP_BITFLIP"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/frame_samples.rs"
+variable = "MOLY_PLAY_AFTER_STOP_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/frame_samples.rs"
+variable = "MOLY_TARGET_START_DELAY_CONTROLS"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/frame_samples.rs"
+variable = "MOLY_TARGET_START_DELAY_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/frame_samples/seed_zero.rs"
+variable = "MOLY_SEED_ZERO_BITFLIP"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/frame_samples/seed_zero.rs"
+variable = "MOLY_SEED_ZERO_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/gravity_samples.rs"
+variable = "MOLY_PARTICLE_GRAVITY_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/gravity_samples.rs"
+variable = "MOLY_PARTICLE_GRAVITY_SAMPLES"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/initial_colour_samples.rs"
+variable = "MOLY_INITIAL_COLOUR_RECEIPT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/mesh_axis_samples.rs"
+variable = "MOLY_MESH_AXIS_CORPUS"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/mesh_axis_samples.rs"
+variable = "MOLY_MESH_AXIS_DUMP"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/mesh_axis_samples.rs"
+variable = "MOLY_MESH_AXIS_ROWS"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/motion_samples.rs"
+variable = "MOLY_PARTICLE_MOTION_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/motion_samples.rs"
+variable = "MOLY_PARTICLE_MOTION_SAMPLES"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/noise_samples.rs"
+variable = "MOLY_PARTICLE_NOISE_SOURCE"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/noise_samples.rs"
+variable = "MOLY_PARTICLE_SNOW_RUNTIME_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/procedural_samples.rs"
+variable = "MOLY_PROCEDURAL_BITFLIP"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/procedural_samples.rs"
+variable = "MOLY_PROCEDURAL_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/ring_samples.rs"
+variable = "MOLY_PARTICLE_RING_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/ring_samples.rs"
+variable = "MOLY_PARTICLE_RING_SAMPLES"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/shape_birth_samples.rs"
+variable = "MOLY_SHAPE_BIRTH_CURRENT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/snow_full_samples.rs"
+variable = "MOLY_SNOW_FULL_NATIVE"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/snow_full_samples.rs"
+variable = "MOLY_SNOW_FULL_OVERLAY_EFFECTS"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/snow_full_samples.rs"
+variable = "MOLY_SNOW_FULL_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/snow_full_samples.rs"
+variable = "MOLY_SNOW_FULL_SOURCE_EFFECTS"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/sort_samples.rs"
+variable = "MOLY_PARTICLE_SORT_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/sort_samples.rs"
+variable = "MOLY_PARTICLE_SORT_SAMPLES"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/source_birth_samples.rs"
+variable = "MOLY_PARTICLE_BIRTH_SOURCE_DIR"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/source_birth_samples.rs"
+variable = "MOLY_PARTICLE_BIRTH_SOURCE_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/texture_sheet_samples.rs"
+variable = "MOLY_PARTICLE_UV_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/texture_sheet_samples.rs"
+variable = "MOLY_PARTICLE_UV_SAMPLES"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/trails.rs"
+variable = "MOLY_TRAIL_RECORD_ROWS"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/particle_runtime/warm_samples.rs"
+variable = "MOLY_WARM_CORPUS"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/source_billboard_tests.rs"
+variable = "MOLY_HV_BILLBOARD_MUTANT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/source_billboard_tests.rs"
+variable = "MOLY_HV_BILLBOARD_NATIVE"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/source_billboard_tests.rs"
+variable = "MOLY_VELOCITY_BILLBOARD_MUTANT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/source_billboard_tests.rs"
+variable = "MOLY_VELOCITY_BILLBOARD_NATIVE"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/source_camera_native_tests.rs"
+variable = "MOLY_SOURCE_CAMERA_NATIVE_VECTORS"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/source_shader/gpu_tests.rs"
+variable = "MOLY_SOURCE_GPU_MANIFEST"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/source_shader/gpu_tests.rs"
+variable = "MOLY_SOURCE_GPU_OUT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/uber_particle.rs"
+variable = "MOLY_UBER_BILLBOARD_MUTANT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/uber_particle.rs"
+variable = "MOLY_UBER_BILLBOARD_NATIVE"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/weather_animation.rs"
+variable = "MOLY_WEATHER_ANIMATION_OUT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/weather_animation_replay.rs"
+variable = "MOLY_SKY_ANIMATOR_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/weather_fx/fixture.rs"
+variable = "MOLY_FIXTURE_CENSUS_CONTROL"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/weather_fx/fixture.rs"
+variable = "MOLY_FIXTURE_HOST_REPLAY_REPORT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/weather_fx/fixture.rs"
+variable = "MOLY_FIXTURE_PARTICLE_AUDIT_ROOT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/weather_fx/fixture/planes_samples.rs"
+variable = "MOLY_FIXTURE_PARTICLE_AUDIT_ROOT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/weather_gpu_tests.rs"
+variable = "MOLY_WEATHER_GPU_OUT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/weather_scene_reach.rs"
+variable = "MOLY_ENVIRONMENT_PREFAB_CENSUS"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/weather_scene_reach.rs"
+variable = "MOLY_SOURCE_CORPUS_OVERLAY"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/weather_scene_reach.rs"
+variable = "MOLY_WEATHER_AUDIT_COLLISION"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/weather_scene_reach.rs"
+variable = "MOLY_WEATHER_AUDIT_INDEX"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/weather_scene_reach.rs"
+variable = "MOLY_WEATHER_REACH_OUT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/weather_sky_owner_receipt.rs"
+variable = "MOLY_HIER_OWNER_ROWS"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/weather_sky_owner_receipt.rs"
+variable = "MOLY_SKY_OWNER_CORPUS"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/weather_sky_owner_receipt.rs"
+variable = "MOLY_SKY_OWNER_ROWS"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/weather_source_audit.rs"
+variable = "MOLY_ENVIRONMENT_PREFAB_CENSUS"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/weather_source_audit.rs"
+variable = "MOLY_NO_EMISSION_OWNERS_RECEIPT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/weather_source_audit.rs"
+variable = "MOLY_SOURCE_CORPUS_OVERLAY"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/weather_source_audit.rs"
+variable = "MOLY_WEATHER_AUDIT_COLLISION"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/weather_source_audit.rs"
+variable = "MOLY_WEATHER_AUDIT_INDEX"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-render/src/weather_source_audit.rs"
+variable = "MOLY_WEATHER_AUDIT_OUT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-world/src/alone_action_runtime_harness.rs"
+variable = "MOLY_ASSET_ROOT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-world/src/fixture_activity_data_harness.rs"
+variable = "MOLY_ASSET_ROOT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-world/src/fixture_clock.rs"
+variable = "MOLY_CLOCK_SOURCE_TABLE"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-world/src/fixture_collision.rs"
+variable = "MOLY_ASSET_CATALOG"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-world/src/fixture_collision.rs"
+variable = "MOLY_ASSET_ROOT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-world/src/fixture_collision.rs"
+variable = "MOLY_CENSUS_OUT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-world/src/fixture_collision.rs"
+variable = "MOLY_COLLISION_GLB_DIR"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-world/src/fixture_collision.rs"
+variable = "MOLY_COLLISION_SOURCE_ROOT"
+reason = "test input"
+
+[[read]]
+file = "crates/game/moly-world/src/interaction.rs"
+variable = "MOLY_ACTION_BOX_SAMPLE_DIR"
+reason = "test input"

@@ -1040,8 +1040,8 @@ impl PlacementMock {
     }
 }
 
-/// Smoke knob `MOLY_FIXTURE_DIRECTION`: rewrites the facing of the whole
-/// placement table to 0=Front / 1=Left / 2=Back / 3=Right.
+/// Smoke knob `dev.fixture_direction` (`MOLY_FIXTURE_DIRECTION`): rewrites the
+/// facing of the whole placement table to 0=Front / 1=Left / 2=Back / 3=Right.
 ///
 /// Its **only** purpose is to let tests and smoke runs produce non-Front
 /// placements: that column of the placement table is all Front, and since the Front
@@ -1053,18 +1053,17 @@ impl PlacementMock {
 /// a mistyped knob value silently becoming Front would make the smoke run report
 /// nice green numbers.
 fn direction_override() -> Option<Direction> {
-    let raw = std::env::var("MOLY_FIXTURE_DIRECTION").ok()?;
+    let raw = moly_config::text(&moly_config::keys::DEV_FIXTURE_DIRECTION)?;
     let raw = raw.trim().to_owned();
     if raw.is_empty() {
         return None;
     }
-    let value: u8 = raw
-        .parse()
-        .unwrap_or_else(|_| panic!("MOLY_FIXTURE_DIRECTION 不是 0..3 的整数：{raw:?}"));
-    Some(
-        Direction::from_u8(value)
-            .unwrap_or_else(|| panic!("MOLY_FIXTURE_DIRECTION 越界（闭集是 0..3）：{value}")),
-    )
+    let value: u8 = raw.parse().unwrap_or_else(|_| {
+        panic!("dev.fixture_direction (MOLY_FIXTURE_DIRECTION) 不是 0..3 的整数：{raw:?}")
+    });
+    Some(Direction::from_u8(value).unwrap_or_else(|| {
+        panic!("dev.fixture_direction (MOLY_FIXTURE_DIRECTION) 越界（闭集是 0..3）：{value}")
+    }))
 }
 
 /// 摆放表资源（可下发形态：解析自上表；接服务端下发时换成回包解析）。

@@ -13,6 +13,7 @@ path = "src/main.rs"
 tauri-build = { version = "=2.7.1", features = [] }
 
 [dependencies]
+moly-config = { path = "../../base/moly-config" }
 moly-store = { path = "../../base/moly-store" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }

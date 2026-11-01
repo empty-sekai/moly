@@ -1204,16 +1204,19 @@ fn from_canvas(canvas: Vec2, window: &Window, root: &RootCanvas) -> Vec2 {
     Vec2::new(scaled.x + window.width() / 2., window.height() / 2. - scaled.y)
 }
 
-/// `MOLY_BIRTHDAY_END_SECS=<seconds>`: the native instrument taps the
-/// housing screen's end-party button once the app has run that many seconds
-/// and the party's UI shows it, through the window's touch stream as a
-/// player does (the button's hit test and its dispatch both run).
+/// `dev.birthday_end_secs` (`MOLY_BIRTHDAY_END_SECS=<seconds>`): the native
+/// instrument taps the housing screen's end-party button once the app has run
+/// that many seconds and the party's UI shows it, through the window's touch
+/// stream as a player does (the button's hit test and its dispatch both run).
 #[derive(Resource, Default)]
 pub struct EndPartyInstrument {
     read: bool,
     after: Option<f64>,
     tapped: bool,
 }
+
+/// The party instrument's switch, read once.
+const DEV_BIRTHDAY_END_SECS: &moly_config::Key = &moly_config::keys::DEV_BIRTHDAY_END_SECS;
 
 /// The party instrument's touch id (a finger no real touch uses).
 const PARTY_INSTRUMENT_FINGER: u64 = 99022;
@@ -1231,13 +1234,16 @@ pub fn end_party_instrument(
 ) {
     if !instrument.read {
         instrument.read = true;
-        instrument.after = crate::userdata::client::instrument_env("MOLY_BIRTHDAY_END_SECS").map(|raw| {
-            raw.trim().parse::<f64>().unwrap_or_else(|_| {
-                panic!("MOLY_BIRTHDAY_END_SECS={raw:?} is not a number of seconds")
-            })
-        });
+        instrument.after = crate::userdata::client::instrument_env(DEV_BIRTHDAY_END_SECS)
+            .map(|raw| {
+                raw.trim().parse::<f64>().unwrap_or_else(|_| {
+                    panic!(
+                        "dev.birthday_end_secs (MOLY_BIRTHDAY_END_SECS)={raw:?} is not a number of seconds"
+                    )
+                })
+            });
         if let Some(after) = instrument.after {
-            info!("[menu-shell] native instrument MOLY_BIRTHDAY_END_SECS: after {after} s, once the party's UI shows it, one tap on the end-party button");
+            info!("[menu-shell] native instrument dev.birthday_end_secs (MOLY_BIRTHDAY_END_SECS): after {after} s, once the party's UI shows it, one tap on the end-party button");
         }
     }
     let Some(after) = instrument.after else { return; };
@@ -1253,7 +1259,7 @@ pub fn end_party_instrument(
     instrument.tapped = true;
     let path = root.bindings.get(ShellAction::EndParty.field());
     let Some(rect) = view.rect(&layouts, path, root_canvas.size(window)).filter(|rect| rect.active) else {
-        error!("[menu-shell] MOLY_BIRTHDAY_END_SECS: the end-party button {path} is not laid out and active; no press");
+        error!("[menu-shell] dev.birthday_end_secs (MOLY_BIRTHDAY_END_SECS): the end-party button {path} is not laid out and active; no press");
         return;
     };
     let position = from_canvas(rect.center(), window, root_canvas);
@@ -1267,7 +1273,7 @@ pub fn end_party_instrument(
         }));
     }
     info!(
-        "[menu-shell] MOLY_BIRTHDAY_END_SECS: tap on the end-party button {path} at ({:.0},{:.0}) through the window's touch stream",
+        "[menu-shell] dev.birthday_end_secs (MOLY_BIRTHDAY_END_SECS): tap on the end-party button {path} at ({:.0},{:.0}) through the window's touch stream",
         position.x, position.y
     );
 }

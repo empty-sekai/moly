@@ -10,8 +10,9 @@ use crate::npc::CharacterUnitId;
 use crate::player::PlayerControlled;
 use crate::player_talk::{PlayerTalkRequest, PlayerTalkSession};
 
-/// Host probe of the tap ladder (`MOLY_PLAYER_TALK_STACK_TAP_SECS`, a window
-/// `<until>` or `<from>:<until>` in seconds, with the action-button autowalk bringing the player to each
+/// Host probe of the tap ladder (`dev.player_talk_stack_tap_secs`,
+/// `MOLY_PLAYER_TALK_STACK_TAP_SECS`, a window `<until>` or `<from>:<until>`
+/// in seconds, with the action-button autowalk bringing the player to each
 /// character): while the action stack's head is the Talk button of a
 /// character and no talk plays, the request the Talk button's dispatch
 /// writes for that character is written: at most every 15 s (so the
@@ -19,9 +20,9 @@ use crate::player_talk::{PlayerTalkRequest, PlayerTalkSession};
 /// (2 s after the last tap at the earliest) when the character has entered
 /// a fixture-activity state it was not tapped in (the tweet, the fixture
 /// action idle, the multiple-character timeline states, the communication
-/// wait), so the taps land in the states whose ladder rows differ. It stands in for
-/// the press itself, which a headless run at a few frames per second cannot
-/// make (the injected release lands a frame later, past the long-press
+/// wait), so the taps land in the states whose ladder rows differ. It stands
+/// in for the press itself, which a headless run at a few frames per second
+/// cannot make (the injected release lands a frame later, past the long-press
 /// threshold, so the gesture layer reports no tap). The request then takes
 /// the dispatcher's own path: the stack check, the ladder, the session.
 pub fn probe_stack_taps(
@@ -35,7 +36,10 @@ pub fn probe_stack_taps(
 ) {
     use crate::npc::NpcAction;
     let now = time.elapsed_secs();
-    if !crate::dev_tools::instrument_open("MOLY_PLAYER_TALK_STACK_TAP_SECS", now) {
+    if !crate::dev_tools::instrument_open(
+        &moly_config::keys::DEV_PLAYER_TALK_STACK_TAP_SECS,
+        now,
+    ) {
         return;
     }
     if session.is_some() || active_talk.is_some() {

@@ -883,9 +883,10 @@ pub fn place(
 }
 
 /// Instrument for headless runs, off by default:
-/// `MOLY_LEARN_PHENOMENA_AUTOTAP_SECS` = seconds after the open animation
-/// ends; then one tap on the thumbnail and, one second later, one on the
-/// screen's top-left corner (the close area), through the tap events.
+/// `dev.learn_phenomena_autotap_secs` (`MOLY_LEARN_PHENOMENA_AUTOTAP_SECS`) =
+/// seconds after the open animation ends; then one tap on the thumbnail and,
+/// one second later, one on the screen's top-left corner (the close area),
+/// through the tap events.
 pub fn autotap(
     time: Res<Time>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -899,9 +900,13 @@ pub fn autotap(
     mut step: Local<u8>,
 ) {
     let secs = *plan.get_or_insert_with(|| {
-        let secs = std::env::var("MOLY_LEARN_PHENOMENA_AUTOTAP_SECS").ok().and_then(|v| v.parse::<f32>().ok());
+        let secs = moly_config::text(&moly_config::keys::DEV_LEARN_PHENOMENA_AUTOTAP_SECS)
+            .and_then(|v| v.parse::<f32>().ok());
         if let Some(secs) = secs {
-            warn!("[learn-phenomena] MOLY_LEARN_PHENOMENA_AUTOTAP_SECS instrument on: taps {secs}s and {}s after the open animation", secs + 1.0);
+            warn!(
+                "[learn-phenomena] dev.learn_phenomena_autotap_secs (MOLY_LEARN_PHENOMENA_AUTOTAP_SECS) instrument on: taps {secs}s and {}s after the open animation",
+                secs + 1.0
+            );
         }
         secs
     });

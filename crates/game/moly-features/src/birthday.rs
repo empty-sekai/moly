@@ -13,8 +13,8 @@
 //! real time since. Here it is the one server clock of the server model
 //! (device time by default, or the fixed time the server document sets);
 //! before the model is installed, device time. The native instrument
-//! `MOLY_BIRTHDAY_NOW_MS` fixes that server clock through the model's native
-//! overlay; game mode reads no environment variable.
+//! `dev.birthday_now_ms` (`MOLY_BIRTHDAY_NOW_MS`) fixes that server clock
+//! through the model's native overlay; game mode reads no developer switch.
 //!
 //! A table that is absent or malformed is named once by the master layer;
 //! then no party is in session, the gate shows its no-party dialog, the

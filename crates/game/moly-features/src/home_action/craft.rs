@@ -101,16 +101,16 @@
 //! - The canvas screen (640) is not built: a canvas blueprint's member select
 //!   is refused by name.
 //!
-//! Instruments (off by default; game mode reads none): `MOLY_CRAFT_SELECT`
-//! = `blueprint[xcount]` selects when the screen opens;
-//! `MOLY_CRAFT_APPLY_SECS` presses the apply button that many seconds after
-//! the screen opens; `MOLY_CRAFT_CONFIRM_SECS` taps the confirm's OK button
-//! (at its drawn rect, through [`crate::common_dialog`]) that many seconds
-//! after the confirm shows;
-//! `MOLY_CRAFT_STAGE_RESULT=<count>[,first]` stages the dialogs after the
-//! hold two seconds after the screen opens, for the selected blueprint, with
-//! no craft request and no sequence (the result dialog's view without a
-//! reachable craft; loud in the log).
+//! Instruments (off by default; game mode reads none): `dev.craft_select`
+//! (`MOLY_CRAFT_SELECT`) = `blueprint[xcount]` selects when the screen opens;
+//! `dev.craft_apply_secs` (`MOLY_CRAFT_APPLY_SECS`) presses the apply button
+//! that many seconds after the screen opens; `dev.craft_confirm_secs`
+//! (`MOLY_CRAFT_CONFIRM_SECS`) taps the confirm's OK button (at its drawn
+//! rect, through [`crate::common_dialog`]) that many seconds after the
+//! confirm shows; `dev.craft_stage_result` (`MOLY_CRAFT_STAGE_RESULT=<count>[,first]`)
+//! stages the dialogs after the hold two seconds after the screen opens, for
+//! the selected blueprint, with no craft request and no sequence (the result
+//! dialog's view without a reachable craft; loud in the log).
 
 use bevy::prelude::*;
 use moly_assets::json::master::{MasterData, MasterTable};
@@ -846,9 +846,10 @@ fn select_row(world: &World, screen: &mut CraftScreen, index: usize, count: i32)
     }
 }
 
-/// The selection the instrument names (`MOLY_CRAFT_SELECT=blueprint[xcount]`).
+/// The selection the instrument names (`dev.craft_select`,
+/// `MOLY_CRAFT_SELECT=blueprint[xcount]`).
 fn select_instrument() -> Option<(i32, i32)> {
-    let raw = instrument_env("MOLY_CRAFT_SELECT")?;
+    let raw = instrument_env(&moly_config::keys::DEV_CRAFT_SELECT)?;
     let raw = raw.trim();
     match raw.split_once('x') {
         Some((blueprint, count)) => {
@@ -858,8 +859,8 @@ fn select_instrument() -> Option<(i32, i32)> {
     }
 }
 
-fn seconds_instrument(name: &str) -> Option<f32> {
-    instrument_env(name).and_then(|raw| raw.trim().parse::<f32>().ok())
+fn seconds_instrument(key: &'static moly_config::Key) -> Option<f32> {
+    instrument_env(key).and_then(|raw| raw.trim().parse::<f32>().ok())
 }
 
 /// `SetupCraftPreview(blueprint)`: the preview's data for a selection.
@@ -1026,7 +1027,7 @@ fn click_apply(world: &mut World, screen: &mut CraftScreen) {
         "CraftPreview.OpenCraftConfirmDialog",
         body,
         Buttons::Two { ok: "WORD_OK", cancel: "WORD_CANCEL" },
-        Some("MOLY_CRAFT_CONFIRM_SECS"),
+        Some(&moly_config::keys::DEV_CRAFT_CONFIRM_SECS),
     ) {
         info!(
             "[craft] OpenCraftConfirmDialog: Show2ButtonDialog(Common2ButtonDialog, null, WORD_OK, WORD_CANCEL) {dialog:?}, body GetFormat(WORD_CREATE_CONFIRM, name, {})",
@@ -1245,13 +1246,14 @@ fn result_closed(world: &mut World, screen: &mut CraftScreen) -> Option<DialogSt
     Some(DialogStep::Bonus { shown: None })
 }
 
-/// The instrument's staged dialogs (`MOLY_CRAFT_STAGE_RESULT`): the dialogs
-/// after the hold for the selected blueprint, without a craft.
+/// The instrument's staged dialogs (`dev.craft_stage_result`,
+/// `MOLY_CRAFT_STAGE_RESULT`): the dialogs after the hold for the selected
+/// blueprint, without a craft.
 fn stage_instrument(world: &mut World, screen: &mut CraftScreen, now: f32) {
     if screen.staged_fired || !screen.open || !matches!(screen.stage, Stage::Idle) {
         return;
     }
-    let Some(raw) = instrument_env("MOLY_CRAFT_STAGE_RESULT") else {
+    let Some(raw) = instrument_env(&moly_config::keys::DEV_CRAFT_STAGE_RESULT) else {
         return;
     };
     if now - screen.opened_at < 2.0 {
@@ -1266,7 +1268,7 @@ fn stage_instrument(world: &mut World, screen: &mut CraftScreen, now: f32) {
     let first = parts.next().is_some_and(|flag| flag.trim() == "first");
     let Some(selection) = screen.selection.clone() else {
         error!(
-            "[craft] instrument: MOLY_CRAFT_STAGE_RESULT with no blueprint selected: not staged"
+            "[craft] instrument: dev.craft_stage_result (MOLY_CRAFT_STAGE_RESULT) with no blueprint selected: not staged"
         );
         return;
     };
@@ -1709,7 +1711,7 @@ pub fn advance(world: &mut World) {
         }
     }
     if screen.open && !screen.applied && matches!(screen.stage, Stage::Idle) {
-        if let Some(secs) = seconds_instrument("MOLY_CRAFT_APPLY_SECS") {
+        if let Some(secs) = seconds_instrument(&moly_config::keys::DEV_CRAFT_APPLY_SECS) {
             if now - screen.opened_at >= secs {
                 screen.applied = true;
                 info!("[craft] instrument: the apply button pressed");

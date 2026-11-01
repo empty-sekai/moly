@@ -16,7 +16,8 @@ text; keep them outside the repository. The build refuses to write when a
 retained glyph's outline or metrics differ from the original font, and never
 overwrites its inputs or an existing candidate. Review the candidate and its
 coverage report before installing it. Example:
-  python tools/subset_catalog_font.py masters --region jp --output MASTERS
+  python tools/subset_catalog_font.py masters --region jp --output MASTERS \
+    --master-base https://masters.example/   # or MOLY_MASTER_BASE
   python tools/subset_catalog_font.py census --root ROOT_JP --region jp \
     --masters MASTERS/jp --output census-jp.json
   python tools/subset_catalog_font.py build --source ORIGINAL.ttf \
@@ -28,6 +29,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import unicodedata
@@ -42,7 +44,9 @@ from fontTools.ttLib import TTFont
 REPO = Path(__file__).resolve().parents[1]
 GAME_SRC = REPO / "crates" / "moly-game" / "src"
 
-MASTER_BASE = "https://metadata.pjsk.moe/"
+# The master host `masters --master-base` or `MOLY_MASTER_BASE` names (the key
+# `masters.base` of the program configuration).
+MASTER_BASE_ENV = "MOLY_MASTER_BASE"
 # The host refuses Python's default user agent.
 USER_AGENT = "curl/8.5.0"
 
@@ -221,13 +225,35 @@ def layout_texts(document: dict) -> Iterator[str]:
                 yield "\u00a0"
 
 
+def clean_directory(value: str) -> str:
+    """An HTTPS directory ending in `/`, as the configuration requires."""
+    if not (value.startswith("https://") and value.endswith("/")):
+        raise argparse.ArgumentTypeError(
+            f"{value!r} must be an HTTPS directory ending in /"
+        )
+    return value
+
+
+def master_base(args: argparse.Namespace) -> str:
+    base = (args.master_base or os.environ.get(MASTER_BASE_ENV) or "").strip()
+    if not base:
+        raise SystemExit(
+            "No master host: pass --master-base <https-directory>/ or set "
+            f"{MASTER_BASE_ENV} (the key masters.base of moly.toml)."
+        )
+    if not (base.startswith("https://") and base.endswith("/")):
+        raise SystemExit(f"{base!r} must be an HTTPS directory ending in /.")
+    return base
+
+
 def fetch_masters(args: argparse.Namespace) -> None:
+    base = master_base(args)
     out = args.output / args.region
     out.mkdir(parents=True, exist_ok=True)
     names = ["versions/current_version"] + [f"master/{table}" for table in MASTER_FIELDS]
     for name in names:
         request = urllib.request.Request(
-            f"{MASTER_BASE}{args.region}/{name}.json", headers={"User-Agent": USER_AGENT}
+            f"{base}{args.region}/{name}.json", headers={"User-Agent": USER_AGENT}
         )
         with urllib.request.urlopen(request, timeout=120) as response:
             body = response.read()
@@ -495,6 +521,9 @@ def main() -> None:
     fetch = steps.add_parser("masters", help="fetch the master tables the census reads")
     fetch.add_argument("--region", required=True, choices=("jp", "cn"))
     fetch.add_argument("--output", required=True, type=Path)
+    fetch.add_argument("--master-base", type=clean_directory,
+                       help=f"the master host, an HTTPS directory ending in / "
+                            f"(else {MASTER_BASE_ENV})")
     take = steps.add_parser("census", help="collect a root's drawable code points")
     take.add_argument("--root", required=True, type=Path)
     take.add_argument("--region", required=True, choices=("jp", "cn"))

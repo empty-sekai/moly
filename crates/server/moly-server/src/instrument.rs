@@ -1,9 +1,10 @@
-//! The developer instruments the server reads from its own environment.
+//! The developer instruments the server reads from the configuration
+//! (`[dev]` keys in `moly.toml`, or their environment variables).
 //!
-//! A developer start (`MOLY_DEV=1`) may fix the clock, the screen pools, the
-//! avatar wear, the music records and the harvest tools through the same
-//! environment variables the native game reads in that mode. A normal start
-//! reads none of them: the stored documents alone decide the values.
+//! A developer start (`dev.window`, `MOLY_DEV`) may fix the clock, the screen
+//! pools, the avatar wear, the music records and the harvest tools through the
+//! same instruments the native game reads in that mode. A normal start reads
+//! none of them: the stored documents alone decide the values.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -32,17 +33,17 @@ pub fn dev() -> bool {
 }
 
 /// One instrument's value; `None` outside a developer start.
-pub(crate) fn instrument_env(name: &str) -> Option<String> {
+pub(crate) fn instrument_env(key: &'static moly_config::Key) -> Option<String> {
     if !dev() {
         return None;
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        std::env::var(name).ok()
+        moly_config::text(key)
     }
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = name;
+        let _ = key;
         None
     }
 }
@@ -55,7 +56,7 @@ mod tests {
     fn the_instruments_are_silent_outside_a_developer_start() {
         install();
         if !dev() {
-            assert!(instrument_env("MOLY_MENU_MOCK_TOTAL_EXP").is_none());
+            assert!(instrument_env(&moly_config::keys::DEV_MENU_MOCK_TOTAL_EXP).is_none());
         }
     }
 }

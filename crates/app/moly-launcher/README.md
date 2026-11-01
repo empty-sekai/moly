@@ -5,10 +5,15 @@ server and the game. It also installs program updates.
 
 ## Resource versions
 
-The launcher reads the release manifest `game/manifest.json` from a CDN (by default
-`https://assets.pjsk.moe/sekai-extra-assets/`) and lists the resource versions it offers. For the
-selected version it downloads the catalog, the pack list and the resource files into the resource
-directory and checks the SHA-256 of each file.
+The launcher reads the release manifest `game/manifest.json` from a resource address and lists the
+resource versions it offers. For the selected version it downloads the catalog, the pack list and
+the resource files into the resource directory and checks the SHA-256 of each file.
+
+The resource address must be entered before downloading: type it in the launcher's settings (an
+`https://` directory ending with `/`), or set it as `resources.base` in the `[resources]` section of
+`moly.toml`. Until one is set, listing versions and downloading refuse with a message that names
+`resources.base`. Importing a local resource directory and verifying installed resources need no
+address.
 
 - A download can be cancelled at any time and continues where it stopped next time.
 - Running it again on an installed version verifies and repairs it.
@@ -19,16 +24,17 @@ actually bound, then starts `moly-app` from the same folder.
 
 ## Settings
 
-The CDN address, the resource directory, the number of parallel downloads and the developer window
-are changed in the launcher's settings and stored in `launcher.json` in the data directory. The
-release source of program updates (`update_source`) is set in the same file; see
+The resource address (`cdn`, the `resources.base` key), the resource directory, the number of
+parallel downloads and the developer window are changed in the launcher's settings and stored in
+`moly.toml` in the data directory. The address starts out empty; nothing is downloaded until one is
+entered. The release source of program updates (`update_source`) is set in the same file; see
 [Program updates](#program-updates).
 
 ## Home folder
 
 The launcher keeps its files in a home folder, which holds four folders:
 
-- `data`: `launcher.json`, the game's settings and saves (in the `server` folder).
+- `data`: `moly.toml`, the game's settings and saves (in the `server` folder).
 - `logs`: the game logs, including the server output the launcher writes into them.
 - `versions`: the installed program versions.
 - `resources`: the resource directory, unless the configuration names another one.
@@ -62,14 +68,14 @@ A new version unzipped into its own folder starts with an empty data directory. 
 start, the launcher takes the settings (including the resource directory), the game settings and
 the saves (the `server` folder) from the most recent earlier install it finds. Earlier installs are
 the data directories recorded in `%LOCALAPPDATA%\moly\installs.json` (written on Windows) and the
-`data` folders beside the program folder; the one whose `launcher.json` was modified most recently
-is used. Files that the new data directory already has are not replaced. Nothing in the earlier
+`data` folders beside the program folder; the one whose launcher configuration was modified most
+recently is used. Files that the new data directory already has are not replaced. Nothing in the earlier
 folder is changed.
 
 ## Program updates
 
 When it starts, the launcher reads the newest release of the repository named by `update_source`
-in `launcher.json`. The default is `https://api.github.com/repos/empty-sekai/moly`; the address
+in `moly.toml`. The default is `https://api.github.com/repos/empty-sekai/moly`; the address
 must use https. When a release newer than the running launcher is published, a banner at the top
 of the main page offers the update and links to the release notes.
 
@@ -92,7 +98,7 @@ when that version has no complete folder yet.
 
 ## Resource directory
 
-The resource directory is decided the first time it is needed and written to `launcher.json`: by
+The resource directory is decided the first time it is needed and written to `moly.toml`: by
 default `resources` in the home folder.
 
 A folder chosen in the settings or on the Places card is used as is when it is empty, already holds
@@ -114,5 +120,5 @@ runs.
 ## Running the game directly
 
 When `moly-app` runs without the launcher and `MOLY_ASSET_ROOT` is not set, the game reads the
-version installed in the launcher's resource directory: the version selected in `launcher.json`,
+version installed in the launcher's resource directory: the version selected in `moly.toml`,
 or the most recently installed one when none is selected.

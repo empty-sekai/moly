@@ -91,9 +91,10 @@
 //! and adds the `userMysekaiBlueprints` row with `obtainedAt` at the server
 //! clock.
 //!
-//! Native instrument: `MOLY_CRAFT_MOCK_REQUEST=blueprintId[:quantity[:textureId[:blueprintTermId]]]`
-//! makes the home action's craft request (which carries no blueprint) a craft
-//! of that blueprint; game mode reads no environment variable.
+//! Native instrument: `dev.craft_mock_request` (`MOLY_CRAFT_MOCK_REQUEST`)
+//! `=blueprintId[:quantity[:textureId[:blueprintTermId]]]` makes the home
+//! action's craft request (which carries no blueprint) a craft of that
+//! blueprint; game mode reads no instrument.
 
 use bevy::prelude::*;
 use serde_json::{json, Value};
@@ -618,12 +619,12 @@ pub(crate) struct Answer {
     pub(crate) reply: SuiteUserReply,
 }
 
-/// The native instrument `MOLY_CRAFT_MOCK_REQUEST`
-/// (`blueprintId[:quantity[:textureId[:blueprintTermId]]]`); a malformed value
+/// The native instrument `dev.craft_mock_request` (`MOLY_CRAFT_MOCK_REQUEST`,
+/// `blueprintId[:quantity[:textureId[:blueprintTermId]]]`); a malformed value
 /// stops loudly.
 pub(crate) fn instrument_request() -> Option<UserMysekaiCraftRequest> {
     const NAME: &str = "MOLY_CRAFT_MOCK_REQUEST";
-    let raw = super::instrument_env(NAME)?;
+    let raw = super::instrument_env(&moly_config::keys::DEV_CRAFT_MOCK_REQUEST)?;
     let parts: Vec<&str> = raw.trim().split(':').map(str::trim).collect();
     let int = |text: &str| {
         text.parse::<i32>()

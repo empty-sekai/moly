@@ -4,9 +4,18 @@ All notable changes to this project are listed here. Versions follow [Semantic V
 
 ## Unreleased
 
+### Breaking changes
+
+- **config:** The programs carry no network addresses of their own. The resource publication (`resources.base`), the master hosts (`masters.repository`, `masters.base`, `masters.mirror`), the per-region master repository names (`masters.repository_jp` … `masters.repository_en`), the player data API (`player_data.api`) and the shared server (`server.url`) are read only from `moly.toml` or their environment variables. A feature whose address is not set is refused with a message that names the key; a master source that is not set is skipped.
+- **masters:** `MOLY_MASTER_REPOSITORY` sets the repository host template (`{repo}` path segment) in place of `MOLY_MASTER_HARUKI_BASE`. The browser page reads `?master_repository=` and `?master_repository_<region>=`.
+- **launcher:** The download address has no default; the launcher refuses a download until one is entered.
+- **browser:** The page needs `?server=` to join a shared server, and the `/player-api/` path answers only when `MOLY_PLAYER_API` is set where the page is served.
+- **android:** The package is built with `MOLY_RESOURCE_BASE` and `MOLY_SERVER_URL` set; a build without them stops at start with a message naming the variable.
+
 ### Features
 
 - **config:** Read the launcher, game, developer window and server settings from one `moly.toml` in the data directory (or the file `MOLY_CONFIG` names). Each key keeps its environment variable as an override; an unknown key or a value of the wrong kind stops the start with the key named. The launcher edits the file in place and keeps its comments, and imports an existing `launcher.json` on first start.
+- **config:** Read the developer switches as `[dev]` keys and the display translation files as `[text]` keys of the same file, each with its existing environment variable. `docs/configuration.md` and `moly.example.toml` list every key; `tools/config/check.py` fails on a direct read of a `MOLY_*` variable that is not a key and not listed with its reason.
 
 ### Bug fixes
 

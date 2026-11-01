@@ -12,6 +12,11 @@
 //! SHA-256) selects a release of the content-addressed store, and
 //! `resources.cache` names the native directory that keeps what a store read
 //! fetched.
+//!
+//! The remote bases are configuration keys too (`resources.storage`,
+//! `resources.storage_mirror`, `masters.base`, `masters.mirror`,
+//! `masters.repository` and `masters.repository_<region>`): a key that is not
+//! set names no host, and a host or region that has none is not read.
 
 use crate::AssetSource;
 
@@ -135,58 +140,62 @@ pub fn validate_asset_selection(
     validate_asset_prefix(base, resource_root(configured_origin, configured_base)?)
 }
 
-/// The public asset storage host the product reads song and soundtrack
-/// audio from (one directory per region below it); these files are not in
-/// the asset root. [`STORAGE_MIRROR_BASE`] serves the same layout.
-pub const STORAGE_BASE: &str = "https://storage.pjsk.moe/";
-pub const STORAGE_MIRROR_BASE: &str = "https://storage.exmeaning.com/";
-
-/// The public master host the product reads master tables from
-/// (`<region>/master/<table>.json` below it). [`MASTER_MIRROR_BASE`] serves
-/// the same layout. Both carry the `jp` and `cn` directories only.
-pub const MASTER_BASE: &str = "https://metadata.pjsk.moe/";
-pub const MASTER_MIRROR_BASE: &str = "https://metadata.exmeaning.com/";
-
-/// The first master host: the repositories of the master tables below
-/// `{repo}/main/master/`, one repository per region (a region's repository
-/// is [`crate::remote::Region::repository`]). A region whose table the host
-/// does not serve is refused by name.
-pub const MASTER_HARUKI_BASE: &str = "https://raw.githubusercontent.com/Team-Haruki/{repo}/";
-
-/// One remote base: the named default, or a configured replacement that is a
-/// canonical HTTPS directory like `resource_base`.
-fn remote_base(name: &str, configured: Option<&str>, default: &str) -> Result<String, String> {
+/// One remote base: a configured canonical HTTPS directory like
+/// `resource_base`, or `None` when the key `key` is not set.
+fn remote_base(key: &str, configured: Option<&str>) -> Result<Option<String>, String> {
     let Some(base) = configured else {
-        return Ok(default.to_owned());
+        return Ok(None);
     };
     public_asset_parts(base)
         .filter(|(_, path)| is_canonical_directory(path))
-        .map(|_| base.to_owned())
-        .ok_or_else(|| format!("{name} must be a canonical HTTPS directory ending in /"))
+        .map(|_| Some(base.to_owned()))
+        .ok_or_else(|| format!("`{key}` must be a canonical HTTPS directory ending in /"))
 }
 
 /// A master host whose paths name the region's repository: the configured
 /// template must be a canonical HTTPS directory that names `{repo}` exactly
-/// once, as a whole path segment.
-fn repository_base(name: &str, configured: Option<&str>) -> Result<String, String> {
+/// once, as a whole path segment; `None` when it is not configured.
+fn repository_base(key: &str, configured: Option<&str>) -> Result<Option<String>, String> {
     let Some(template) = configured else {
-        return Ok(MASTER_HARUKI_BASE.to_owned());
+        return Ok(None);
     };
     let (_, path) = public_asset_parts(template)
         .filter(|(_, path)| is_canonical_directory(path))
         .ok_or_else(|| {
-            format!("{name} must be a canonical HTTPS directory ending in /, with {{repo}} as a path segment")
+            format!(
+                "`{key}` must be a canonical HTTPS directory ending in /, \
+                 with {{repo}} as a path segment"
+            )
         })?;
     if path.split('/').filter(|part| *part == "{repo}").count() != 1 {
         return Err(format!(
-            "{name} must name {{repo}} exactly once, as a whole path segment"
+            "`{key}` must name {{repo}} exactly once, as a whole path segment"
         ));
     }
-    Ok(template.to_owned())
+    Ok(Some(template.to_owned()))
 }
 
-/// Configured replacements of the remote bases (each `None` keeps its named
-/// default). Which host is tried first is the consumer's rule.
+/// A region's configured repository name: one URL-safe path segment (ASCII
+/// letters, digits, `.`, `_` and `-`); `None` when it is not configured.
+fn repository_name(key: &str, configured: Option<&str>) -> Result<Option<String>, String> {
+    let Some(name) = configured else {
+        return Ok(None);
+    };
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    {
+        return Err(format!(
+            "`{key}` must be one URL-safe path segment (letters, digits, `.`, `_` or `-`)"
+        ));
+    }
+    Ok(Some(name.to_owned()))
+}
+
+/// Configured remote bases and repository names; `None` says that the key
+/// does not name one, and a host or a region with none is not read.
+/// Which host is tried first is the consumer's rule.
 #[derive(Default)]
 pub struct RemoteBaseOverrides<'a> {
     pub storage: Option<&'a str>,
@@ -196,44 +205,73 @@ pub struct RemoteBaseOverrides<'a> {
     /// A template naming `{repo}` where the repository host's region
     /// repository goes.
     pub master_repository: Option<&'a str>,
+    /// The repository name of each region on the repository host.
+    pub master_repository_jp: Option<&'a str>,
+    pub master_repository_cn: Option<&'a str>,
+    pub master_repository_tw: Option<&'a str>,
+    pub master_repository_kr: Option<&'a str>,
+    pub master_repository_en: Option<&'a str>,
 }
 
-/// The remote bases, each defaulting to its named host. The browser entry
-/// additionally requires each to be its canonical URL.
+/// The remote bases and repository names. The browser entry additionally
+/// requires each configured base to be its canonical URL.
 pub fn remote_bases(
     overrides: RemoteBaseOverrides<'_>,
 ) -> Result<crate::remote::RemoteBases, String> {
-    let master_repository = repository_base("master_haruki_base", overrides.master_repository)?;
+    let names = [
+        ("masters.repository_jp", overrides.master_repository_jp),
+        ("masters.repository_cn", overrides.master_repository_cn),
+        ("masters.repository_tw", overrides.master_repository_tw),
+        ("masters.repository_kr", overrides.master_repository_kr),
+        ("masters.repository_en", overrides.master_repository_en),
+    ];
+    let mut repositories = std::collections::BTreeMap::new();
+    for (region, (key, configured)) in crate::remote::ALL.into_iter().zip(names) {
+        if let Some(name) = repository_name(key, configured)? {
+            repositories.insert(region, name);
+        }
+    }
     Ok(crate::remote::RemoteBases {
-        storage: remote_base("storage_base", overrides.storage, STORAGE_BASE)?,
-        storage_mirror: remote_base(
-            "storage_mirror_base",
-            overrides.storage_mirror,
-            STORAGE_MIRROR_BASE,
-        )?,
-        master: remote_base("master_base", overrides.master, MASTER_BASE)?,
-        master_mirror: remote_base(
-            "master_mirror_base",
-            overrides.master_mirror,
-            MASTER_MIRROR_BASE,
-        )?,
-        master_repository,
+        storage: remote_base("resources.storage", overrides.storage)?,
+        storage_mirror: remote_base("resources.storage_mirror", overrides.storage_mirror)?,
+        master: remote_base("masters.base", overrides.master)?,
+        master_mirror: remote_base("masters.mirror", overrides.master_mirror)?,
+        master_repository: repository_base("masters.repository", overrides.master_repository)?,
+        repositories,
     })
 }
 
-/// Native: the configuration's `resources.storage`, `resources.storage_mirror`,
-/// `masters.base`, `masters.mirror` and `masters.repository` (a template naming
-/// `{repo}`), each overridden by its environment variable, replace the hosts.
+/// Native: `resources.storage`, `resources.storage_mirror`, `masters.base`,
+/// `masters.mirror` and `masters.repository` (a template naming `{repo}`)
+/// name the hosts, and `masters.repository_jp` … `masters.repository_en` the
+/// repository name of each region on the repository host. Each key is read
+/// from the configuration with its environment variable taking precedence;
+/// a key that is not set names no host or repository.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn resolve_remote() -> Result<crate::remote::RemoteBases, String> {
-    use moly_config::keys;
-    let config = moly_config::global();
-    let (storage, storage_mirror, master, master_mirror, master_repository) = (
-        config.text(&keys::STORAGE_BASE),
-        config.text(&keys::STORAGE_MIRROR),
-        config.text(&keys::MASTER_BASE),
-        config.text(&keys::MASTER_MIRROR),
-        config.text(&keys::MASTER_REPOSITORY),
+    use moly_config::{keys, text};
+    let (
+        storage,
+        storage_mirror,
+        master,
+        master_mirror,
+        master_repository,
+        master_repository_jp,
+        master_repository_cn,
+        master_repository_tw,
+        master_repository_kr,
+        master_repository_en,
+    ) = (
+        text(&keys::STORAGE_BASE),
+        text(&keys::STORAGE_MIRROR),
+        text(&keys::MASTER_BASE),
+        text(&keys::MASTER_MIRROR),
+        text(&keys::MASTER_REPOSITORY),
+        text(&keys::MASTER_REPOSITORY_JP),
+        text(&keys::MASTER_REPOSITORY_CN),
+        text(&keys::MASTER_REPOSITORY_TW),
+        text(&keys::MASTER_REPOSITORY_KR),
+        text(&keys::MASTER_REPOSITORY_EN),
     );
     remote_bases(RemoteBaseOverrides {
         storage: storage.as_deref(),
@@ -241,6 +279,11 @@ pub fn resolve_remote() -> Result<crate::remote::RemoteBases, String> {
         master: master.as_deref(),
         master_mirror: master_mirror.as_deref(),
         master_repository: master_repository.as_deref(),
+        master_repository_jp: master_repository_jp.as_deref(),
+        master_repository_cn: master_repository_cn.as_deref(),
+        master_repository_tw: master_repository_tw.as_deref(),
+        master_repository_kr: master_repository_kr.as_deref(),
+        master_repository_en: master_repository_en.as_deref(),
     })
 }
 
@@ -382,8 +425,8 @@ mod public_resource_tests {
     /// arrives as its complete resource root.
     fn validate_asset_prefix(value: &str) -> Result<(), String> {
         let base = value
-            .contains("/sekai-extra-assets/")
-            .then_some("https://assets.pjsk.moe/sekai-extra-assets/");
+            .contains("/publication/")
+            .then_some("https://resources.example/publication/");
         validate_asset_selection(value, public_asset_parts(value).map(|(origin, _)| origin), base)
     }
 
@@ -393,8 +436,8 @@ mod public_resource_tests {
             "/moly/sources/local/",
             "https://assets-one.example/moly/snapshots/cn-1.2.3-a/assets/",
             "https://cdn-two.example:8443/moly/asset-store/",
-            "https://assets.pjsk.moe/sekai-extra-assets/snapshots/cn-1.2.3-a/assets/",
-            "https://assets.pjsk.moe/sekai-extra-assets/asset-store/",
+            "https://resources.example/publication/snapshots/cn-1.2.3-a/assets/",
+            "https://resources.example/publication/asset-store/",
         ] {
             assert!(validate_asset_prefix(value).is_ok(), "{value}");
         }
@@ -407,7 +450,7 @@ mod public_resource_tests {
             "https://cdn.example/moly/snapshots/cn-a/assets/?token=private",
             "https://cdn.example/moly/snapshots/cn-a/assets/%2f",
             "https://cdn.example/moly/snapshots/cn-a/assets/#fragment",
-            "https://assets.pjsk.moe/sekai-extra-assets/releases/current/",
+            "https://resources.example/publication/releases/current/",
             "//cdn.example/moly/asset-store/",
         ] {
             assert!(validate_asset_prefix(value).is_err(), "{value}");
@@ -434,7 +477,7 @@ mod public_resource_tests {
         for value in [
             "https://cdn.example/moly/asset-store/",
             "https://cdn-two.example:8443/moly/asset-store/",
-            "https://assets.pjsk.moe/sekai-extra-assets/asset-store/",
+            "https://resources.example/publication/asset-store/",
         ] {
             assert!(store_root(value).is_ok(), "{value}");
         }

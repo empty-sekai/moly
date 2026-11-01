@@ -3,7 +3,8 @@
 //!
 //! Without a seed each draw takes fresh bytes from the platform's random
 //! source. A seed is given as `MOLY_SEED` (native) or the page's `seed`
-//! query parameter (browser), a decimal u64, read once at the first draw;
+//! query parameter (browser), a decimal u64: on native builds the key
+//! `dev.seed` (`MOLY_SEED`). The value is read once, at the first draw;
 //! anything else stops the game with a panic that names the value. With a
 //! seed, every named [`Stream`] yields a fixed sequence: draw `n` of a stream
 //! is SplitMix64 of the seed, the stream and `n`. The streams count their
@@ -48,7 +49,7 @@ pub fn seed() -> Option<u64> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn given() -> Option<String> {
-    std::env::var("MOLY_SEED").ok()
+    moly_config::text(&moly_config::keys::DEV_SEED)
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -26,8 +26,10 @@ a reload, or a retry with `?renderer=webgl2`; each retry reloads the page.
 
 ## Server
 
-The full-screen game connects to the server named by its `?server=` parameter and otherwise to the
-public server `https://server.emptysekai.dev`. Each browser keeps a random user id in local
+The full-screen game connects to the server named by its `?server=` parameter, an `http://host:port`
+or `https://host[:port]` address such as `https://server.example`. The loader carries no server
+address of its own: a page that names none, or names something that is not an address, refuses to
+start with a message naming the `server` parameter. Each browser keeps a random user id in local
 storage. The embedded stage runs the server's rules inside the page and needs no server address.
 
 ## Save ownership
@@ -39,8 +41,11 @@ reloading another page requests write access. Environments without Web Locks sta
 
 `node web/serve.mjs` listens on the loopback address only. It serves the embedded stage at
 `/stage.html?assets=/assets/` and forwards `/player-api/{region}/{target_user_id}` for player data
-import. The full-screen game is served by the `moly-web` site server from its `game` release
-directory; its enter button enables audio inside the user's gesture.
+import to the URL template at `MOLY_PLAYER_API` (with `{region}` and `{target_user_id}`), for
+example `https://players.example/api/{region}/mysekai/{target_user_id}`. Without it, each
+`/player-api/` request is refused with a message naming `MOLY_PLAYER_API`. The full-screen game is served by the
+`moly-web` site server from its `game` release directory; its enter button enables audio inside the
+user's gesture.
 
 The resource directory should be trusted and read-only, and the real target of every link inside it
 must stay within the same mount root.

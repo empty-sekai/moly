@@ -67,8 +67,10 @@ impl AssetLoader for JsonAssetLoader {
     }
 }
 
-/// 注册 JSON 资产类型与装载器。必须在 DefaultPlugins 之后调用：
-/// AssetServer 由 AssetPlugin 创建，装载器注册落在 AssetServer 上。
+/// Registers the JSON asset type and its loader. Runs after `DefaultPlugins`,
+/// because the loader is registered on the `AssetServer` that `AssetPlugin`
+/// creates. The master layer reads its hosts from the remote admission, so it
+/// also runs after `remote::register` (with the asset root).
 pub fn register(app: &mut App) {
     app.init_asset::<JsonAsset>()
         .register_asset_loader(JsonAssetLoader);

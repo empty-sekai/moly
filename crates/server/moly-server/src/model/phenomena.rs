@@ -33,13 +33,14 @@
 //! the section set it, the join included, and the release reply sets it
 //! before the learn flow reads its rows.
 //!
-//! Native instrument: `MOLY_HARVEST_MOCK_PHENOMENA`
-//! (`mysekaiPhenomenaId:obtainedAt`, comma separated) states the native
-//! document's rows; game mode reads no environment variable.
+//! Native instrument: `dev.harvest_mock_phenomena` (`MOLY_HARVEST_MOCK_PHENOMENA`,
+//! `mysekaiPhenomenaId:obtainedAt`, comma separated) states the native
+//! document's rows; game mode reads no instrument.
 
 use std::collections::BTreeSet;
 
 use bevy::prelude::*;
+use moly_config::keys;
 use serde_json::{json, Map, Value};
 
 use super::document::{SchedulePolicy, ServerDocument};
@@ -52,6 +53,8 @@ pub(crate) use moly_protocol::rows::UserMysekaiPhenomena;
 /// The API's name in the source.
 pub(crate) const API: &str = "PostUserMysekaiReleaseApi";
 const INSTRUMENT: &str = "MOLY_HARVEST_MOCK_PHENOMENA";
+/// The instrument's key: `dev.harvest_mock_phenomena` (`MOLY_HARVEST_MOCK_PHENOMENA`).
+const INSTRUMENT_KEY: &moly_config::Key = &keys::DEV_HARVEST_MOCK_PHENOMENA;
 
 /// This part of the server document.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -190,10 +193,10 @@ const HOUR_MS: i64 = 3_600_000;
 // Native instrument
 // ---------------------------------------------------------------------------
 
-/// `MOLY_HARVEST_MOCK_PHENOMENA` over the native document; a malformed entry
-/// stops loudly.
+/// `dev.harvest_mock_phenomena` (`MOLY_HARVEST_MOCK_PHENOMENA`) over the
+/// native document; a malformed entry stops loudly.
 pub(crate) fn native_overlay(doc: &mut ServerDocument) {
-    let Some(raw) = super::instrument_env(INSTRUMENT) else {
+    let Some(raw) = super::instrument_env(INSTRUMENT_KEY) else {
         return;
     };
     let mut rows = Vec::new();

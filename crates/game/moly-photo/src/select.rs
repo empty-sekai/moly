@@ -1242,7 +1242,7 @@ fn export(bytes: &[u8]) -> Result<(), String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_millis();
-    let directory = std::env::var_os("MOLY_SCREENSHOT_DIR")
+    let directory = moly_config::text(&moly_config::keys::DEV_SCREENSHOT_DIR)
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| "screenshots".into());
     std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;

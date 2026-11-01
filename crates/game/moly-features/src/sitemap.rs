@@ -2835,8 +2835,9 @@ pub fn click(
     );
 }
 
-/// Update, verification only: with `MOLY_SITEMAP_AUTOCLICK_SECS` and
-/// `MOLY_SITEMAP_AUTOCLICK_SITE` set, after that many seconds the hook opens
+/// Update, verification only: with `dev.sitemap_autoclick_secs`
+/// (`MOLY_SITEMAP_AUTOCLICK_SECS`) and `dev.sitemap_autoclick_site`
+/// (`MOLY_SITEMAP_AUTOCLICK_SITE`) set, after that many seconds the hook opens
 /// the map (a `PushUIScreen`, as the menu button does) and then taps the
 /// site's icon at its position through `tap`, the path a real tap takes.
 /// It retries each frame until a branch takes the tap (the map not yet open
@@ -2863,8 +2864,8 @@ pub fn smoke_autoclick(
         return;
     };
     if armed.is_none() {
-        let spec = std::env::var("MOLY_SITEMAP_AUTOCLICK_SECS").ok();
-        let site = std::env::var("MOLY_SITEMAP_AUTOCLICK_SITE").ok();
+        let spec = moly_config::text(&moly_config::keys::DEV_SITEMAP_AUTOCLICK_SECS);
+        let site = moly_config::text(&moly_config::keys::DEV_SITEMAP_AUTOCLICK_SITE);
         let parsed = spec
             .as_deref()
             .and_then(|raw| raw.trim().parse::<f32>().ok())
@@ -2922,19 +2923,20 @@ pub fn smoke_autoclick(
     );
     if fired {
         info!(
-            "sitemap: auto click (MOLY_SITEMAP_AUTOCLICK) site={site_type} canvas=({:.1},{:.1})",
+            "sitemap: auto click (dev.sitemap_autoclick_secs, dev.sitemap_autoclick_site) site={site_type} canvas=({:.1},{:.1})",
             canvas.x, canvas.y
         );
         *armed = Some(None);
     }
 }
 
-/// Update, verification only: with `MOLY_SITEMAP_AUTO_UNLOCK_SECS` set, after
-/// that many seconds the first locked icon that has finished its
-/// in-animation runs `OpenSiteAsync` once. In the source the open animation
-/// runs from `PlaySiteOpenDirection` on the harvest-site release topic, which
-/// the product does not raise; this hook is how a run without input shows the
-/// animation. Without the variable it does nothing.
+/// Update, verification only: with `dev.sitemap_auto_unlock_secs`
+/// (`MOLY_SITEMAP_AUTO_UNLOCK_SECS`) set, after that many seconds the first
+/// locked icon that has finished its in-animation runs `OpenSiteAsync` once.
+/// In the source the open animation runs from `PlaySiteOpenDirection` on the
+/// harvest-site release topic, which the product does not raise; this hook is
+/// how a run without input shows the animation. Without the key it does
+/// nothing.
 pub fn auto_unlock(
     time: Res<Time>,
     mut commands: Commands,
@@ -2947,8 +2949,7 @@ pub fn auto_unlock(
     let Some(data) = data else { return };
     if auto.is_none() {
         *auto = Some(
-            std::env::var("MOLY_SITEMAP_AUTO_UNLOCK_SECS")
-                .ok()
+            moly_config::text(&moly_config::keys::DEV_SITEMAP_AUTO_UNLOCK_SECS)
                 .and_then(|raw| raw.parse::<f32>().ok())
                 .filter(|secs| *secs > 0.0),
         );
@@ -2971,7 +2972,9 @@ pub fn auto_unlock(
     };
     let site_id = data.sites[icon.site].id;
     begin_unlock(&mut commands, &data, entity, &mut icon);
-    info!("sitemap: auto unlock site={site_id} (MOLY_SITEMAP_AUTO_UNLOCK_SECS hook)");
+    info!(
+        "sitemap: auto unlock site={site_id} (dev.sitemap_auto_unlock_secs, MOLY_SITEMAP_AUTO_UNLOCK_SECS, hook)"
+    );
     *inner = None;
 }
 

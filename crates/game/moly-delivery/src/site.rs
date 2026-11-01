@@ -24,8 +24,9 @@
 //! Requests: the delivery screen (`super::screen`) sends
 //! `DeliveryRequest::Start` on the delivery button's press and
 //! `DeliveryRequest::End` on its release. The reward dialogs close on the
-//! screen manager's hardware back key (Escape). `MOLY_DELIVERY_AUTOPLAY`
-//! (off by default, WARN when set) is an instrument: `hold[,close]` in
+//! screen manager's hardware back key (Escape). `dev.delivery_autoplay`
+//! (`MOLY_DELIVERY_AUTOPLAY`) (off by default, WARN when set) is an
+//! instrument: `hold[,close]` in
 //! seconds; it walks the player through the joystick's touch stream to each
 //! drop on the ground, then into the place circle, touches the drawn
 //! delivery button through the window's touch stream (the gesture layer
@@ -769,21 +770,28 @@ pub struct DeliveryAutoplay {
 }
 
 fn autoplay_config() -> Option<(f32, f32)> {
-    let raw = std::env::var("MOLY_DELIVERY_AUTOPLAY").ok()?;
+    let raw = moly_config::text(&moly_config::keys::DEV_DELIVERY_AUTOPLAY)?;
+    let malformed = || {
+        panic!(
+            "dev.delivery_autoplay (MOLY_DELIVERY_AUTOPLAY) is not `hold[,close]` in seconds: \
+             {raw:?}"
+        )
+    };
     let mut parts = raw.split(',').map(|part| part.trim().parse::<f32>());
     let hold = match parts.next() {
         Some(Ok(hold)) if hold > 0.0 => hold,
-        _ => panic!("MOLY_DELIVERY_AUTOPLAY is not `hold[,close]` in seconds: {raw:?}"),
+        _ => malformed(),
     };
     let close = match parts.next() {
         None => 1.5,
         Some(Ok(close)) if close >= 0.0 => close,
-        Some(_) => panic!("MOLY_DELIVERY_AUTOPLAY is not `hold[,close]` in seconds: {raw:?}"),
+        Some(_) => malformed(),
     };
     Some((hold, close))
 }
 
-/// Update: `MOLY_DELIVERY_AUTOPLAY` (see the module comment).
+/// Update: `dev.delivery_autoplay` (`MOLY_DELIVERY_AUTOPLAY`), see the module
+/// comment.
 pub fn autoplay(
     time: Res<Time>,
     mut run: ResMut<DeliveryAutoplay>,
@@ -809,7 +817,11 @@ pub fn autoplay(
     };
     if !run.warned {
         run.warned = true;
-        warn!("[delivery-autoplay] MOLY_DELIVERY_AUTOPLAY is set: an instrument walks the player to the drops and into the place circle, holds the delivery button {hold} s and closes each awaited dialog after {close} s");
+        warn!(
+            "[delivery-autoplay] dev.delivery_autoplay (MOLY_DELIVERY_AUTOPLAY) is set: an \
+             instrument walks the player to the drops and into the place circle, holds the \
+             delivery button {hold} s and closes each awaited dialog after {close} s"
+        );
     }
     let now = time.elapsed_secs();
     let Ok((window_entity, window)) = windows.single() else {

@@ -19,6 +19,7 @@ moly-world = { path = "../../game/moly-world" }
 moly-features = { path = "../../game/moly-features" }
 moly-fixture-edit = { path = "../../game/moly-fixture-edit" }
 moly-assets = { path = "../../engine/moly-assets" }
+moly-config = { path = "../../base/moly-config" }
 moly-perf = { path = "../../engine/moly-perf" }
 moly-link = { path = "../../net/moly-link", features = ["local"] }
 moly-protocol = { path = "../../net/moly-protocol" }

@@ -134,7 +134,7 @@ impl Recycle {
                 ok: "WORD_OK",
                 cancel: "WORD_CANCEL",
             },
-            Some("MOLY_INVENTORY_RECYCLE_CONFIRM_SECS"),
+            Some(&moly_config::keys::DEV_INVENTORY_RECYCLE_CONFIRM_SECS),
         );
         let dialog = dialog?;
         info!(

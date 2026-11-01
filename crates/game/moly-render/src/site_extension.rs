@@ -306,9 +306,9 @@ impl Plugin for SiteExtensionPlugin {
 }
 
 /// Developer hook: plays one expansion clip through the public calls, with
-/// every value taken from `MOLY_SITE_EXTENSION_DEV` (no clip data lives in
-/// the code). The variable is `;`-separated `key=value` pairs:
-/// `start` (seconds of virtual time at which the clip starts), `duration`,
+/// every value taken from `dev.site_extension_dev` (`MOLY_SITE_EXTENSION_DEV`)
+/// (no clip data lives in the code). The value is `;`-separated `key=value`
+/// pairs: `start` (seconds of virtual time at which the clip starts), `duration`,
 /// `hold` (seconds after the clip ends before `ResetGlobalDissolve`; the
 /// last frame's struct stays stored meanwhile), `center=x,y,z`,
 /// `radius=start,end`, `fade=min,max`, `gradient`, `edge=r,g,b,a`,
@@ -411,8 +411,7 @@ mod dev {
             reset,
         } = &mut *state;
         let clip = clip.get_or_insert_with(|| {
-            std::env::var("MOLY_SITE_EXTENSION_DEV")
-                .ok()
+            moly_config::text(&moly_config::keys::DEV_SITE_EXTENSION_DEV)
                 .map(|spec| parse(&spec))
         });
         let Some(clip) = clip else {

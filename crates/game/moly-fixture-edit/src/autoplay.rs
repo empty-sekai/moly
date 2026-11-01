@@ -1,40 +1,43 @@
-//! Instrument `MOLY_EDIT_AUTOPLAY` (off by default; the value is the delay
-//! in seconds after the joystick opens, default 3): one layout edit at the
-//! current site, sent as the same commands the menu and the edit screen
-//! send. The menu's edit button (`Enter`), the camera rotate button once and
-//! the change-look button twice (`RotateCamera`, `ChangeLookCamera`); then,
-//! for each catalog index in `MOLY_EDIT_AUTOPLAY_CATALOG` (comma separated,
-//! default `2,0`), the catalog cell (`SelectCatalog`), which puts the new
-//! fixture on the tile the spiral finds, and after the put effect the
-//! screen's cancel button (`Cancel`, which removes the pre-placement), or,
-//! for an index written with a trailing `d`, the decide button (`Decide`,
-//! which places it, so the next put searches around it); a
-//! placed fixture picked from the screen (`SelectPlaced`), a one-cell drag
-//! (`MoveTo`: the tile the finger touches, one tile beside the one under the
-//! fixture's source center), the decide button (`Decide`); the same fixture
-//! again, dragged back to its start and decided; then the save button
-//! (`SaveAndExit`). A drag whose cell the
+//! Instrument `dev.edit_autoplay` (`MOLY_EDIT_AUTOPLAY`; off by default; the
+//! value is the delay in seconds after the joystick opens, default 3): one
+//! layout edit at the current site, sent as the same commands the menu and
+//! the edit screen send. The menu's edit button (`Enter`), the camera rotate
+//! button once and the change-look button twice (`RotateCamera`,
+//! `ChangeLookCamera`); then, for each catalog index in `dev.edit_autoplay_catalog`
+//! (`MOLY_EDIT_AUTOPLAY_CATALOG`, comma separated, default `2,0`), the
+//! catalog cell (`SelectCatalog`), which puts the new fixture on the tile the
+//! spiral finds, and after the put effect the screen's cancel button
+//! (`Cancel`, which removes the pre-placement), or, for an index written with
+//! a trailing `d`, the decide button (`Decide`, which places it, so the next
+//! put searches around it); a placed fixture picked from the screen
+//! (`SelectPlaced`), a one-cell drag (`MoveTo`: the tile the finger touches,
+//! one tile beside the one under the fixture's source center), the decide
+//! button (`Decide`); the same fixture again, dragged back to its start and
+//! decided; then the save button (`SaveAndExit`). A drag whose cell the
 //! screen would not accept is retried in the next direction; after four the
 //! screen's cancel button (`Cancel`) and the next fixture. With
-//! `MOLY_EDIT_AUTOPLAY_WAIT_TWEET` set, the edit button waits (up to 120 s)
-//! until a tweet balloon is visible, so the edit's tweet hiding has
-//! something to hide. With `MOLY_EDIT_AUTOPLAY_STACK=<uid>,<uid>` the first
-//! pick is the first fixture and its drag goes to the tile under the second
-//! fixture's source center (a drag onto it), then the same decide and drag
-//! back; then the second fixture is picked (it carries what stands on it), a
-//! one-cell drag, the fixture rotate button (`Rotate`), the decide button,
-//! and the same drag back and decide. With `MOLY_EDIT_AUTOPLAY_HOLD=<secs>`
-//! the run waits that long after the camera buttons, with nothing selected
-//! and no command sent, so a drag given from outside (a real pointer drag
-//! on the ground) reaches the edit camera's drag. With
-//! `MOLY_EDIT_AUTOPLAY_CLEAN_UP` set, before the save button the run presses
-//! the remove-all button (`RequestCleanUp`) and the confirmation's clean-up
-//! button (`CleanUpAll`). With `MOLY_EDIT_AUTOPLAY_CLEAN_UP_HOLD=<secs>` the
-//! run waits that long with the confirmation open before its clean-up
-//! button, so a drag given from outside meets the open confirmation. With
-//! `MOLY_EDIT_AUTOPLAY_RETURN_BASE` set, the
-//! base of the stack run is picked once more and sent to storage with the
-//! delete button (`ReturnToInventory`) before that.
+//! `dev.edit_autoplay_wait_tweet` (`MOLY_EDIT_AUTOPLAY_WAIT_TWEET`) set, the
+//! edit button waits (up to 120 s) until a tweet balloon is visible, so the
+//! edit's tweet hiding has something to hide. With
+//! `dev.edit_autoplay_stack` (`MOLY_EDIT_AUTOPLAY_STACK=<uid>,<uid>`) the
+//! first pick is the first fixture and its drag goes to the tile under the
+//! second fixture's source center (a drag onto it), then the same decide and
+//! drag back; then the second fixture is picked (it carries what stands on
+//! it), a one-cell drag, the fixture rotate button (`Rotate`), the decide
+//! button, and the same drag back and decide. With `dev.edit_autoplay_hold`
+//! (`MOLY_EDIT_AUTOPLAY_HOLD=<secs>`) the run waits that long after the
+//! camera buttons, with nothing selected and no command sent, so a drag given
+//! from outside (a real pointer drag on the ground) reaches the edit camera's
+//! drag. With `dev.edit_autoplay_clean_up` (`MOLY_EDIT_AUTOPLAY_CLEAN_UP`)
+//! set, before the save button the run presses the remove-all button
+//! (`RequestCleanUp`) and the confirmation's clean-up button (`CleanUpAll`).
+//! With `dev.edit_autoplay_clean_up_hold` (`MOLY_EDIT_AUTOPLAY_CLEAN_UP_HOLD`)
+//! set to seconds, the run waits that long with the confirmation open before
+//! its clean-up button, so a drag given from outside meets the open
+//! confirmation. With `dev.edit_autoplay_return_base`
+//! (`MOLY_EDIT_AUTOPLAY_RETURN_BASE`) set, the base of the stack run is
+//! picked once more and sent to storage with the delete button
+//! (`ReturnToInventory`) before that.
 
 use bevy::prelude::*;
 use moly_law::fixture::GridPosition;
@@ -110,7 +113,8 @@ pub(super) struct Run {
 /// The catalog indices, each with whether its put is decided (a trailing
 /// `d`) rather than cancelled.
 fn catalog_indices() -> Vec<(usize, bool)> {
-    let raw = std::env::var("MOLY_EDIT_AUTOPLAY_CATALOG").unwrap_or_else(|_| "2,0".into());
+    let raw = moly_config::text(&moly_config::keys::DEV_EDIT_AUTOPLAY_CATALOG)
+        .unwrap_or_else(|| "2,0".into());
     raw.split(',')
         .map(str::trim)
         .filter(|part| !part.is_empty())
@@ -120,7 +124,9 @@ fn catalog_indices() -> Vec<(usize, bool)> {
                 None => (part, false),
             };
             let index = digits.parse::<usize>().unwrap_or_else(|_| {
-                panic!("MOLY_EDIT_AUTOPLAY_CATALOG is not a list of catalog indices: {raw:?}")
+                panic!(
+                    "dev.edit_autoplay_catalog (MOLY_EDIT_AUTOPLAY_CATALOG) is not a list of catalog indices: {raw:?}"
+                )
             });
             (index, decide)
         })
@@ -128,15 +134,14 @@ fn catalog_indices() -> Vec<(usize, bool)> {
 }
 
 fn delay() -> Option<f32> {
-    let raw = std::env::var("MOLY_EDIT_AUTOPLAY").ok()?;
+    let raw = moly_config::text(&moly_config::keys::DEV_EDIT_AUTOPLAY)?;
     let raw = raw.trim();
     if raw.is_empty() {
         return Some(3.0);
     }
-    Some(
-        raw.parse::<f32>()
-            .unwrap_or_else(|_| panic!("MOLY_EDIT_AUTOPLAY is not a delay in seconds: {raw:?}")),
-    )
+    Some(raw.parse::<f32>().unwrap_or_else(|_| {
+        panic!("dev.edit_autoplay (MOLY_EDIT_AUTOPLAY) is not a delay in seconds: {raw:?}")
+    }))
 }
 
 /// The ground tile under a placed fixture's source center: the tile a drag
@@ -177,7 +182,7 @@ pub(super) fn autoplay(
     };
     if !run.warned {
         run.warned = true;
-        warn!("[edit-autoplay] instrument MOLY_EDIT_AUTOPLAY is on: one layout edit is sent as the menu's and the edit screen's commands");
+        warn!("[edit-autoplay] instrument dev.edit_autoplay (MOLY_EDIT_AUTOPLAY) is on: one layout edit is sent as the menu's and the edit screen's commands");
     }
     let now = time.elapsed_secs();
     let elapsed = now - run.at;
@@ -190,7 +195,8 @@ pub(super) fn autoplay(
             if now - since < after {
                 return;
             }
-            if std::env::var("MOLY_EDIT_AUTOPLAY_WAIT_TWEET").is_ok() {
+            if moly_config::text(&moly_config::keys::DEV_EDIT_AUTOPLAY_WAIT_TWEET).is_some()
+            {
                 let visible = balloons.iter().filter(|v| v.get()).count();
                 if visible == 0 && now - since < after + 120.0 {
                     if !run.waiting_logged {
@@ -252,11 +258,12 @@ pub(super) fn autoplay(
             }
             if run.step == Step::LookedBack && !run.held {
                 run.held = true;
-                let hold = std::env::var("MOLY_EDIT_AUTOPLAY_HOLD")
-                    .ok()
+                let hold = moly_config::text(&moly_config::keys::DEV_EDIT_AUTOPLAY_HOLD)
                     .map(|raw| {
                         raw.trim().parse::<f32>().unwrap_or_else(|_| {
-                            panic!("MOLY_EDIT_AUTOPLAY_HOLD is not seconds: {raw:?}")
+                            panic!(
+                                "dev.edit_autoplay_hold (MOLY_EDIT_AUTOPLAY_HOLD) is not seconds: {raw:?}"
+                            )
                         })
                     })
                     .unwrap_or(0.0);
@@ -322,8 +329,7 @@ pub(super) fn autoplay(
             }
             if !run.stack_read {
                 run.stack_read = true;
-                run.stack = std::env::var("MOLY_EDIT_AUTOPLAY_STACK")
-                    .ok()
+                run.stack = moly_config::text(&moly_config::keys::DEV_EDIT_AUTOPLAY_STACK)
                     .and_then(|raw| {
                         let (a, b) = raw.split_once(',')?;
                         Some((a.trim().to_owned(), b.trim().to_owned()))
@@ -349,7 +355,9 @@ pub(super) fn autoplay(
                         run.at = now;
                         return;
                     }
-                    _ => warn!("[edit-autoplay] MOLY_EDIT_AUTOPLAY_STACK names {target} or {base}, not a placed row; the usual pick"),
+                    _ => warn!(
+                        "[edit-autoplay] dev.edit_autoplay_stack (MOLY_EDIT_AUTOPLAY_STACK) names {target} or {base}, not a placed row; the usual pick"
+                    ),
                 }
             }
             let tried = run.tried.clone();
@@ -526,7 +534,8 @@ pub(super) fn autoplay(
                 }
                 warn!("[edit-autoplay] the base {base} is not a placed row any more");
             }
-            if std::env::var("MOLY_EDIT_AUTOPLAY_RETURN_BASE").is_ok() {
+            if moly_config::text(&moly_config::keys::DEV_EDIT_AUTOPLAY_RETURN_BASE).is_some()
+            {
                 if let Some(base) = run.base_uid.take() {
                     info!("[edit-autoplay] the screen picks the base {base} again for the delete button: SelectPlaced");
                     out.write(EditCommand::SelectPlaced { uid: base });
@@ -535,7 +544,9 @@ pub(super) fn autoplay(
                     return;
                 }
             }
-            if !run.cleaned && std::env::var("MOLY_EDIT_AUTOPLAY_CLEAN_UP").is_ok() {
+            if !run.cleaned
+                && moly_config::text(&moly_config::keys::DEV_EDIT_AUTOPLAY_CLEAN_UP).is_some()
+            {
                 run.cleaned = true;
                 info!(
                     "[edit-autoplay] the remove-all button: RequestCleanUp ({} placed rows, {} in storage)",
@@ -571,11 +582,12 @@ pub(super) fn autoplay(
             }
             if !run.clean_up_held {
                 run.clean_up_held = true;
-                let hold = std::env::var("MOLY_EDIT_AUTOPLAY_CLEAN_UP_HOLD")
-                    .ok()
+                let hold = moly_config::text(&moly_config::keys::DEV_EDIT_AUTOPLAY_CLEAN_UP_HOLD)
                     .map(|raw| {
                         raw.trim().parse::<f32>().unwrap_or_else(|_| {
-                            panic!("MOLY_EDIT_AUTOPLAY_CLEAN_UP_HOLD is not seconds: {raw:?}")
+                            panic!(
+                                "dev.edit_autoplay_clean_up_hold (MOLY_EDIT_AUTOPLAY_CLEAN_UP_HOLD) is not seconds: {raw:?}"
+                            )
                         })
                     })
                     .unwrap_or(0.0);

@@ -17,8 +17,9 @@ use std::path::{Path, PathBuf};
 #[serde(default)]
 pub struct LauncherConfig {
     pub schema: u32,
-    /// The resource CDN base, ending with `/` (`resources.base`).
-    pub cdn: String,
+    /// The resource CDN base, ending with `/`; required to download or list
+    /// resources (`resources.base`).
+    pub cdn: Option<String>,
     /// Where resources are downloaded; the default directory when absent
     /// (`resources.dir`).
     pub resource_dir: Option<PathBuf>,
@@ -42,7 +43,7 @@ impl Default for LauncherConfig {
     fn default() -> Self {
         Self {
             schema: 1,
-            cdn: crate::DEFAULT_CDN.into(),
+            cdn: None,
             resource_dir: None,
             snapshot: None,
             jobs: 16,
@@ -89,7 +90,7 @@ impl LauncherConfig {
         };
         Ok(Self {
             schema: defaults.schema,
-            cdn: config.file_text(&keys::RESOURCE_BASE).unwrap_or(defaults.cdn),
+            cdn: non_empty(config.file_text(&keys::RESOURCE_BASE)),
             resource_dir: config.file_text(&keys::RESOURCE_DIR).map(PathBuf::from),
             snapshot: config.file_text(&keys::RESOURCE_SNAPSHOT),
             jobs,
@@ -117,7 +118,9 @@ impl LauncherConfig {
     }
 
     pub fn save(&self) -> Result<(), String> {
-        crate::check_cdn(&self.cdn)?;
+        if let Some(cdn) = self.cdn.as_deref() {
+            crate::check_cdn(cdn)?;
+        }
         if let Some(dir) = self.resource_dir.as_deref().filter(|dir| !dir.is_absolute()) {
             return Err(format!("the resource directory must be a full path: {}", dir.display()));
         }
@@ -131,7 +134,7 @@ impl LauncherConfig {
         moly_config::set_values(
             path,
             &[
-                (&keys::RESOURCE_BASE, text(Some(&self.cdn))),
+                (&keys::RESOURCE_BASE, text(self.cdn.as_deref())),
                 (&keys::RESOURCE_DIR, path_text(&self.resource_dir)),
                 (&keys::RESOURCE_SNAPSHOT, text(self.snapshot.as_deref())),
                 (&keys::LAUNCHER_JOBS, Some(Value::Integer(jobs))),
@@ -150,6 +153,11 @@ impl LauncherConfig {
             None => location::default_resource_dir(),
         }
     }
+}
+
+/// `value`, unless it is empty, as the value of an optional setting.
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
 }
 
 /// The resources a game started without configuration reads: the launcher's

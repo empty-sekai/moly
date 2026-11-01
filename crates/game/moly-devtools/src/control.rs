@@ -2,10 +2,11 @@
 //! beside the protocol's own `world.*`, `registry.schema` and `rpc.discover`.
 //!
 //! One method set serves every client. A native run opens a localhost HTTP
-//! endpoint when `MOLY_CONTROL_PORT` names a port; the browser page sends
-//! requests through [`control_request`]. Both transports take and answer
-//! JSON-RPC 2.0 objects, and a request is handled in the frame after it
-//! arrives. `moly.methods` lists the moly methods with what each takes.
+//! endpoint when `dev.control_port` (`MOLY_CONTROL_PORT`) names a port; the
+//! browser page sends requests through [`control_request`]. Both transports
+//! take and answer JSON-RPC 2.0 objects, and a request is handled in the frame
+//! after it arrives. `moly.methods` lists the moly methods with what each
+//! takes.
 
 pub mod layout;
 mod observe;
@@ -243,13 +244,16 @@ pub fn install(app: &mut App) {
     }
 }
 
-/// `MOLY_CONTROL_PORT`, when set; anything but a port number is refused.
+/// `dev.control_port` (`MOLY_CONTROL_PORT`), when set; anything but a port
+/// number is refused.
 #[cfg(not(target_arch = "wasm32"))]
 fn native_port() -> Option<u16> {
-    let value = std::env::var("MOLY_CONTROL_PORT").ok()?;
+    let value = moly_config::text(&moly_config::keys::DEV_CONTROL_PORT)?;
     match value.parse::<u16>() {
         Ok(port) if port > 0 => Some(port),
-        _ => panic!("[control] MOLY_CONTROL_PORT must be a port number, not {value:?}"),
+        _ => panic!(
+            "[control] dev.control_port (MOLY_CONTROL_PORT) must be a port number, not {value:?}"
+        ),
     }
 }
 

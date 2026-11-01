@@ -62,8 +62,9 @@
 //! hidden until the director's first frame (see `super::cast`); the voice
 //! download is the root's stream table (the voice track plays from it).
 //!
-//! The native instrument `MOLY_BIRTHDAY_PARTY_ACTION=<seconds>[:<fixture>]`
-//! presses the button as a player would, after that many real seconds on
+//! The native instrument `dev.birthday_party_action`
+//! (`MOLY_BIRTHDAY_PARTY_ACTION`) = `<seconds>[:<fixture>]` presses the button
+//! as a player would, after that many real seconds on
 //! the home site: it takes the first placed party fixture (or the named
 //! master fixture) whose [`BirthdayButton`] shows, puts the player at the
 //! spot `PutAndLookPlayerBesideFixture` uses (0.5 m behind the fixture's
@@ -71,9 +72,9 @@
 //! birthday cut-scene button taps its screen position through the window's
 //! touch stream (the gesture layer, the button's hit and its dispatch, which
 //! writes [`BirthdayCutSceneClick`]). The placement is the instrument's (a
-//! player walks there); the game mode reads no environment variable.
-//! `MOLY_BIRTHDAY_CONFIRM_SECS=<seconds>` taps the confirm dialog's OK that
-//! many seconds after it shows.
+//! player walks there); the game mode reads no developer switch.
+//! `dev.birthday_confirm_secs` (`MOLY_BIRTHDAY_CONFIRM_SECS`) = `<seconds>`
+//! taps the confirm dialog's OK that many seconds after it shows.
 
 use bevy::ecs::system::SystemState;
 use bevy::input::touch::{TouchInput, TouchPhase};
@@ -99,8 +100,8 @@ use moly_protocol::{Call, Refusal, Reply};
 const CONDITION: &str = "birthday_party";
 /// `MysekaiSystemFixtureType` of a party fixture.
 const PARTY_FIXTURE_TYPE: &str = "birthday";
-const INSTRUMENT: &str = "MOLY_BIRTHDAY_PARTY_ACTION";
-const CONFIRM_INSTRUMENT: &str = "MOLY_BIRTHDAY_CONFIRM_SECS";
+const INSTRUMENT: &moly_config::Key = &moly_config::keys::DEV_BIRTHDAY_PARTY_ACTION;
+const CONFIRM_INSTRUMENT: &moly_config::Key = &moly_config::keys::DEV_BIRTHDAY_CONFIRM_SECS;
 const CONFIRM_FIRST: &str = "WORD_MYSEKAI_BIRTHDAY_PARTY_CONFIRM";
 const CONFIRM_AFTER: &str = "WORD_MYSEKAI_BIRTHDAY_PARTY_REMEMBER_CONFIRM";
 const START: &str = "WORD_START_BIRTHDAY_PARTY";

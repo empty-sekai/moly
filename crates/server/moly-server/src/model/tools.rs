@@ -28,13 +28,14 @@
 //! merges a reply before its caller reads the user data). The harvest's
 //! player model follows it.
 //!
-//! Native instrument: `MOLY_HARVEST_MOCK_TOOLS` (`toolId:quantity:durability`,
-//! comma separated) states the native document's rows; game mode reads no
-//! environment variable.
+//! Native instrument: `dev.harvest_mock_tools` (`MOLY_HARVEST_MOCK_TOOLS`,
+//! `toolId:quantity:durability`, comma separated) states the native document's
+//! rows; game mode reads no instrument.
 
 use std::collections::BTreeSet;
 
 use bevy::prelude::*;
+use moly_config::keys;
 use serde_json::{json, Map, Value};
 
 use super::document::ServerDocument;
@@ -42,6 +43,8 @@ use super::{Masters, ServerModel, Tables};
 
 pub(crate) use moly_protocol::json::SECTION_TOOLS as SECTION;
 const INSTRUMENT: &str = "MOLY_HARVEST_MOCK_TOOLS";
+/// The instrument's key: `dev.harvest_mock_tools` (`MOLY_HARVEST_MOCK_TOOLS`).
+const INSTRUMENT_KEY: &moly_config::Key = &keys::DEV_HARVEST_MOCK_TOOLS;
 /// The tool types the initial tools policy seats, in seating order.
 const INITIAL_TYPES: [&str; 2] = ["pickaxe", "axe"];
 
@@ -286,10 +289,10 @@ impl ServerModel {
 // Native instrument and the panel
 // ---------------------------------------------------------------------------
 
-/// `MOLY_HARVEST_MOCK_TOOLS` over the native document; a malformed entry
-/// stops loudly.
+/// `dev.harvest_mock_tools` (`MOLY_HARVEST_MOCK_TOOLS`) over the native
+/// document; a malformed entry stops loudly.
 pub(crate) fn native_overlay(doc: &mut ServerDocument) {
-    let Some(raw) = super::instrument_env(INSTRUMENT) else {
+    let Some(raw) = super::instrument_env(INSTRUMENT_KEY) else {
         return;
     };
     let mut rows = Vec::new();

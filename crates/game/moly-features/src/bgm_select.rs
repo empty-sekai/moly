@@ -2095,12 +2095,12 @@ pub fn click(
 // Native instrument
 // ---------------------------------------------------------------------------
 
-/// `MOLY_BGM_SELECT_TAPS`: comma-separated `<seconds>=<target>` steps in time
-/// order (seconds of real time since start-up); a target is `x:y` (window
-/// pixels), `back`, `status` (the play status button), `vocal` or `cell:<n>`
-/// (the n-th bound cell from the top). Each tap goes to the window's event
-/// stream (down and up in one frame), through the gesture and click path.
-/// A malformed step stops loudly.
+/// `dev.bgm_select_taps` (`MOLY_BGM_SELECT_TAPS`): comma-separated
+/// `<seconds>=<target>` steps in time order (seconds of real time since
+/// start-up); a target is `x:y` (window pixels), `back`, `status` (the play
+/// status button), `vocal` or `cell:<n>` (the n-th bound cell from the top).
+/// Each tap goes to the window's event stream (down and up in one frame),
+/// through the gesture and click path. A malformed step stops loudly.
 #[derive(Default)]
 pub struct TapScript {
     steps: Option<Vec<(f32, String)>>,
@@ -2112,12 +2112,13 @@ fn parse_taps(raw: &str) -> Vec<(f32, String)> {
         .filter(|step| !step.trim().is_empty())
         .map(|step| {
             let (at, target) = step.split_once('=').unwrap_or_else(|| {
-                panic!("MOLY_BGM_SELECT_TAPS step {step:?} is not <seconds>=<target>")
+                panic!(
+                    "dev.bgm_select_taps (MOLY_BGM_SELECT_TAPS) step {step:?} is not <seconds>=<target>"
+                )
             });
-            let at: f32 = at
-                .trim()
-                .parse()
-                .unwrap_or_else(|_| panic!("MOLY_BGM_SELECT_TAPS step {step:?}: bad seconds"));
+            let at: f32 = at.trim().parse().unwrap_or_else(|_| {
+                panic!("dev.bgm_select_taps (MOLY_BGM_SELECT_TAPS) step {step:?}: bad seconds")
+            });
             (at, target.trim().to_owned())
         })
         .collect()
@@ -2136,7 +2137,7 @@ pub fn tap_instrument(
 ) {
     let script = &mut *script;
     let steps = script.steps.get_or_insert_with(|| {
-        std::env::var("MOLY_BGM_SELECT_TAPS")
+        moly_config::text(&moly_config::keys::DEV_BGM_SELECT_TAPS)
             .map(|raw| parse_taps(&raw))
             .unwrap_or_default()
     });
@@ -2192,7 +2193,7 @@ pub fn tap_instrument(
         })
     } else {
         panic!(
-            "MOLY_BGM_SELECT_TAPS target {target:?} is not x:y, back, status, vocal or cell:<n>"
+            "dev.bgm_select_taps (MOLY_BGM_SELECT_TAPS) target {target:?} is not x:y, back, status, vocal or cell:<n>"
         );
     };
     let Some(position) = position else {

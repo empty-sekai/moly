@@ -55,7 +55,7 @@
 //! **Instruments.** A developer start may overlay a fixed clock, the screen
 //! pools and the avatar/music/harvest instruments onto the document; every
 //! instrument is read through [`instrument_env`], which is silent unless the
-//! process runs as a developer build.
+//! process is a developer start (`dev.window`, `MOLY_DEV`).
 
 /// The document schema's section for the mock's own extensions: the sites
 /// the server serves with the free layout mode on (`molyExtensions`, live).

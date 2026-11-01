@@ -13,8 +13,9 @@
 //!
 //! Rest and dialogue submit already-selected presentation commands. Rest has
 //! one source-ordered command queue and no second scenario clock or lottery.
-//! An explicit MOLY_EMOTICON_ITEMS showcase remains available; without that
-//! option it never injects unrelated emotes into the character's script.
+//! An explicit showcase (`dev.emoticon_items`, `MOLY_EMOTICON_ITEMS`)
+//! remains available; without that option it never injects unrelated emotes
+//! into the character's script.
 //!
 //! 挂账不静默：软粒子（无深度可读）、深度偏移、发光环、片表帧数之外的
 //! 逐粒子第三轴量、`loopEndFlag` 与 `soundInput`（无对应消费域）——装载时
@@ -2418,7 +2419,7 @@ pub struct Emotes {
     missing: Vec<String>,
 }
 
-/// 环境变量驱动的展示轮播（名册空转时兜底出件，冒烟可复算）。
+/// 开发者开关驱动的展示轮播（名册空转时兜底出件，冒烟可复算）。
 struct Showcase {
     items: Vec<usize>,
     idx: usize,
@@ -2426,27 +2427,29 @@ struct Showcase {
 }
 
 impl Showcase {
-    /// `MOLY_EMOTICON_ITEMS`：逗号分隔的条目名（点名不在档案里的条目即拒绝）；
-    /// 未指定不轮播。`MOLY_EMOTICON_SHOW_SECS`：出件秒数（缺省 6）。
+    /// `dev.emoticon_items`（`MOLY_EMOTICON_ITEMS`）：逗号分隔的条目名（点名
+    /// 不在档案里的条目即拒绝）；未指定不轮播。`dev.emoticon_show_secs`
+    /// （`MOLY_EMOTICON_SHOW_SECS`）：出件秒数（缺省 6）。
     fn from_env(archive: &Archive) -> Option<Showcase> {
-        let items = match std::env::var("MOLY_EMOTICON_ITEMS") {
-            Ok(list) => list
+        let items = match moly_config::text(&moly_config::keys::DEV_EMOTICON_ITEMS) {
+            Some(list) => list
                 .split(',')
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(|name| {
                     archive.index.get(name).copied().unwrap_or_else(|| {
-                        panic!("MOLY_EMOTICON_ITEMS 点名了档案里没有的条目：{name}")
+                        panic!(
+                            "dev.emoticon_items (MOLY_EMOTICON_ITEMS) 点名了档案里没有的条目：{name}"
+                        )
                     })
                 })
                 .collect::<Vec<_>>(),
-            Err(_) => return None,
+            None => return None,
         };
         if items.is_empty() {
             panic!("展示清单为空：档案里两族都没有条目");
         }
-        let show_secs = std::env::var("MOLY_EMOTICON_SHOW_SECS")
-            .ok()
+        let show_secs = moly_config::text(&moly_config::keys::DEV_EMOTICON_SHOW_SECS)
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(6.0);
         Some(Showcase {

@@ -1846,16 +1846,17 @@ fn prepare_silhouette(
 const _: () = assert!(matches!(CORE_3D_DEPTH_FORMAT, TextureFormat::Depth32Float));
 
 /// The first read-back comes on this replayed frame, then one every
-/// `MOLY_SILHOUETTE_PROBE_INTERVAL` replayed frames.
+/// `dev.silhouette_probe_interval` (`MOLY_SILHOUETTE_PROBE_INTERVAL`)
+/// replayed frames.
 const PROBE_FIRST_FRAME: u64 = 10;
 /// The browser build's interval between read-backs, in replayed frames.
 #[cfg(target_arch = "wasm32")]
 const PROBE_INTERVAL: u64 = 300;
 
 /// The native stencil read-back waits for the GPU on the render thread, so it
-/// runs only for a diagnosis run that sets `MOLY_SILHOUETTE_PROBE_INTERVAL`;
-/// read once. The browser build only logs a counter line and keeps the
-/// default interval.
+/// runs only for a diagnosis run that sets `dev.silhouette_probe_interval`
+/// (`MOLY_SILHOUETTE_PROBE_INTERVAL`); read once. The browser build only logs
+/// a counter line and keeps the default interval.
 fn probe_interval() -> Option<u64> {
     #[cfg(target_arch = "wasm32")]
     {
@@ -1865,8 +1866,7 @@ fn probe_interval() -> Option<u64> {
     {
         static INTERVAL: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
         *INTERVAL.get_or_init(|| {
-            std::env::var("MOLY_SILHOUETTE_PROBE_INTERVAL")
-                .ok()
+            moly_config::text(&moly_config::keys::DEV_SILHOUETTE_PROBE_INTERVAL)
                 .and_then(|raw| raw.trim().parse::<u64>().ok())
                 .filter(|frames| *frames > 0)
         })

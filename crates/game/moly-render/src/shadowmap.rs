@@ -195,8 +195,9 @@ const PROBE_INTERVAL: u64 = 600;
 
 /// The frames between accounts. The native depth-map read-back waits for the
 /// GPU on the render thread, so it runs only for a diagnosis run that sets
-/// `MOLY_SHADOW_PROBE_INTERVAL` (frames, at least 1); read once. The browser
-/// build only logs a counter line and keeps the default interval.
+/// `dev.shadow_probe_interval` (`MOLY_SHADOW_PROBE_INTERVAL`) (frames, at
+/// least 1); read once. The browser build only logs a counter line and keeps
+/// the default interval.
 fn probe_interval() -> Option<u64> {
     #[cfg(target_arch = "wasm32")]
     {
@@ -206,8 +207,7 @@ fn probe_interval() -> Option<u64> {
     {
         static INTERVAL: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
         *INTERVAL.get_or_init(|| {
-            std::env::var("MOLY_SHADOW_PROBE_INTERVAL")
-                .ok()
+            moly_config::text(&moly_config::keys::DEV_SHADOW_PROBE_INTERVAL)
                 .and_then(|value| value.parse::<u64>().ok())
                 .filter(|value| *value > 0)
         })

@@ -448,7 +448,7 @@ fn begin(world: &mut World, session: &mut EditSession) {
     play_se(world, "se_change_layout", "edit-enter");
     game_state::enter(world);
     environment::preview(world, session);
-    if std::env::var("MOLY_EDIT_AUTOPLAY").is_ok() {
+    if moly_config::text(&moly_config::keys::DEV_EDIT_AUTOPLAY).is_some() {
         census(world, session);
     }
     session.say("已进入家具编辑：点击家具或清单选中；决定后仍是草稿，保存才写入本地图。");
@@ -699,7 +699,7 @@ fn put_search(
         found.rejected.len(),
         counts
     );
-    if std::env::var("MOLY_EDIT_AUTOPLAY").is_ok() {
+    if moly_config::text(&moly_config::keys::DEV_EDIT_AUTOPLAY).is_some() {
         for (index, (tile, reason)) in found.rejected.iter().enumerate().take(400) {
             info!(
                 "[edit-put]   rejected #{index} tile ({}, {}, {}): {}",

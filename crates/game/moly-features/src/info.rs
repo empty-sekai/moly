@@ -155,9 +155,10 @@
 //!   `UIPartsMysekaiRankGauge` component (on a region layout its references are
 //!   all decoded).
 //!
-//! Environment variables: `MOLY_INFO_MOCK_ACCESS_PERMISSION` (all/friend_only/reject/
-//! review) · `MOLY_INFO_MOCK_FIXTURE_PUT_LIMIT` ·
-//! `MOLY_INFO_MOCK_FIXTURE_JOINT_PUT_LIMIT`.
+//! Developer switches: `dev.info_mock_access_permission`
+//! (`MOLY_INFO_MOCK_ACCESS_PERMISSION`, all/friend_only/reject/review) ·
+//! `dev.info_mock_fixture_put_limit` (`MOLY_INFO_MOCK_FIXTURE_PUT_LIMIT`) ·
+//! `dev.info_mock_fixture_joint_put_limit` (`MOLY_INFO_MOCK_FIXTURE_JOINT_PUT_LIMIT`).
 //!
 //! ## Rank page costs, photo and voice download
 //!
@@ -540,38 +541,50 @@ pub struct InfoMock {
     fixture_joint_put_limit: u32,
 }
 
-fn env_u32(name: &str, default: u32) -> u32 {
-    match std::env::var(name) {
-        Ok(raw) => match raw.trim().parse::<u32>() {
+fn env_u32(key: &'static moly_config::Key, default: u32) -> u32 {
+    match moly_config::text(key) {
+        Some(raw) => match raw.trim().parse::<u32>() {
             Ok(value) => value,
             Err(_) => {
-                warn!("[info] mock 面板：{name}={raw:?} 不是非负整数，回默认 {default}");
+                warn!(
+                    "[info] mock 面板：{variable} ({switch})={raw:?} 不是非负整数，回默认 {default}",
+                    variable = key.path,
+                    switch = key.env.unwrap_or_default()
+                );
                 default
             }
         },
-        Err(_) => default,
+        None => default,
     }
 }
 
 impl Default for InfoMock {
     fn default() -> Self {
-        let access_permission = match std::env::var("MOLY_INFO_MOCK_ACCESS_PERMISSION") {
-            Ok(raw) => match AccessPermission::from_name(raw.trim()) {
-                Some(value) => value,
-                None => {
-                    warn!(
-                        "[info] mock 面板：MOLY_INFO_MOCK_ACCESS_PERMISSION={raw:?} 不是档名 \
-                         （all/friend_only/reject/review），回默认 all"
-                    );
-                    AccessPermission::All
-                }
-            },
-            Err(_) => AccessPermission::All,
-        };
+        let access_permission =
+            match moly_config::text(&moly_config::keys::DEV_INFO_MOCK_ACCESS_PERMISSION) {
+                Some(raw) => match AccessPermission::from_name(raw.trim()) {
+                    Some(value) => value,
+                    None => {
+                        warn!(
+                            "[info] mock 面板：{variable} ({switch})={raw:?} 不是档名 \
+                             （all/friend_only/reject/review），回默认 all",
+                            variable = moly_config::keys::DEV_INFO_MOCK_ACCESS_PERMISSION.path,
+                            switch = moly_config::keys::DEV_INFO_MOCK_ACCESS_PERMISSION
+                                .env
+                                .unwrap_or_default()
+                        );
+                        AccessPermission::All
+                    }
+                },
+                None => AccessPermission::All,
+            };
         InfoMock {
             access_permission,
-            fixture_put_limit: env_u32("MOLY_INFO_MOCK_FIXTURE_PUT_LIMIT", 20),
-            fixture_joint_put_limit: env_u32("MOLY_INFO_MOCK_FIXTURE_JOINT_PUT_LIMIT", 10),
+            fixture_put_limit: env_u32(&moly_config::keys::DEV_INFO_MOCK_FIXTURE_PUT_LIMIT, 20),
+            fixture_joint_put_limit: env_u32(
+                &moly_config::keys::DEV_INFO_MOCK_FIXTURE_JOINT_PUT_LIMIT,
+                10,
+            ),
         }
     }
 }

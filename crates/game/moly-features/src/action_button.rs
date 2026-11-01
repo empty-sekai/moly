@@ -2408,8 +2408,8 @@ enum WalkTarget {
     Anchor(i32, Vec3),
 }
 
-/// 配对门运行的冒烟口（`MOLY_ACTION_BUTTON_AUTOWALK_SECS`，`<until>` 或
-/// `<from>:<until>` 秒）：把玩家
+/// 配对门运行的冒烟口（`dev.action_button_autowalk_secs`，
+/// `MOLY_ACTION_BUTTON_AUTOWALK_SECS`，`<until>` 或 `<from>:<until>` 秒）：把玩家
 /// 依次开到每个角色与每个锚定家具跟前。触摸注入进 `TouchInput` 消息流
 /// ——与引擎触摸同一条流，走真实的摇杆链（捕获 → 方向 → 移动向量），
 /// 不绕任何一行。两臂：
@@ -2442,9 +2442,9 @@ pub fn smoke_autowalk(
     mut target_since: Local<Option<f32>>,
     mut linger_until: Local<f32>,
 ) {
-    let Some((from, armed)) =
-        crate::dev_tools::instrument_window("MOLY_ACTION_BUTTON_AUTOWALK_SECS")
-    else {
+    let Some((from, armed)) = crate::dev_tools::instrument_window(
+        &moly_config::keys::DEV_ACTION_BUTTON_AUTOWALK_SECS,
+    ) else {
         return;
     };
     let now = time.elapsed_secs();
@@ -2705,16 +2705,17 @@ pub struct DoorWalk {
     last_change: f32,
 }
 
-/// Instrument (`MOLY_DOOR_WALK_SECS`, off by default; from
-/// `MOLY_DOOR_WALK_AFTER` seconds): on the home site walk the player to the
-/// centre of the house's collision box (in front of its outside door
-/// point), in a room to the door sensor, through the
+/// Instrument (`dev.door_walk_secs`, `MOLY_DOOR_WALK_SECS`, off by default;
+/// from `dev.door_walk_after`, `MOLY_DOOR_WALK_AFTER`, seconds): on the home
+/// site walk the player to the centre of the house's collision box (in front
+/// of its outside door point), in a room to the door sensor, through the
 /// joystick's touch stream; once the stack head is that door's button (the
 /// house entry, the go-home button) tap it on its screen position, through
 /// the gesture and click path. The press moves the site, and the walk
-/// starts again on the next one. `MOLY_DOOR_WALK_OFFSET=x,z` shifts the
-/// walk's goal by that many metres (to come at the sensor from another
-/// side; the button still waits for the sensor's own sphere).
+/// starts again on the next one. `dev.door_walk_offset`
+/// (`MOLY_DOOR_WALK_OFFSET=x,z`) shifts the walk's goal by that many metres
+/// (to come at the sensor from another side; the button still waits for the
+/// sensor's own sphere).
 pub fn smoke_door_walk(
     mut touches: MessageWriter<TouchInput>,
     mut window_events: MessageWriter<bevy::window::WindowEvent>,
@@ -2731,7 +2732,7 @@ pub fn smoke_door_walk(
     time: Res<Time>,
     mut walk: Local<DoorWalk>,
 ) {
-    let armed = env_secs("MOLY_DOOR_WALK_SECS");
+    let armed = env_secs(&moly_config::keys::DEV_DOOR_WALK_SECS);
     if armed <= 0.0 {
         return;
     }
@@ -2771,7 +2772,10 @@ pub fn smoke_door_walk(
     // the player's box away from the house. The tap finger goes only to the
     // window stream, which the joystick does not read.
     const TAP_MISS_SECS: f32 = 3.0;
-    if now >= armed || now < env_secs("MOLY_DOOR_WALK_AFTER") || !joystick.enabled {
+    if now >= armed
+        || now < env_secs(&moly_config::keys::DEV_DOOR_WALK_AFTER)
+        || !joystick.enabled
+    {
         release(walk, &mut touch);
         return;
     }
@@ -2816,8 +2820,7 @@ pub fn smoke_door_walk(
     let Some((target, expected)) = target else {
         return;
     };
-    let offset = std::env::var("MOLY_DOOR_WALK_OFFSET")
-        .ok()
+    let offset = moly_config::text(&moly_config::keys::DEV_DOOR_WALK_OFFSET)
         .and_then(|raw| {
             let (x, z) = raw.split_once(',')?;
             Some(Vec3::new(x.trim().parse().ok()?, 0.0, z.trim().parse().ok()?))
@@ -2936,10 +2939,9 @@ pub fn smoke_door_walk(
     touch(FINGER, TouchPhase::Moved, position);
 }
 
-/// 环境变量秒数（缺省 0）：与各域冒烟钩子同款读法。
-fn env_secs(name: &str) -> f32 {
-    std::env::var(name)
-        .ok()
+/// The key's seconds (default 0): the read the smoke hooks share.
+fn env_secs(key: &'static moly_config::Key) -> f32 {
+    moly_config::text(key)
         .and_then(|raw| raw.trim().parse::<f64>().ok())
         .map(|v| v.max(0.0) as f32)
         .unwrap_or(0.0)

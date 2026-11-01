@@ -47,8 +47,9 @@
 //! [`end_departure`]).
 //!
 //! Switching: Tab cycling, direct number keys (sites in the supported set), or the
-//! `MOLY_SITE_TOUR_SECS` smoke-tour instrument (unattended site-by-site loading,
-//! exiting cleanly once the last site has stayed). On a switch the current site
+//! `dev.site_tour_secs` (`MOLY_SITE_TOUR_SECS`) smoke-tour instrument (unattended
+//! site-by-site loading, exiting cleanly once the last site has stayed). On a
+//! switch the current site
 //! leaves according to the residency rules above (removed, or hidden and left in the
 //! list), all site-domain resources are cleared, and a new selection is written so
 //! the load plan runs again. The roster and the player entity are kept (the character
@@ -128,11 +129,12 @@ const WALKABLE_GROUND_ROLE: &str = "walkableGround";
 /// 格式，未解析），面走烘焙输入面。
 const HEIGHTMESH_SCENES: [&str; 1] = ["grasslands"];
 
-/// 冒烟巡游仪表的驻留秒数（环境变量 `MOLY_SITE_TOUR_SECS`，正数开启）。
-/// 宿主侧仪表，与 player/emoticon 域的 `MOLY_*` 同款。
-const TOUR_ENV: &str = "MOLY_SITE_TOUR_SECS";
-/// 巡游路线（可选）：逗号分隔的站点类型，按序逐跳；缺省走主表行序。
-const TOUR_ROUTE_ENV: &str = "MOLY_SITE_TOUR_ROUTE";
+/// 冒烟巡游仪表的驻留秒数（`dev.site_tour_secs`，`MOLY_SITE_TOUR_SECS`，
+/// 正数开启）。宿主侧仪表，与 player/emoticon 域的开发者开关同款。
+const TOUR_KEY: &moly_config::Key = &moly_config::keys::DEV_SITE_TOUR_SECS;
+/// 巡游路线（可选，`dev.site_tour_route`，`MOLY_SITE_TOUR_ROUTE`）：逗号分隔
+/// 的站点类型，按序逐跳；缺省走主表行序。
+const TOUR_ROUTE_KEY: &moly_config::Key = &moly_config::keys::DEV_SITE_TOUR_ROUTE;
 
 /// 入口下发的站点选择（moly-app 解析 env / URL 参数的产物；缺省值在
 /// 那里定，这里不读第二遍——参数拒绝点全树只在入口一处）。
@@ -2334,24 +2336,29 @@ pub struct Tour {
     epoch_seen: u64,
     hops: u32,
     exiting: bool,
-    /// `MOLY_SITE_TOUR_ROUTE`: an explicit comma-separated list of site
-    /// types to visit in order instead of the master-row cycle.
+    /// `dev.site_tour_route` (`MOLY_SITE_TOUR_ROUTE`): an explicit
+    /// comma-separated list of site types to visit in order instead of the
+    /// master-row cycle.
     route: Option<Vec<String>>,
     deferred_logged: bool,
 }
 
 impl Default for Tour {
     fn default() -> Self {
-        let period = std::env::var(TOUR_ENV)
-            .ok()
+        let period = moly_config::text(TOUR_KEY)
             .and_then(|raw| raw.trim().parse::<f32>().ok())
             .filter(|secs| *secs > 0.0);
-        let route = std::env::var(TOUR_ROUTE_ENV).ok().map(|raw| {
+        let route = moly_config::text(TOUR_ROUTE_KEY).map(|raw| {
             raw.split(',')
                 .map(str::trim)
                 .filter(|site| !site.is_empty())
                 .map(|site| {
-                    assert!(is_supported(site), "{TOUR_ROUTE_ENV}: {site} is not a supported site type");
+                    assert!(
+                        is_supported(site),
+                        "{} ({}): {site} is not a supported site type",
+                        TOUR_ROUTE_KEY.path,
+                        TOUR_ROUTE_KEY.env.unwrap_or("no variable")
+                    );
                     site.to_owned()
                 })
                 .collect::<Vec<_>>()

@@ -863,7 +863,7 @@ pub(super) fn advance(
     let url = |host: Remote| {
         let path = path(host);
         admission
-            .and_then(|admission| admission.url(&path))
+            .and_then(|admission| admission.url(&path).ok())
             .unwrap_or_else(|| path.to_string())
     };
     let state = library

@@ -5,6 +5,7 @@
 use bevy::asset::io::{AssetReaderError, AssetSourceId, Reader};
 use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, IoTaskPool, Task};
+use moly_config::keys;
 
 use crate::instrument::instrument_env;
 use crate::model::avatar;
@@ -125,8 +126,8 @@ fn from_slice(text: String, migration: Migration, origin: Origin) -> Defaults {
 /// the fixed birthday clock and the avatar wear's names and colour. The
 /// avatar waits for the masters, so only its instrument is returned.
 fn native_overlay(doc: &mut ServerDocument) -> avatar::AvatarInstrument {
-    let int = |name: &str| -> Option<i32> {
-        let raw = instrument_env(name)?;
+    let int = |key: &'static moly_config::Key, name: &str| -> Option<i32> {
+        let raw = instrument_env(key)?;
         match raw.trim().parse::<i32>() {
             Ok(value) => Some(value),
             Err(_) => {
@@ -135,15 +136,15 @@ fn native_overlay(doc: &mut ServerDocument) -> avatar::AvatarInstrument {
             }
         }
     };
-    if let Some(exp) = int("MOLY_MENU_MOCK_TOTAL_EXP") {
+    if let Some(exp) = int(&keys::DEV_MENU_MOCK_TOTAL_EXP, "MOLY_MENU_MOCK_TOTAL_EXP") {
         info!("[server] native overlay: MOLY_MENU_MOCK_TOTAL_EXP -> userMysekaiGamedata.totalExp {exp} (the rank follows it)");
         doc.gamedata.total_exp = exp;
         doc.gamedata.mysekai_rank = None;
     }
     let pools = [
-        int("MOLY_MENU_MOCK_STAMINA_NORMAL"),
-        int("MOLY_MENU_MOCK_STAMINA_ENHANCE"),
-        int("MOLY_MENU_MOCK_STAMINA_BOOST"),
+        int(&keys::DEV_MENU_MOCK_STAMINA_NORMAL, "MOLY_MENU_MOCK_STAMINA_NORMAL"),
+        int(&keys::DEV_MENU_MOCK_STAMINA_ENHANCE, "MOLY_MENU_MOCK_STAMINA_ENHANCE"),
+        int(&keys::DEV_MENU_MOCK_STAMINA_BOOST, "MOLY_MENU_MOCK_STAMINA_BOOST"),
     ];
     if pools.iter().any(Option::is_some) {
         let base = doc.stamina.unwrap_or(Stamina {
@@ -161,7 +162,7 @@ fn native_overlay(doc: &mut ServerDocument) -> avatar::AvatarInstrument {
         );
         doc.stamina = Some(stamina);
     }
-    if let Some(raw) = instrument_env("MOLY_BIRTHDAY_NOW_MS") {
+    if let Some(raw) = instrument_env(&keys::DEV_BIRTHDAY_NOW_MS) {
         let at_ms = raw
             .trim()
             .parse::<i64>()
@@ -175,14 +176,15 @@ fn native_overlay(doc: &mut ServerDocument) -> avatar::AvatarInstrument {
         );
         doc.clock = Clock::Fixed { at_ms };
     }
-    if instrument_env("MOLY_MENU_MOCK_STAMINA_MAX").is_some() {
+    if instrument_env(&keys::DEV_MENU_MOCK_STAMINA_MAX).is_some() {
         warn!("[server] MOLY_MENU_MOCK_STAMINA_MAX is not applied: the gauge maximum is the master maxStamina");
     }
-    const MUSIC: &str = "MOLY_AUDIO_MOCK_MUSIC_RECORD";
-    if let Some(raw) = instrument_env(MUSIC) {
-        doc.music_settings = music::parse_instrument(MUSIC, &raw);
+    let music_key = &keys::DEV_AUDIO_MOCK_MUSIC_RECORD;
+    if let Some(raw) = instrument_env(music_key) {
+        doc.music_settings = music::parse_instrument(music_key, &raw);
         info!(
-            "[server] native overlay: {MUSIC} -> userMysekaiMusicPlayFixtureSettings ({} sites)",
+            "[server] native overlay: MOLY_AUDIO_MOCK_MUSIC_RECORD -> \
+             userMysekaiMusicPlayFixtureSettings ({} sites)",
             doc.music_settings.len()
         );
     }
@@ -190,15 +192,15 @@ fn native_overlay(doc: &mut ServerDocument) -> avatar::AvatarInstrument {
     music_play::native_overlay(doc);
     tools::native_overlay(doc);
     phenomena::native_overlay(doc);
-    let text = |name: &str| {
-        instrument_env(name)
+    let text = |key: &'static moly_config::Key| {
+        instrument_env(key)
             .map(|raw| raw.trim().to_owned())
             .filter(|raw| !raw.is_empty())
     };
     avatar::AvatarInstrument {
-        coordinate: text("MOLY_AVATAR_MOCK_COORDINATE"),
-        costume: text("MOLY_AVATAR_MOCK_COSTUME"),
-        accessory: text("MOLY_AVATAR_MOCK_ACCESSORY"),
-        skin_color: text("MOLY_AVATAR_MOCK_SKIN_COLOR"),
+        coordinate: text(&keys::DEV_AVATAR_MOCK_COORDINATE),
+        costume: text(&keys::DEV_AVATAR_MOCK_COSTUME),
+        accessory: text(&keys::DEV_AVATAR_MOCK_ACCESSORY),
+        skin_color: text(&keys::DEV_AVATAR_MOCK_SKIN_COLOR),
     }
 }

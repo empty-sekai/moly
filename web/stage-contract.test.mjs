@@ -147,7 +147,7 @@ test("public resources support changing the configured HTTPS origin without rebu
     assert.throws(() => resourceOrigin(value));
 });
 test("production object-store roots are explicit and use logical keys without /moly", () => {
-  const root = "https://assets.pjsk.moe/sekai-extra-assets/";
+  const root = "https://resources.example/";
   assert.equal(resourceBase(root), root);
   assert.equal(
     resourceDirectory(
@@ -168,11 +168,11 @@ test("production object-store roots are explicit and use logical keys without /m
     resourceDirectory(
       root + "snapshots/cn-test/assets/",
       "https://host.test/",
-      "https://assets.pjsk.moe/other/",
+      "https://resources.example/other/",
     ),
   );
   assert.throws(() =>
-    resourceBase("https://assets.pjsk.moe/sekai-extra-assets"),
+    resourceBase("https://resources.example/publication"),
   );
 });
 test("wrong source snapshot rejects pending Play without admitting any action", () => {
@@ -360,7 +360,7 @@ test("production S3 resource_base keeps the iframe same-origin and emits the ful
   const env = dom();
   let handle;
   try {
-    const root = "https://assets.pjsk.moe/sekai-extra-assets/";
+    const root = "https://resources.example/";
     handle = mountStage(env.target, {
       ...options,
       assets: root + "snapshots/cn-test/assets/",
@@ -375,7 +375,7 @@ test("production S3 resource_base keeps the iframe same-origin and emits the ful
     assert.equal(source.searchParams.get("resource_base"), root);
     assert.equal(
       source.searchParams.get("resource_origin"),
-      "https://assets.pjsk.moe",
+      "https://resources.example",
     );
   } finally {
     handle?.dispose();

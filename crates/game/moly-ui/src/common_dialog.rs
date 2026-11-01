@@ -68,7 +68,7 @@ struct Shown {
     shown_at: f32,
     /// The native instrument that taps the OK button that many seconds
     /// after the dialog shows, and whether it has.
-    instrument: Option<&'static str>,
+    instrument: Option<&'static moly_config::Key>,
     tapped: bool,
     /// No caller reads the answer: the dialog closes itself on it.
     detached: bool,
@@ -103,7 +103,7 @@ pub fn install(app: &mut App) {
 }
 
 /// Show a common dialog: `body` is its message, already formatted, and
-/// `buttons` its labels. `instrument` names the environment variable of the
+/// `buttons` its labels. `instrument` names the developer-switch key of the
 /// native instrument that taps its OK. `None` when the dialog cannot show
 /// (the reason is logged).
 pub fn open(
@@ -111,7 +111,7 @@ pub fn open(
     caller: &'static str,
     body: String,
     buttons: Buttons,
-    instrument: Option<&'static str>,
+    instrument: Option<&'static moly_config::Key>,
 ) -> Option<DialogId> {
     show(world, caller, body, buttons, instrument, false)
 }
@@ -143,7 +143,7 @@ fn show(
     caller: &'static str,
     body: String,
     buttons: Buttons,
-    instrument: Option<&'static str>,
+    instrument: Option<&'static moly_config::Key>,
     detached: bool,
 ) -> Option<DialogId> {
     if let Some(shown) = &world.resource::<CommonDialogs>().shown {
@@ -382,7 +382,7 @@ pub fn place(
         shown.pressed = true;
         info!(
             "[common-dialog] instrument {}: tap injected at ({:.0},{:.0}) on {}'s OK",
-            shown.instrument.unwrap_or_default(),
+            shown.instrument.map_or(String::new(), ToString::to_string),
             position.x,
             position.y,
             shown.caller

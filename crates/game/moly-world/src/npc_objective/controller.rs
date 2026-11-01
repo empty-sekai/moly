@@ -41,7 +41,8 @@
 //! single-component parameters, so the controller holds the five components
 //! in [`Navigator`](crate::npc_objective::controller::Navigator) while a state's enter or poll changes them.
 //!
-//! The controller drives only the units named by `MOLY_NPC_HFSM_SCOPE`; every
+//! The controller drives only the units named by `dev.npc_hfsm_scope`
+//! (`MOLY_NPC_HFSM_SCOPE`); every
 //! other character stays with `npc_objective::decide`, which runs it exactly
 //! as before.
 
@@ -740,18 +741,18 @@ pub fn log_constructed(unit: u32, position: [f32; 3]) {
 }
 
 /// Whether the per-decision, per-transition and per-recovery lines are
-/// written: `MOLY_NPC_HFSM_TRACE=1`. They go through `info!` only under this
-/// switch, because the game's log filter keeps `info` on and drops `debug` and
-/// `trace`; without the switch the only lines are the constructor and the
-/// report.
+/// written: `dev.npc_hfsm_trace` (`MOLY_NPC_HFSM_TRACE`) set to `1`, `true`,
+/// `yes` or `on`. They go through `info!` only under this switch, because the
+/// game's log filter keeps `info` on and drops `debug` and `trace`; without the
+/// switch the only lines are the constructor and the report.
 pub fn trace_enabled() -> bool {
     #[cfg(not(target_arch = "wasm32"))]
     {
         static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *ENABLED.get_or_init(|| {
             matches!(
-                std::env::var("MOLY_NPC_HFSM_TRACE").as_deref(),
-                Ok("1" | "true" | "yes" | "on")
+                moly_config::text(&moly_config::keys::DEV_NPC_HFSM_TRACE).as_deref(),
+                Some("1" | "true" | "yes" | "on")
             )
         })
     }
@@ -2197,7 +2198,7 @@ fn select_source_version(
     let automatic = {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            std::env::var_os("MOLY_NPC_HFSM_SCOPE").is_none()
+            moly_config::text(&moly_config::keys::DEV_NPC_HFSM_SCOPE).is_none()
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -2252,13 +2253,14 @@ impl NpcHfsmScope {
         Self { units }
     }
 
-    /// The scope `MOLY_NPC_HFSM_SCOPE` names; empty without it.
+    /// The scope `dev.npc_hfsm_scope` (`MOLY_NPC_HFSM_SCOPE`) names; empty
+    /// without it.
     pub fn from_env() -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            match std::env::var("MOLY_NPC_HFSM_SCOPE") {
-                Ok(raw) => Self::parse(&raw),
-                Err(_) => Self::default(),
+            match moly_config::text(&moly_config::keys::DEV_NPC_HFSM_SCOPE) {
+                Some(raw) => Self::parse(&raw),
+                None => Self::default(),
             }
         }
         #[cfg(target_arch = "wasm32")]
@@ -2279,7 +2281,8 @@ impl NpcHfsmScope {
     }
 }
 
-/// The controller's switch, installed once from `MOLY_NPC_HFSM_SCOPE`.
+/// The controller's switch, installed once from `dev.npc_hfsm_scope`
+/// (`MOLY_NPC_HFSM_SCOPE`).
 #[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]
 pub struct NpcHfsmScopeResource(pub NpcHfsmScope);
 

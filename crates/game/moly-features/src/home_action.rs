@@ -56,9 +56,9 @@
 //! state 9 and player state 27; the sketch screen's exit leaves game state 9).
 //! Stand-in keys: J craft and K canvas at the nearest craft tool, L enters
 //! sketch mode and then sketches, U skips, I leaves sketch mode. Instrument:
-//! `MOLY_HOME_ACTION_AUTOPLAY=craft|canvas|sketch|screen` (off by default;
-//! `screen` presses the nearest craft tool's button: the craft screen opens
-//! with that workbench handed over).
+//! `dev.home_action_autoplay` (`MOLY_HOME_ACTION_AUTOPLAY=craft|canvas|sketch|screen`,
+//! off by default; `screen` presses the nearest craft tool's button: the craft
+//! screen opens with that workbench handed over).
 
 pub mod craft;
 
@@ -1146,9 +1146,10 @@ pub fn advance(world: &mut World) {
 }
 
 /// The sketch target blueprint the instruments name
-/// (`MOLY_HOME_ACTION_SKETCH_BLUEPRINT`; game mode reads none).
+/// (`dev.home_action_sketch_blueprint`, `MOLY_HOME_ACTION_SKETCH_BLUEPRINT`;
+/// game mode reads none).
 fn sketch_blueprint_instrument() -> Option<i32> {
-    crate::userdata::client::instrument_env("MOLY_HOME_ACTION_SKETCH_BLUEPRINT")
+    crate::userdata::client::instrument_env(&moly_config::keys::DEV_HOME_ACTION_SKETCH_BLUEPRINT)
         .and_then(|raw| raw.trim().parse::<i32>().ok())
 }
 
@@ -1240,14 +1241,17 @@ pub struct Autoplay {
     progress: Option<(f32, f32)>,
 }
 
-/// Instrument (`MOLY_HOME_ACTION_AUTOPLAY=craft|canvas|sketch|screen`, off
-/// by default; `MOLY_HOME_ACTION_AUTOPLAY_AFTER` seconds after the joystick
-/// opens, default 2; `MOLY_HOME_ACTION_AUTOPLAY_SKIP` seconds into the
-/// sequence presses skip): walk to the nearest craft tool through the
-/// joystick's touch stream and run one craft or canvas there, or enter sketch
-/// mode and sketch; `screen` presses the craft tool's button instead (the
-/// craft screen opens with the workbench handed over, and the craft screen's
-/// instruments go on from there). It stands in for the screens' request.
+/// Instrument (`dev.home_action_autoplay`,
+/// `MOLY_HOME_ACTION_AUTOPLAY=craft|canvas|sketch|screen`, off by default;
+/// `dev.home_action_autoplay_after` (`MOLY_HOME_ACTION_AUTOPLAY_AFTER`)
+/// seconds after the joystick opens, default 2;
+/// `dev.home_action_autoplay_skip` (`MOLY_HOME_ACTION_AUTOPLAY_SKIP`)
+/// seconds into the sequence presses skip): walk to the nearest craft tool
+/// through the joystick's touch stream and run one craft or canvas there, or
+/// enter sketch mode and sketch; `screen` presses the craft tool's button
+/// instead (the craft screen opens with the workbench handed over, and the
+/// craft screen's instruments go on from there). It stands in for the
+/// screens' request.
 pub fn autoplay(
     time: Res<Time>,
     actions: Res<HomeActions>,
@@ -1265,13 +1269,15 @@ pub fn autoplay(
     mut run: Local<Autoplay>,
     (mut screen_commands, mut layer_commands): (Commands, MessageWriter<LayerCommand>),
 ) {
-    let Ok(mode) = std::env::var("MOLY_HOME_ACTION_AUTOPLAY") else {
+    let Some(mode) = moly_config::text(&moly_config::keys::DEV_HOME_ACTION_AUTOPLAY) else {
         return;
     };
     let mode = mode.trim().to_ascii_lowercase();
     if !run.warned {
         run.warned = true;
-        warn!("[home-action] instrument MOLY_HOME_ACTION_AUTOPLAY={mode} is on: the player walks and the screens' request is sent by the instrument");
+        warn!(
+            "[home-action] instrument dev.home_action_autoplay (MOLY_HOME_ACTION_AUTOPLAY)={mode} is on: the player walks and the screens' request is sent by the instrument"
+        );
     }
     if !matches!(mode.as_str(), "craft" | "canvas" | "sketch" | "screen") {
         return;
@@ -1293,8 +1299,7 @@ pub fn autoplay(
     };
     // The sequence was sent: skip on request, then (sketch) leave the mode.
     if let Some(sent_at) = run.sent_at {
-        let skip_at = std::env::var("MOLY_HOME_ACTION_AUTOPLAY_SKIP")
-            .ok()
+        let skip_at = moly_config::text(&moly_config::keys::DEV_HOME_ACTION_AUTOPLAY_SKIP)
             .and_then(|raw| raw.trim().parse::<f32>().ok());
         if let Some(skip_at) = skip_at {
             if !run.skip_sent && actions.playing() && now - sent_at >= skip_at {
@@ -1313,8 +1318,7 @@ pub fn autoplay(
     if !joystick.enabled {
         return;
     }
-    let after = std::env::var("MOLY_HOME_ACTION_AUTOPLAY_AFTER")
-        .ok()
+    let after = moly_config::text(&moly_config::keys::DEV_HOME_ACTION_AUTOPLAY_AFTER)
         .and_then(|raw| raw.trim().parse::<f32>().ok())
         .unwrap_or(2.0);
     let since = *run.since.get_or_insert(now);

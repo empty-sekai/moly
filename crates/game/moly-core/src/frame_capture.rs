@@ -22,7 +22,7 @@ pub fn capture(mut commands: Commands, mut requests: MessageReader<CaptureFrame>
     info!("Capturing rendered frame: {filename}");
     #[cfg(not(target_arch = "wasm32"))]
     let output = {
-        let directory = std::env::var_os("MOLY_SCREENSHOT_DIR")
+        let directory = moly_config::text(&moly_config::keys::DEV_SCREENSHOT_DIR)
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| "screenshots".into());
         if let Err(error) = std::fs::create_dir_all(&directory) {

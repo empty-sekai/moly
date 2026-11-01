@@ -440,16 +440,19 @@ pub fn advance(
 }
 
 /// The device's local (hour, minute), `DateTime.Now.Hour` / `.Minute`.
-/// Native builds accept `MOLY_FIXTURE_CLOCK_NOW=HH:MM` to pin it for a
-/// verification run; a malformed value is refused loudly.
+/// Native builds accept `dev.fixture_clock_now` (`MOLY_FIXTURE_CLOCK_NOW`) as
+/// `HH:MM` to pin it for a verification run; a malformed value is refused
+/// loudly.
 fn local_hour_minute() -> (i32, i32) {
     #[cfg(not(target_arch = "wasm32"))]
-    if let Ok(pinned) = std::env::var("MOLY_FIXTURE_CLOCK_NOW") {
+    if let Some(pinned) = moly_config::text(&moly_config::keys::DEV_FIXTURE_CLOCK_NOW) {
         let parsed = pinned.split_once(':').and_then(|(h, m)| {
             let (h, m) = (h.trim().parse::<i32>().ok()?, m.trim().parse::<i32>().ok()?);
             ((0..24).contains(&h) && (0..60).contains(&m)).then_some((h, m))
         });
-        return parsed.unwrap_or_else(|| panic!("MOLY_FIXTURE_CLOCK_NOW is not HH:MM: {pinned:?}"));
+        return parsed.unwrap_or_else(|| {
+            panic!("dev.fixture_clock_now (MOLY_FIXTURE_CLOCK_NOW) is not HH:MM: {pinned:?}")
+        });
     }
     device_local_hour_minute()
 }

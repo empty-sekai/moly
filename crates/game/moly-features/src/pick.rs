@@ -35,10 +35,10 @@
 //! the dialogs and the edit pointer run before it), and it logs a field tap
 //! that nothing took, so a run can show that such a tap starts nothing.
 //!
-//! Instrument: `MOLY_PICK_NPC_TAP_SECS` (off by default; read through the
-//! instrument environment, which game mode never reads) synthesizes a tap on
-//! each present NPC's screen position in turn, to show that a tap on an NPC
-//! starts no talk.
+//! Instrument: `dev.pick_npc_tap_secs` (`MOLY_PICK_NPC_TAP_SECS`; off by
+//! default; read through the instrument key, which game mode never reads)
+//! synthesizes a tap on each present NPC's screen position in turn, to show
+//! that a tap on an NPC starts no talk.
 
 use bevy::prelude::*;
 
@@ -84,8 +84,8 @@ pub fn pick(
 }
 
 /// Update (in the gesture chain, before [`pick`]): the NPC tap instrument
-/// (`MOLY_PICK_NPC_TAP_SECS`). Within the window, every
-/// `SMOKE_TAP_INTERVAL` seconds it projects one present NPC's world
+/// (`dev.pick_npc_tap_secs`, `MOLY_PICK_NPC_TAP_SECS`). Within the window,
+/// every `SMOKE_TAP_INTERVAL` seconds it projects one present NPC's world
 /// position to the screen and injects a TAP end there, through the same
 /// gesture events real input uses. Targets rotate in entity order. A tap that
 /// lands on a screen button is that button's.
@@ -97,7 +97,7 @@ pub fn smoke_npc_autotap(
     mut next_at: Local<f32>,
     mut index: Local<usize>,
 ) {
-    let armed = env_secs("MOLY_PICK_NPC_TAP_SECS");
+    let armed = env_secs(&moly_config::keys::DEV_PICK_NPC_TAP_SECS);
     if armed <= 0.0 || time.elapsed_secs() >= armed || time.elapsed_secs() < *next_at {
         return;
     }
@@ -133,8 +133,8 @@ pub fn smoke_npc_autotap(
 }
 
 /// An instrument's seconds (0 when unset or in game mode).
-fn env_secs(name: &str) -> f32 {
-    instrument_env(name)
+fn env_secs(key: &'static moly_config::Key) -> f32 {
+    instrument_env(key)
         .and_then(|raw| raw.trim().parse::<f64>().ok())
         .map(|v| v.max(0.0) as f32)
         .unwrap_or(0.0)

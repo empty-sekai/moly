@@ -133,8 +133,8 @@ test("CDN retention preserves immutable identities and excludes private routes",
   }
 });
 test("production S3 prefix admits only its configured logical resources", () => {
-  const cdn = "https://assets.pjsk.moe";
-  const root = cdn + "/sekai-extra-assets/";
+  const cdn = "https://resources.example";
+  const root = cdn + "/publication/";
   const descriptor = root + "snapshots/cn-1.2.3-test/assets/browser-base.json";
   const client =
     origin +
@@ -161,8 +161,8 @@ test("production S3 prefix admits only its configured logical resources", () => 
   );
 });
 test("production S3 prefix pins release and snapshot roots by the stage selection", () => {
-  const cdn = "https://assets.pjsk.moe";
-  const root = cdn + "/sekai-extra-assets/";
+  const cdn = "https://resources.example";
+  const root = cdn + "/publication/";
   const assets = root + "snapshots/cn-1.2.3-test/assets/";
   const client =
     origin +

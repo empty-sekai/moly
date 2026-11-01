@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+moly-config = { path = "../../base/moly-config" }
 moly-core = { path = "../moly-core" }
 moly-render = { path = "../moly-render" }
 moly-audio = { path = "../moly-audio" }

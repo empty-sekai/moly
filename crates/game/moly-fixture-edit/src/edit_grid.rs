@@ -1792,10 +1792,10 @@ pub(super) fn hide(world: &mut World) {
     info!("[edit-grid] HideGrid: {removed} grid entities despawned; {left} remain");
 }
 
-/// Instrument (`MOLY_EDIT_AUTOPLAY`): the grid entity count whenever it
-/// changes, after the frame's commands.
+/// Instrument (`dev.edit_autoplay`, `MOLY_EDIT_AUTOPLAY`): the grid entity
+/// count whenever it changes, after the frame's commands.
 fn sample(parts: Query<Entity, With<EditGridPart>>, mut last: Local<Option<usize>>) {
-    if std::env::var("MOLY_EDIT_AUTOPLAY").is_err() {
+    if moly_config::text(&moly_config::keys::DEV_EDIT_AUTOPLAY).is_none() {
         return;
     }
     let count = parts.iter().count();

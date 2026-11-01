@@ -120,8 +120,9 @@ impl WalkFace {
 const KEPT_BAKES: usize = 4;
 
 /// How many row bands the collider rasterization may use, read once from
-/// `MOLY_WALK_BAKE_THREADS` (`0` and `1` keep it on one thread; values above
-/// 8 are capped). Without the variable the bake uses the machine's available
+/// `dev.walk_bake_threads` (`MOLY_WALK_BAKE_THREADS`) (`0` and `1` keep it on
+/// one thread; values above 8 are capped; a value that is not a number counts
+/// as unset). Without the key the bake uses the machine's available
 /// parallelism, capped at 8; a target without threads uses one band.
 fn bake_threads() -> usize {
     static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
@@ -130,8 +131,7 @@ fn bake_threads() -> usize {
         let available = || std::thread::available_parallelism().map_or(1, |count| count.get());
         #[cfg(target_arch = "wasm32")]
         let available = || 1;
-        let threads = std::env::var("MOLY_WALK_BAKE_THREADS")
-            .ok()
+        let threads = moly_config::text(&moly_config::keys::DEV_WALK_BAKE_THREADS)
             .and_then(|raw| raw.trim().parse::<usize>().ok())
             .unwrap_or_else(available);
         threads.clamp(1, 8)
@@ -655,10 +655,11 @@ fn probe_pairs(raw: &str) -> Result<Vec<([f32; 2], [f32; 2])>, String> {
         .collect()
 }
 
-/// QA probe, active only while `MOLY_WALK_PROBE` is set. For every walk-field
-/// generation it reports, per door locator (`loc_inside`), the static path
-/// query `CanNavmeshMoveTargetPosition` uses (from each `loc_outside` and from
-/// the player), and, per `from>to` pair in the variable, the agent path query
+/// QA probe, active only while `dev.walk_probe` (`MOLY_WALK_PROBE`) is set.
+/// For every walk-field generation it reports, per door locator
+/// (`loc_inside`), the static path query `CanNavmeshMoveTargetPosition` uses
+/// (from each `loc_outside` and from the player), and, per `from>to` pair in
+/// the key, the agent path query
 /// `GeneratePath` uses. It changes nothing.
 pub fn probe(
     face: Option<Res<WalkFace>>,
@@ -669,9 +670,9 @@ pub fn probe(
 ) {
     if !state.read {
         state.read = true;
-        state.pairs = std::env::var("MOLY_WALK_PROBE")
-            .ok()
-            .map(|raw| probe_pairs(&raw).unwrap_or_else(|error| panic!("[walk-probe] {error}")));
+        state.pairs = moly_config::text(&moly_config::keys::DEV_WALK_PROBE).map(|raw| {
+            probe_pairs(&raw).unwrap_or_else(|error| panic!("[walk-probe] {error}"))
+        });
     }
     let Some(pairs) = state.pairs.as_ref() else {
         return;

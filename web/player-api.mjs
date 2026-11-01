@@ -1,12 +1,9 @@
 // Same-origin player-data relay. The upstream does not expose CORS headers.
-export const DEFAULT_PLAYER_API =
-  "https://haruki-api.menardi.top/api/{region}/mysekai/{target_user_id}";
+// The upstream is an HTTP(S) URL template with `{region}` and
+// `{target_user_id}`, named by the caller; a request without one is refused.
 const MAX_BYTES = 32 * 1024 * 1024;
 
-export async function playerDataResponse(
-  request,
-  template = DEFAULT_PLAYER_API,
-) {
+export async function playerDataResponse(request, template) {
   const headers = {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
@@ -14,6 +11,8 @@ export async function playerDataResponse(
   const error = (status, message) =>
     new Response(JSON.stringify({ error: message }), { status, headers });
   if (request.method !== "GET") return error(405, "GET only");
+  if (typeof template !== "string" || !template)
+    return error(503, "Player API is not configured: set MOLY_PLAYER_API");
   const match = new URL(request.url).pathname.match(
     /^\/player-api\/(cn|jp)\/([0-9]{1,20})$/,
   );

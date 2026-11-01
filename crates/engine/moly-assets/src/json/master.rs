@@ -18,6 +18,12 @@
 //! read timed out (no response headers within the reader's bound) is demoted
 //! for the session: every later table tries it after the others.
 //!
+//! Each base is read only when the configuration names its host
+//! (`crate::remote`); a base that is not configured is skipped in that order.
+//! With no master host configured at all, every requested table fails once
+//! with a message naming `masters.repository`, `masters.base` and
+//! `masters.mirror`.
+//!
 //! The merged text is what the consumer's parser reads, so a consumer sees
 //! all JP rows and, after them, each row an enabled region adds with the
 //! field `"moly:region"` naming the region; a key two non-JP regions both add
@@ -109,9 +115,12 @@ pub struct MasterBase {
 }
 
 /// The bases every table is read from, tried in order: a table is absent
-/// only when each admitted base has failed. The first is each region's
-/// repository; moving master hosts follow as mirrors for roots without a pin,
-/// and carry the `jp` and `cn` directories only. The app may replace the list.
+/// only when each admitted, configured base has failed. The first is each
+/// region's repository (`masters.repository`, with the region's
+/// `masters.repository_<region>` name); moving master hosts follow as mirrors
+/// for roots without a pin (`masters.base`, `masters.mirror`), and carry the
+/// `jp` and `cn` directories only. A base whose host is not configured is
+/// skipped. The app may replace the list.
 #[derive(Resource, Clone)]
 pub struct MasterBases(pub Vec<MasterBase>);
 
@@ -156,6 +165,88 @@ impl MasterBases {
             .find(|index| !demoted.contains(index))
             .or_else(|| demoted.iter().copied().find(available))
     }
+
+    /// Why no configured base serves `region`'s table: no master host
+    /// configured at all; none for this region's sources; or, for a pinned
+    /// region, no repository host or no configured repository name.
+    fn refusal(
+        &self,
+        source: Option<&MasterSource>,
+        region: Region,
+        remote: &remote::RemoteAdmission,
+    ) -> String {
+        let pinned = source.is_some_and(|source| source.pinned(region));
+        let repository = remote::Remote::MasterRepository.key();
+        let base = remote::Remote::Master.key();
+        let mirror = remote::Remote::MasterMirror.key();
+        if let Some(bases) = remote.bases() {
+            let any_host = [repository, base, mirror]
+                .into_iter()
+                .any(|key| host_configured(&bases, key));
+            if !any_host {
+                return format!(
+                    "no master host is configured: set a repository, base or mirror in the \
+                     [masters] section of moly.toml ({})",
+                    keys_text(&[repository, base, mirror]),
+                );
+            }
+            if pinned && !host_configured(&bases, repository) {
+                return format!(
+                    "the pinned {} master has no configured repository host: set {}",
+                    region.directory(),
+                    keys_text(&[repository]),
+                );
+            }
+            if pinned && !bases.repositories.contains_key(&region) {
+                return format!(
+                    "the pinned {} master has no configured repository name: set {}",
+                    region.directory(),
+                    keys_text(&[region.repository_key()]),
+                );
+            }
+        }
+        if pinned {
+            return format!(
+                "the pinned {} master is not read from {}",
+                region.directory(),
+                named(repository)
+            );
+        }
+        format!(
+            "no configured master host serves the {} table ({} or {})",
+            region.directory(),
+            named(base),
+            named(mirror)
+        )
+    }
+}
+
+/// `a (ENV_A), b (ENV_B) and c (ENV_C)`: the keys, each with its variable.
+fn keys_text(keys: &[&str]) -> String {
+    match keys {
+        [] => String::new(),
+        [only] => named(only),
+        [rest @ .., last] => {
+            let mut text = rest.iter().map(|key| named(key)).collect::<Vec<_>>().join(", ");
+            text.push_str(&format!(" and {}", named(last)));
+            text
+        }
+    }
+}
+
+/// `path (ENV)`, or just `path` for a key without a variable.
+fn named(key: &str) -> String {
+    match moly_config::key(key).and_then(|key| key.env) {
+        Some(env) => format!("{key} ({env})"),
+        None => key.to_owned(),
+    }
+}
+
+/// Whether the configuration names a master host under `key`.
+fn host_configured(bases: &remote::RemoteBases, key: &str) -> bool {
+    remote::Remote::ALL
+        .into_iter()
+        .any(|host| host.key() == key && host.names(bases))
 }
 
 /// Tables a region's master hosts do not publish. A request for one could
@@ -511,7 +602,8 @@ impl MasterData {
     }
 }
 
-/// Registers the layer; runs with the JSON asset registration.
+/// Registers the layer; runs with the JSON asset registration, after the
+/// remote sources are registered with the asset root.
 pub(super) fn register(app: &mut App) {
     app.init_resource::<MasterBases>()
         .init_resource::<MasterData>()
@@ -522,11 +614,15 @@ pub(super) fn register(app: &mut App) {
 /// reads the root's region, logs the region's upstream data version once,
 /// advances every requested table, and files each resolved one for its
 /// consumer.
+///
+/// Each base is read only when `RemoteAdmission` admitted a host for it; a
+/// base whose host the configuration does not name is skipped.
 pub fn resolve(
     server: Res<AssetServer>,
     jsons: Res<Assets<JsonAsset>>,
     bases: Res<MasterBases>,
     mut data: ResMut<MasterData>,
+    remote: Res<remote::RemoteAdmission>,
 ) {
     if data.pending.is_empty() {
         return;
@@ -546,7 +642,7 @@ pub fn resolve(
             return;
         }
     };
-    let version = data.read_version(&server, &jsons, &bases, &source);
+    let version = data.read_version(&server, &jsons, &bases, &source, Some(&remote));
     if source.pin.is_some() {
         match version {
             None => return,
@@ -559,7 +655,7 @@ pub fn resolve(
     }
     let mut waiting = Vec::new();
     for mut entry in std::mem::take(&mut data.pending) {
-        match entry.advance(data, &server, &jsons, &bases, &source) {
+        match entry.advance(data, &server, &jsons, &bases, &source, Some(&remote)) {
             Some(result) => {
                 data.resolved.insert(entry.key, result);
             }
@@ -580,32 +676,51 @@ impl MasterData {
 
     /// Reads and logs the version once. Legacy roots only log it; a pinned
     /// root waits for a matching version before requesting any master table.
+    /// A pinned version is the repository host's, which the pin names; the
+    /// other host's versions follow only when it is not configured.
     fn read_version(
         &mut self,
         server: &AssetServer,
         jsons: &Assets<JsonAsset>,
         bases: &MasterBases,
         source: &MasterSource,
+        remote: Option<&remote::RemoteAdmission>,
     ) -> Option<Result<(), String>> {
         if let Document::Read(result) = &self.upstream_version {
             return Some(result.as_ref().map(|_| ()).map_err(Clone::clone));
         }
-        let Some((base, path)) = bases
+        let master = source.region;
+        let configured: Vec<MasterBase> = bases
             .0
             .iter()
-            .find_map(|base| source.version(base.host).map(|path| (base, path)))
-        else {
-            let reason = "no admitted master base serves the source version".to_owned();
+            .copied()
+            .filter(|base| remote.is_none_or(|remote| remote.reads(base.host)))
+            .filter(|base| source.admits(base.host, master))
+            .collect();
+        // The region's configured repository name; a pin whose region has
+        // none is refused by name when its version is read.
+        let repository = remote
+            .and_then(|remote| remote.repository(master).ok())
+            .unwrap_or_default();
+        // A pinned version is read from the repository host only
+        // (`MasterSource::version` admits no other host for it).
+        let picked: Option<(MasterBase, AssetPath<'static>)> = configured
+            .iter()
+            .find_map(|base| source.version(base.host).map(|path| (*base, path)));
+        let Some((base, path)) = picked else {
+            let reason = match remote {
+                Some(remote) => bases.refusal(Some(source), master, remote),
+                None => "no admitted master base serves the source version".to_owned(),
+            };
             warn!("[masters] {reason}");
             self.upstream_version = Document::Read(Err(reason.clone()));
             return Some(Err(reason));
         };
-        let result = self.upstream_version.poll(
-            server,
-            jsons,
-            || path,
-            |text| source.parse_version(text),
-        )?;
+        let result = self
+            .upstream_version
+            .poll(server, jsons, || path, |text| {
+                source.parse_version(text, &repository)
+            })?;
         let identity = source.pin.as_ref().map_or_else(
             || "latest".to_owned(),
             |pin| format!("commit {}", pin.commit),
@@ -637,6 +752,8 @@ impl Pending {
 
     /// One frame of this table: its regions' tables read one after another,
     /// JP first. `Some` once the merged table has resolved, or refused.
+    /// `remote` skips the bases whose host the configuration does not name;
+    /// without it every base of the list is tried.
     fn advance(
         &mut self,
         data: &mut MasterData,
@@ -644,6 +761,7 @@ impl Pending {
         jsons: &Assets<JsonAsset>,
         bases: &MasterBases,
         source: &MasterSource,
+        remote: Option<&remote::RemoteAdmission>,
     ) -> Option<Result<Parsed, MasterError>> {
         // JP's table is the table; every later region adds to it.
         if self.region == 0 {
@@ -659,16 +777,29 @@ impl Pending {
             self.next_region();
             return None;
         }
-        // The next base: the first untried one that is not demoted, else the
-        // first untried demoted one.
+        // The next base: the first untried configured one that is not
+        // demoted, else the first untried demoted one. `next` never moves
+        // backwards, so the steps below reach the next configured base.
+        let configured = |index: usize| {
+            remote.is_none_or(|remote| remote.reads(bases.0[index].host))
+        };
         if self.base.is_none() {
-            self.base = bases.next(source, region, &self.tried, &data.demoted);
+            while let Some(index) = bases.next(source, region, &self.tried, &data.demoted) {
+                if configured(index) {
+                    self.base = Some(index);
+                    break;
+                }
+                self.tried.push(index);
+            }
         }
         let Some(index) = self.base else {
-            let reason = if self.failures.is_empty() {
-                "no admitted master base serves this source".to_owned()
-            } else {
+            let reason = if !self.failures.is_empty() {
                 format!("no master base served it ({})", self.failures.join("; "))
+            } else {
+                match remote {
+                    Some(remote) => bases.refusal(Some(source), region, remote),
+                    None => "no admitted master base serves this source".to_owned(),
+                }
             };
             if self.region == 0 {
                 let error = self.error(reason.clone());
@@ -696,7 +827,9 @@ impl Pending {
             self.base = None;
             self.handle = None;
             if timed_out(&error) {
-                let next = bases.next(source, region, &self.tried, &data.demoted);
+                let next = bases
+                    .next(source, region, &self.tried, &data.demoted)
+                    .filter(|other| configured(*other));
                 data.demote(index, &base, self.table, next.map(|other| &bases.0[other]));
             }
             return None;
@@ -1378,12 +1511,124 @@ mod master_pin_tests {
         });
         if pin {
             value["master"] = serde_json::json!({
-                "region": "jp", "repository": "Team-Haruki/haruki-sekai-master",
+                "region": "jp", "repository": "example-owner/example-jp",
                 "commit": "0123456789abcdef0123456789abcdef01234567",
                 "dataVersion": "7", "assetVersion": "7", "assetHash": "assets"
             });
         }
         parse_source(&value.to_string()).unwrap()
+    }
+
+    /// An admission the configuration gives the bases in `overrides`.
+    fn admission(
+        overrides: crate::asset_source::RemoteBaseOverrides<'_>,
+    ) -> remote::RemoteAdmission {
+        let admitted = remote::RemoteAdmission::default();
+        admitted.set(crate::asset_source::remote_bases(overrides).unwrap());
+        admitted
+    }
+
+    const REPOSITORY: &str = "https://masters.example/{repo}/";
+
+    #[test]
+    fn only_configured_master_hosts_are_tried_in_order() {
+        let bases = MasterBases::default();
+        let source = source(false);
+        let admitted = admission(crate::asset_source::RemoteBaseOverrides {
+            master_mirror: Some("https://masters.example/"),
+            ..Default::default()
+        });
+        let names = admitted.bases().unwrap();
+        // The repository and the master host are not configured: the mirror
+        // is the only base the admission names, and the pick reaches it.
+        let configured = |index: usize| bases.0[index].host.names(&names);
+        assert!(configured(2) && !configured(0) && !configured(1));
+        let mut tried = Vec::new();
+        let mut picked = None;
+        while let Some(index) = bases.next(&source, Region::Jp, &tried, &[]) {
+            if configured(index) {
+                picked = Some(index);
+                break;
+            }
+            tried.push(index);
+        }
+        assert_eq!(picked, Some(2));
+        // Once it is tried, nothing is left, and the region's failure names
+        // the moving hosts it is read from.
+        let reason = bases.refusal(Some(&source), Region::Jp, &admitted);
+        assert!(reason.contains("masters.base"), "{reason}");
+        assert!(reason.contains("masters.mirror"), "{reason}");
+    }
+
+    #[test]
+    fn no_configured_master_host_is_refused_once_naming_the_keys() {
+        let bases = MasterBases::default();
+        let admitted = admission(crate::asset_source::RemoteBaseOverrides::default());
+        let reason = bases.refusal(Some(&source(false)), Region::Jp, &admitted);
+        for key in ["masters.repository", "masters.base", "masters.mirror"] {
+            assert!(reason.contains(key), "{reason}");
+        }
+        for env in [
+            "MOLY_MASTER_REPOSITORY",
+            "MOLY_MASTER_BASE",
+            "MOLY_MASTER_MIRROR_BASE",
+        ] {
+            assert!(reason.contains(env), "{reason}");
+        }
+        // The master host alone serves the latest sources; a region without
+        // one is named by the keys it is read from.
+        let admitted = admission(crate::asset_source::RemoteBaseOverrides {
+            master: Some("https://masters.example/"),
+            ..Default::default()
+        });
+        let reason = bases.refusal(Some(&source(false)), Region::Jp, &admitted);
+        for key in ["masters.base", "masters.mirror"] {
+            assert!(reason.contains(key), "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_pinned_root_reads_its_configured_repository_alone() {
+        let bases = MasterBases::default();
+        let source = source(true);
+        let admitted = admission(crate::asset_source::RemoteBaseOverrides {
+            master_repository: Some(REPOSITORY),
+            master_repository_jp: Some("example-jp"),
+            master: Some("https://masters.example/"),
+            ..Default::default()
+        });
+        assert_eq!(admitted.repository(Region::Jp).as_deref(), Ok("example-jp"));
+        assert_eq!(
+            admitted.admitted_base(bases.0[0].host),
+            Ok(Some(REPOSITORY.to_owned()))
+        );
+        // The pin reads the repository only; a moving host does not serve it.
+        let reason = bases.refusal(Some(&source), Region::Jp, &admitted);
+        assert!(reason.contains("masters.repository"), "{reason}");
+    }
+
+    #[test]
+    fn a_pin_without_a_configured_repository_refuses_the_key_that_names_it() {
+        let bases = MasterBases::default();
+        let source = source(true);
+        let admitted = admission(crate::asset_source::RemoteBaseOverrides {
+            master_repository: Some(REPOSITORY),
+            ..Default::default()
+        });
+        let reason = bases.refusal(Some(&source), Region::Jp, &admitted);
+        assert!(
+            reason.contains("masters.repository_jp")
+                && reason.contains("MOLY_MASTER_REPOSITORY_JP"),
+            "{reason}"
+        );
+        // Without the repository host, the key of the host is named.
+        let admitted = admission(crate::asset_source::RemoteBaseOverrides {
+            master: Some("https://masters.example/"),
+            master_repository_jp: Some("example-jp"),
+            ..Default::default()
+        });
+        let reason = bases.refusal(Some(&source), Region::Jp, &admitted);
+        assert!(reason.contains("masters.repository "), "{reason}");
     }
 
     #[test]

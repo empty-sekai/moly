@@ -126,14 +126,17 @@
 //!   animations and the dialog sounds are not built.
 //!
 //! Instruments (off by default; game mode reads none):
-//! `MOLY_GET_RESOURCE_NOTICE` = `type:id:qty[,...]` calls
-//! `notice_collect_item` once the inputs are ready, after
-//! `MOLY_GET_RESOURCE_NOTICE_SECS`; `MOLY_GET_RESOURCE_SKETCH` = a blueprint
-//! id calls `show_sketch_result` then; `MOLY_GET_RESOURCE_REWARD_DIALOGS` =
-//! `251,263,452` (their dialog type values) shows those reward dialogs as their delivery caller does
-//! and closes them on their close request; `MOLY_GET_RESOURCE_AUTOCLOSE_SECS`
-//! injects a tap at the top-left corner of the window (the close area) that
-//! many seconds after any of these dialogs shows.
+//! `dev.get_resource_notice` (`MOLY_GET_RESOURCE_NOTICE`) = `type:id:qty[,...]`
+//! calls `notice_collect_item` once the inputs are ready, after
+//! `dev.get_resource_notice_secs` (`MOLY_GET_RESOURCE_NOTICE_SECS`);
+//! `dev.get_resource_sketch` (`MOLY_GET_RESOURCE_SKETCH`) = a blueprint id
+//! calls `show_sketch_result` then; `dev.get_resource_reward_dialogs`
+//! (`MOLY_GET_RESOURCE_REWARD_DIALOGS`) = `251,263,452` (their dialog type
+//! values) shows those reward dialogs as their delivery caller does and closes
+//! them on their close request; `dev.get_resource_autoclose_secs`
+//! (`MOLY_GET_RESOURCE_AUTOCLOSE_SECS`) injects a tap at the top-left corner
+//! of the window (the close area) that many seconds after any of these dialogs
+//! shows.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
@@ -2401,14 +2404,14 @@ fn fire_instrument(
     if player.instrument_fired || !ready {
         return;
     }
-    let notice = instrument_env("MOLY_GET_RESOURCE_NOTICE");
-    let sketch = instrument_env("MOLY_GET_RESOURCE_SKETCH");
-    let rewards = instrument_env("MOLY_GET_RESOURCE_REWARD_DIALOGS");
+    let notice = instrument_env(&moly_config::keys::DEV_GET_RESOURCE_NOTICE);
+    let sketch = instrument_env(&moly_config::keys::DEV_GET_RESOURCE_SKETCH);
+    let rewards = instrument_env(&moly_config::keys::DEV_GET_RESOURCE_REWARD_DIALOGS);
     if notice.is_none() && sketch.is_none() && rewards.is_none() {
         player.instrument_fired = true;
         return;
     }
-    let at = instrument_env("MOLY_GET_RESOURCE_NOTICE_SECS")
+    let at = instrument_env(&moly_config::keys::DEV_GET_RESOURCE_NOTICE_SECS)
         .and_then(|raw| raw.trim().parse::<f32>().ok())
         .unwrap_or(0.0);
     if now < at {
@@ -2434,10 +2437,11 @@ fn fire_instrument(
             }
         }
     }
-    // `MOLY_GET_RESOURCE_REWARD_DIALOGS` = `250,262,452` (their 6.8.1 values, the
-    // keys the instrument has always read): each shown as its
-    // delivery caller shows it, with a payload of the caller's form; the
-    // instrument closes it on its close request, as the caller does.
+    // `dev.get_resource_reward_dialogs` (`MOLY_GET_RESOURCE_REWARD_DIALOGS`) =
+    // `250,262,452` (their 6.8.1 values, the keys the instrument has always
+    // read): each shown as its delivery caller shows it, with a payload of the
+    // caller's form; the instrument closes it on its close request, as the
+    // caller does.
     if let Some(spec) = rewards {
         for part in spec.split(',') {
             let (dialog, layer, payload) = match part.trim() {
@@ -2491,14 +2495,17 @@ fn fire_instrument(
                 info!("[get_resource] instrument: ShowSketchResultDialog({id}) ticket {ticket}");
             }
             Err(_) => {
-                warn!("[get_resource] instrument: MOLY_GET_RESOURCE_SKETCH is not a blueprint id")
+                warn!(
+                    "[get_resource] instrument: dev.get_resource_sketch (MOLY_GET_RESOURCE_SKETCH) is not a blueprint id"
+                )
             }
         }
     }
 }
 
-/// `MOLY_GET_RESOURCE_AUTOCLOSE_SECS`: a tap at the window's top-left corner
-/// (the close area) that many seconds after a dialog shows.
+/// `dev.get_resource_autoclose_secs` (`MOLY_GET_RESOURCE_AUTOCLOSE_SECS`): a
+/// tap at the window's top-left corner (the close area) that many seconds
+/// after a dialog shows.
 fn autoclose(
     player: &mut GetResourcePlayer,
     top: Option<DialogId>,
@@ -2506,7 +2513,7 @@ fn autoclose(
     window: &Window,
     gestures: &mut MessageWriter<GestureEvent>,
 ) {
-    let Some(secs) = instrument_env("MOLY_GET_RESOURCE_AUTOCLOSE_SECS")
+    let Some(secs) = instrument_env(&moly_config::keys::DEV_GET_RESOURCE_AUTOCLOSE_SECS)
         .and_then(|raw| raw.trim().parse::<f32>().ok())
     else {
         return;

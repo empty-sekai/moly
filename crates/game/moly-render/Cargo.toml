@@ -8,6 +8,7 @@ license.workspace = true
 moly-core = { path = "../moly-core" }
 moly-law = { path = "../../base/moly-law" }
 moly-assets = { path = "../../engine/moly-assets" }
+moly-config = { path = "../../base/moly-config" }
 bevy = { workspace = true }
 # The light-space view and orthographic projection of the shadow map; the version bevy_math builds on.
 glam = "0.33"

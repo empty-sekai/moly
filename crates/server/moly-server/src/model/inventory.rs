@@ -42,9 +42,9 @@
 //!   The server derives it whenever a response carries the materials; the
 //!   document does not store it.
 //!
-//! Native instrument: `MOLY_CRAFT_MOCK_MATERIALS` (`id:quantity`, comma
-//! separated) sets `userMysekaiMaterials` rows in the native document; game
-//! mode reads no environment variable.
+//! Native instrument: `dev.craft_mock_materials` (`MOLY_CRAFT_MOCK_MATERIALS`,
+//! `id:quantity`, comma separated) sets `userMysekaiMaterials` rows in the
+//! native document; game mode reads no instrument.
 
 use std::collections::BTreeSet;
 
@@ -538,12 +538,12 @@ impl ServerModel {
     }
 }
 
-/// The native instrument `MOLY_CRAFT_MOCK_MATERIALS` (`id:quantity`, comma
-/// separated) as `userMysekaiMaterials` rows over the document's; a
-/// malformed entry stops loudly.
+/// The native instrument `dev.craft_mock_materials` (`MOLY_CRAFT_MOCK_MATERIALS`,
+/// `id:quantity`, comma separated) as `userMysekaiMaterials` rows over the
+/// document's; a malformed entry stops loudly.
 pub(crate) fn native_overlay(doc: &mut super::document::ServerDocument) {
     const NAME: &str = "MOLY_CRAFT_MOCK_MATERIALS";
-    let Some(raw) = super::instrument_env(NAME) else {
+    let Some(raw) = super::instrument_env(&moly_config::keys::DEV_CRAFT_MOCK_MATERIALS) else {
         return;
     };
     for entry in raw

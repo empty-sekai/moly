@@ -2399,8 +2399,11 @@ pub fn place(
     // balloons; with one, rank 0 = the lowest band, the same as no reorder.
     // The reverse switch feeds 0 to every root z (the constant 0 before it
     // was wired), the negative arm of check ①.
-    let no_layer = std::env::var("MOLY_BALLOON_ORDER_NO_LAYER").is_ok();
-    let order_log = matches!(env_secs_opt("MOLY_BALLOON_ORDER_SECS"), Some(v) if v > 0.0);
+    let no_layer = moly_config::text(&moly_config::keys::DEV_BALLOON_ORDER_NO_LAYER).is_some();
+    let order_log = matches!(
+        env_secs_opt(&moly_config::keys::DEV_BALLOON_ORDER_SECS),
+        Some(v) if v > 0.0
+    );
     let mut ranked: Vec<(Entity, f32)> = Vec::new();
     for (entity, anchor, _transform, _elapsed, _placed, _layer) in balloons.iter() {
         let Some(root) = balloon_root(anchor, &transforms) else {
@@ -2548,7 +2551,8 @@ pub fn place(
                 height
             );
         }
-        // Layer-order probe (on only with MOLY_BALLOON_ORDER_SECS): latched
+        // Layer-order probe (on only with `dev.balloon_order_secs`,
+        // `MOLY_BALLOON_ORDER_SECS`): latched
         // once in the steady state, reporting each part's final sort key. The
         // key uses the renderer's formula: root z + root scale × animation
         // node scale × part layer z (the animation node has no z
@@ -2658,14 +2662,13 @@ fn balloon_root(anchor: &BalloonAnchor, transforms: &Query<&GlobalTransform>) ->
     (root != Vec3::ZERO).then_some(root)
 }
 
-/// 环境变量秒数（未设 = None；非法值响亮 panic——验收旋钮，静默回默认
+/// 开发者开关的秒数（未设 = None；非法值响亮 panic——验收旋钮，静默回默认
 /// 会让「没跑成」伪装成「没开」）。0 或负 = 未启用，由调用侧判。
-fn env_secs_opt(name: &str) -> Option<f32> {
-    let raw = std::env::var(name).ok()?;
-    let v: f64 = raw
-        .trim()
-        .parse()
-        .unwrap_or_else(|_| panic!("{name} 不是秒数：{raw:?}"));
+fn env_secs_opt(key: &'static moly_config::Key) -> Option<f32> {
+    let raw = moly_config::text(key)?;
+    let v: f64 = raw.trim().parse().unwrap_or_else(|_| {
+        panic!("{} ({}) 不是秒数：{raw:?}", key.path, key.env.unwrap_or("no variable"))
+    });
     Some(v.max(0.0) as f32)
 }
 
@@ -2674,8 +2677,9 @@ fn env_secs_opt(name: &str) -> Option<f32> {
 #[derive(Component)]
 pub struct OrderProbe;
 
-/// Update: the layer-order probe (enabled when `MOLY_BALLOON_ORDER_SECS` is
-/// greater than 0 seconds): once ready it spawns a pair of probe balloons
+/// Update: the layer-order probe (enabled when `dev.balloon_order_secs`,
+/// `MOLY_BALLOON_ORDER_SECS`, is greater than 0 seconds): once ready it spawns
+/// a pair of probe balloons
 /// that overlap exactly on screen — the near root is `ORDER_PROBE_NEAR` metres straight
 /// > ahead of the camera (on the view axis), the far anchor is twice that
 /// > distance along **the same view ray through the near anchor** (both
@@ -2696,7 +2700,7 @@ pub fn order_smoke(
     mut exit: MessageWriter<AppExit>,
     mut spawned: Local<bool>,
 ) {
-    let Some(secs) = env_secs_opt("MOLY_BALLOON_ORDER_SECS") else {
+    let Some(secs) = env_secs_opt(&moly_config::keys::DEV_BALLOON_ORDER_SECS) else {
         return;
     };
     if secs <= 0.0 {
@@ -2727,7 +2731,7 @@ pub fn order_smoke(
         _ => panic!("layer-order probe needs 2+ master rows"),
     };
     *spawned = true;
-    if let Ok(run_id) = std::env::var("MOLY_BALLOON_ORDER_RUN_ID") {
+    if let Some(run_id) = moly_config::text(&moly_config::keys::DEV_BALLOON_ORDER_RUN_ID) {
         info!("[tweet-order] run={} version={}", run_id, crate::VERSION);
     }
     let eye = cam_transform.translation();

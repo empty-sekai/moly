@@ -19,6 +19,7 @@ moly-delivery = { path = "../moly-delivery" }
 moly-harvest = { path = "../moly-harvest" }
 moly-devtools = { path = "../moly-devtools" }
 moly-assets = { path = "../../engine/moly-assets" }
+moly-config = { path = "../../base/moly-config" }
 bevy = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 # 字形光栅化与度量：bevy_text 的同源光栅器，锁内已有 0.2.10，不新增下载。

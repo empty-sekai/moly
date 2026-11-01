@@ -1144,11 +1144,12 @@ pub fn apply_input(
         return; // 站点未取景：模型未立，输入无处落
     };
     let playback_inspection = transition.library.playback_camera_active();
-    // FPS 冒烟钩子（无头验收用，玩家域 MOLY_PLAYER_AUTOWALK_SECS 同款）：
+    // FPS 冒烟钩子（无头验收用，玩家域 MOLY_PLAYER_AUTOWALK_SECS 同款；
+    // 开关 `dev.camera_autofps_secs`，`MOLY_CAMERA_AUTOFPS_SECS`）：
     // 窗口期内按当前态喂合成输入，走与真实输入同一条分派——Normal 持续
     // 捏合拉近（到底后继续捏 → 进入 FPS）、FPS 内拖拽、窗口后段反向捏合
     // 一次性退出。进入帧/FPS 无缩放支/退出支的实测值全部可从日志现算。
-    let autofps = env_secs("MOLY_CAMERA_AUTOFPS_SECS");
+    let autofps = env_secs(&moly_config::keys::DEV_CAMERA_AUTOFPS_SECS);
     let mut syn_drag = Vec2::ZERO;
     let mut syn_pinch = 0.0;
     if autofps > 0.0 && time.elapsed_secs() < autofps {
@@ -1310,7 +1311,7 @@ pub fn apply_input(
     // 条律函数。四段分别压到俯仰下界、距离上界（连带俯仰下限抬升）、
     // 俯仰上界、距离下界——全部触发行与联动行都能在日志里现算。
     // 仅 Normal 态喂（FPS 态有自己的 AUTOFPS 钩子），且让位给 AUTOFPS。
-    let autogesture = env_secs("MOLY_CAMERA_AUTOGESTURE_SECS");
+    let autogesture = env_secs(&moly_config::keys::DEV_CAMERA_AUTOGESTURE_SECS);
     if autogesture > 0.0
         && autofps <= 0.0
         && state.0 == CameraStateType::Normal
@@ -1394,10 +1395,9 @@ mod inspection_zoom_tests {
     }
 }
 
-/// 环境变量秒数（缺省 0）：与玩家域冒烟钩子同款读法。
-fn env_secs(name: &str) -> f32 {
-    std::env::var(name)
-        .ok()
+/// 开发者开关的秒数（缺省 0）：与玩家域冒烟钩子同款读法。
+fn env_secs(key: &'static moly_config::Key) -> f32 {
+    moly_config::text(key)
         .and_then(|raw| raw.trim().parse::<f64>().ok())
         .map(|v| v.max(0.0) as f32)
         .unwrap_or(0.0)
@@ -2422,7 +2422,10 @@ pub fn follow_avatar(
         commands.queue(move |world: &mut World| {
             let mut system_state: SystemState<(Commands, CameraReset)> = SystemState::new(world);
             let (mut commands, mut reset) = system_state.get_mut(world).expect("system params");
-            info!("[camera] instrument MOLY_CAMERA_AUTORESET: the camera reset pressed in {current:?}");
+            info!(
+                "[camera] instrument dev.camera_autoreset (MOLY_CAMERA_AUTORESET): \
+                 the camera reset pressed in {current:?}"
+            );
             reset.reset_camera_setting(&mut commands);
             system_state.apply(world);
         });
@@ -2572,7 +2575,7 @@ pub fn follow_avatar(
                 // 「移动中拖拽」拍）：相机偏航与玩家面朝应当**同变**
                 // （本仓约定面朝 = −相机偏航），位置应当照常走（移动写
                 // 没被摘、只是被相位压住）。
-                let trace_window = env_secs("MOLY_CAMERA_AUTOFPS_SECS");
+                let trace_window = env_secs(&moly_config::keys::DEV_CAMERA_AUTOFPS_SECS);
                 if trace_window > 0.0 && time.elapsed_secs() < trace_window {
                     *face_trace += time.delta_secs();
                     if *face_trace >= 0.5 {
@@ -2655,11 +2658,12 @@ pub struct StateWatch {
     reset_pressed: bool,
 }
 
-/// Instrument (`MOLY_CAMERA_AUTORESET=<state>:<seconds>`, off by default,
-/// e.g. `HarvestTone:1`): once per entry into that camera state, `seconds`
-/// after it, the camera reset runs as the reset button's click runs it.
+/// Instrument (`dev.camera_autoreset` / `MOLY_CAMERA_AUTORESET` =
+/// `<state>:<seconds>`, off by default, e.g. `HarvestTone:1`): once per entry
+/// into that camera state, `seconds` after it, the camera reset runs as the
+/// reset button's click runs it.
 fn autoreset_due(state: CameraStateType, since_entry: f32) -> bool {
-    let Ok(spec) = std::env::var("MOLY_CAMERA_AUTORESET") else {
+    let Some(spec) = moly_config::text(&moly_config::keys::DEV_CAMERA_AUTORESET) else {
         return false;
     };
     let Some((name, secs)) = spec.split_once(':') else {

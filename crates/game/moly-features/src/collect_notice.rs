@@ -27,7 +27,8 @@
 //! fixtures) and the count's characters. A name with a glyph outside the
 //! atlas is refused by name, not drawn with holes.
 //!
-//! Native instrument: `MOLY_NOTICE_COLLECT_AUTOPLAY` (game mode reads none)
+//! Native instrument: `dev.notice_collect_autoplay`
+//! (`MOLY_NOTICE_COLLECT_AUTOPLAY`; game mode reads none)
 //! sends a scripted burst of calls built from the masters two seconds after
 //! the cells are ready, so a product run shows notices without an opener:
 //! plain, rare, new, limited, a rare and new one, an item, and two more
@@ -95,8 +96,8 @@ impl NoticeData for NoticeCollectItem {
 
 /// The count text's characters (`SetCount` prints an `Int32`).
 const COUNT_CHARS: &str = "\u{00D7}-0123456789";
-/// The instrument's environment variable.
-const AUTOPLAY: &str = "MOLY_NOTICE_COLLECT_AUTOPLAY";
+/// The instrument's developer switch.
+const AUTOPLAY: &moly_config::Key = &moly_config::keys::DEV_NOTICE_COLLECT_AUTOPLAY;
 /// The instrument's wait after the cells are ready.
 const AUTOPLAY_DELAY: f32 = 2.0;
 const INPUTS: [&str; 3] = [
@@ -165,8 +166,12 @@ fn load(mut commands: Commands, server: Res<AssetServer>) {
         raw.parse::<usize>().unwrap_or(usize::MAX)
     });
     if let Some(count) = count {
-        info!("[notice] instrument {AUTOPLAY}: {} scripted NoticeCollectItem calls after the cells are ready",
-            if count == usize::MAX { "all".to_owned() } else { count.to_string() });
+        info!(
+            "[notice] instrument {variable} ({switch}): {} scripted NoticeCollectItem calls after the cells are ready",
+            if count == usize::MAX { "all".to_owned() } else { count.to_string() },
+            variable = AUTOPLAY.path,
+            switch = AUTOPLAY.env.unwrap_or_default()
+        );
     }
     commands.insert_resource(Autoplay {
         count,

@@ -256,9 +256,10 @@ pub fn app(
             primary_window: Some(Window {
                 title: format!("moly v{VERSION}"),
                 // A native run may start with the window hidden
-                // (`MOLY_WINDOW_HIDDEN`) for headless batches.
+                // (`dev.window_hidden`, `MOLY_WINDOW_HIDDEN`) for headless
+                // batches.
                 #[cfg(not(target_arch = "wasm32"))]
-                visible: std::env::var_os("MOLY_WINDOW_HIDDEN").is_none(),
+                visible: moly_config::text(&moly_config::keys::DEV_WINDOW_HIDDEN).is_none(),
                 ..default()
             }),
             ..default()

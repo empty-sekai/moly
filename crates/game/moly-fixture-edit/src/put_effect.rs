@@ -531,8 +531,8 @@ pub(crate) fn play_put_sound(world: &mut World, fixture_id: i32, source: &'stati
 fn sample_enabled() -> bool {
     static SAMPLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *SAMPLE.get_or_init(|| {
-        std::env::var("MOLY_EDIT_AUTOPLAY").is_ok()
-            || std::env::var("MOLY_EFFECT_SAMPLE").is_ok_and(|value| value == "1")
+        moly_config::text(&moly_config::keys::DEV_EDIT_AUTOPLAY).is_some()
+            || moly_config::text(&moly_config::keys::DEV_EFFECT_SAMPLE).as_deref() == Some("1")
     })
 }
 
@@ -873,8 +873,9 @@ impl FixturePutEffect {
         }
     }
 
-    /// Instrument (`MOLY_EDIT_AUTOPLAY` or `MOLY_EFFECT_SAMPLE=1`): every
-    /// 0.25 s after the last put, each system's live particles.
+    /// Instrument (`dev.edit_autoplay`, `MOLY_EDIT_AUTOPLAY`, or
+    /// `dev.effect_sample`, `MOLY_EFFECT_SAMPLE=1`): every 0.25 s after the
+    /// last put, each system's live particles.
     fn sample(&mut self, world: &World) {
         let Some(sample) = self.sample.as_mut() else {
             return;

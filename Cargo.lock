@@ -5405,6 +5405,7 @@ version = "0.0.5"
 dependencies = [
  "bevy",
  "moly-assets",
+ "moly-config",
  "moly-features",
  "moly-harvest",
  "moly-law",
@@ -5428,6 +5429,7 @@ dependencies = [
  "libc",
  "moly-assets",
  "moly-audio",
+ "moly-config",
  "moly-core",
  "moly-delivery",
  "moly-features",
@@ -5501,6 +5503,7 @@ version = "0.0.5"
 dependencies = [
  "bevy",
  "moly-assets",
+ "moly-config",
  "moly-features",
  "moly-law",
  "moly-layout",
@@ -5521,6 +5524,7 @@ dependencies = [
  "libc",
  "moly-assets",
  "moly-audio",
+ "moly-config",
  "moly-convert",
  "moly-core",
  "moly-delivery",
@@ -5552,6 +5556,7 @@ version = "0.0.5"
 dependencies = [
  "bevy",
  "moly-assets",
+ "moly-config",
  "moly-core",
  "moly-features",
  "moly-law",
@@ -5565,6 +5570,7 @@ dependencies = [
 name = "moly-launcher"
 version = "0.0.5"
 dependencies = [
+ "moly-config",
  "moly-store",
  "serde",
  "serde_json",
@@ -5645,6 +5651,7 @@ dependencies = [
  "image",
  "js-sys",
  "moly-assets",
+ "moly-config",
  "moly-features",
  "moly-law",
  "serde",
@@ -5687,6 +5694,7 @@ dependencies = [
  "js-sys",
  "libc",
  "moly-assets",
+ "moly-config",
  "moly-core",
  "moly-law",
  "naga 29.0.4",
@@ -5749,6 +5757,7 @@ dependencies = [
  "console_error_panic_hook",
  "moly-assets",
  "moly-audio",
+ "moly-config",
  "moly-core",
  "moly-features",
  "moly-fixture-edit",
@@ -5798,6 +5807,7 @@ dependencies = [
  "libc",
  "moly-assets",
  "moly-audio",
+ "moly-config",
  "moly-core",
  "moly-law",
  "moly-layout",
@@ -5829,6 +5839,7 @@ dependencies = [
  "libc",
  "moly-assets",
  "moly-audio",
+ "moly-config",
  "moly-core",
  "moly-law",
  "moly-layout",

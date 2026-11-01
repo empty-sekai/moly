@@ -4,8 +4,8 @@
 // The engine is initialized only after that source check, with its verified font
 // installed before a start entry is exposed. The page
 // then calls `start(seed)` synchronously inside the user's tap; the game
-// connects to the server its `?server=` parameter names, else
-// `MOLY_DEFAULT_SERVER`.
+// connects to the server its `?server=` parameter names, and a page that
+// names none starts no game.
 import { warmBaseResources } from "./base-resources.mjs";
 import { preflightCoordinates } from "./coordinate-contract.mjs";
 import {
@@ -23,8 +23,6 @@ import {
 import { audioActivation } from "./stage-audio.mjs";
 
 export { GAME_ABI, GAME_DOCUMENTS, GAME_EXPORTS, GAME_SCHEMA };
-/** The server the page's game connects to when its URL names none. */
-export const MOLY_DEFAULT_SERVER = "https://server.emptysekai.dev";
 const IDENTITY = /^[a-z0-9][a-z0-9._-]{0,95}$/;
 const SERVER_ADDRESS = /^https?:\/\/[A-Za-z0-9._-]+(?::\d+)?$/;
 const CATALOG = /^[a-f0-9]{64}$/;
@@ -102,12 +100,15 @@ export function gameLocation({
 
 /**
  * The game's server address: the page URL's `server` parameter, which must be
- * an `http://host:port` or `https://host[:port]` address, else
- * `MOLY_DEFAULT_SERVER`. A parameter that is not an address is refused.
+ * an `http://host:port` or `https://host[:port]` address. A page that names no
+ * server, or names something that is not an address, is refused.
  */
 export function serverAddress(pageUrl) {
   const named = new URL(pageUrl).searchParams.get("server");
-  if (named === null) return MOLY_DEFAULT_SERVER;
+  if (named === null)
+    throw new Error(
+      "No server address: add the ?server= parameter (http://host:port or https://host[:port])",
+    );
   if (!SERVER_ADDRESS.test(named))
     throw new Error(
       `Invalid server address: ${JSON.stringify(named)} is not http://host:port or https://host[:port]`,
@@ -284,8 +285,8 @@ export async function bootGame({
         )
       )
         throw new Error("Seed does not match the booted release and snapshot");
-      // A server parameter that is not an address is refused before anything
-      // is started.
+      // A page that names no server, and a server parameter that is not an
+      // address, are refused before anything is started.
       const server = serverAddress(pageUrl);
       started = true;
       mark("gameStart");

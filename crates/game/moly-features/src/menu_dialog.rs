@@ -153,10 +153,12 @@
 //! experience (`UserMysekaiGamedata.totalExp`) comes from the same server
 //! document through `crate::mysekai_rank::UserTotalExp`. The visiting state
 //! and the crystal-shop and sketch permissions stay named mock values of this
-//! module (native instruments `MOLY_MENU_MOCK_VISITING`,
-//! `MOLY_MENU_MOCK_CRYSTAL_SHOP_ALLOWED`, `MOLY_MENU_MOCK_SKETCH_AVAILABLE`;
-//! game mode reads none). The photo permission is not server state: it is the
-//! current site's type, read from the active site. The stamina and
+//! module (native instruments `dev.menu_mock_visiting`
+//! (`MOLY_MENU_MOCK_VISITING`), `dev.menu_mock_crystal_shop_allowed`
+//! (`MOLY_MENU_MOCK_CRYSTAL_SHOP_ALLOWED`), `dev.menu_mock_sketch_available`
+//! (`MOLY_MENU_MOCK_SKETCH_AVAILABLE`); game mode reads none). The photo
+//! permission is not server state: it is the current site's type, read from
+//! the active site. The stamina and
 //! total-experience instruments land in the native server document.
 //!
 //! ## Chosen values and named gaps (read this before changing them)
@@ -843,13 +845,17 @@ pub fn on_recover_finish(
 }
 
 /// A native instrument (game mode reads none).
-fn env_bool(name: &str, default: bool) -> bool {
-    match crate::userdata::client::instrument_env(name) {
+fn env_bool(key: &'static moly_config::Key, default: bool) -> bool {
+    match crate::userdata::client::instrument_env(key) {
         Some(raw) => match raw.trim() {
             "true" | "1" => true,
             "false" | "0" => false,
             _ => {
-                warn!("[menu_dialog] mock 面板：{name}={raw:?} 不是 true/false，回默认 {default}");
+                warn!(
+                    "[menu_dialog] mock 面板：{variable} ({switch})={raw:?} 不是 true/false，回默认 {default}",
+                    variable = key.path,
+                    switch = key.env.unwrap_or_default()
+                );
                 default
             }
         },
@@ -860,9 +866,12 @@ fn env_bool(name: &str, default: bool) -> bool {
 impl Default for MenuMock {
     fn default() -> Self {
         MenuMock {
-            visiting: env_bool("MOLY_MENU_MOCK_VISITING", false),
-            crystal_shop_allowed: env_bool("MOLY_MENU_MOCK_CRYSTAL_SHOP_ALLOWED", true),
-            sketch_available: env_bool("MOLY_MENU_MOCK_SKETCH_AVAILABLE", true),
+            visiting: env_bool(&moly_config::keys::DEV_MENU_MOCK_VISITING, false),
+            crystal_shop_allowed: env_bool(
+                &moly_config::keys::DEV_MENU_MOCK_CRYSTAL_SHOP_ALLOWED,
+                true,
+            ),
+            sketch_available: env_bool(&moly_config::keys::DEV_MENU_MOCK_SKETCH_AVAILABLE, true),
         }
     }
 }

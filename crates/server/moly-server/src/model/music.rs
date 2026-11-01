@@ -67,10 +67,13 @@ pub(crate) fn parse_records(text: &str, masters: &mut super::Masters) -> Result<
     Ok(())
 }
 
-/// The native instrument `MOLY_AUDIO_MOCK_MUSIC_RECORD`
-/// (`site:record:vocal`, comma-separated) as rows; a malformed entry stops
-/// loudly.
-pub(crate) fn parse_instrument(name: &str, raw: &str) -> Vec<MusicPlaySetting> {
+/// The native instrument `dev.audio_mock_music_record`
+/// (`MOLY_AUDIO_MOCK_MUSIC_RECORD`, `site:record:vocal`, comma-separated) as
+/// rows; a malformed entry stops loudly.
+pub(crate) fn parse_instrument(
+    name: &'static moly_config::Key,
+    raw: &str,
+) -> Vec<MusicPlaySetting> {
     let mut rows: Vec<MusicPlaySetting> = Vec::new();
     for entry in raw
         .split(',')

@@ -76,9 +76,10 @@
 //! multi-finger family DUO/PINCH is not carried over), and this layer does
 //! not carry over a second finger **inside** the zone either.
 //!
-//! Smoke hook (`MOLY_JOYSTICK_AUTOSMOKE_SECS`): injects scripted touches
-//! into the `TouchInput` message stream — the message surface is the real
-//! input surface (engine touch events land on the same stream), so an
+//! Smoke hook (`dev.joystick_autosmoke_secs`, `MOLY_JOYSTICK_AUTOSMOKE_SECS`):
+//! injects scripted touches into the `TouchInput` message stream — the message
+//! surface is the real input surface (engine touch events land on the same
+//! stream), so an
 //! injection goes through the stick itself. The script has two cycles (drag
 //! right to full deflection, drag up to full deflection, each with
 //! start/full-deflection/end instants); a player position snapshot is taken
@@ -500,8 +501,9 @@ pub struct AutojoystickRun {
 }
 
 /// Update（手势链首、joystick::advance 之前）：摇杆层的冒烟口
-/// （`MOLY_JOYSTICK_AUTOSMOKE_SECS`）。往 `TouchInput` 消息流注入
-/// 剧本触摸——引擎触摸事件就落在同一条流上，注入即走摇杆层与手势层
+/// （`dev.joystick_autosmoke_secs`，`MOLY_JOYSTICK_AUTOSMOKE_SECS`）。往
+/// `TouchInput` 消息流注入剧本触摸——引擎触摸事件就落在同一条流上，注入即走
+/// 摇杆层与手势层
 /// 的真实分流，不绕过任何一行。剧本两周期（起手均在区内同一点）：
 ///
 /// | 周期 | 时刻 | 段 | 摇杆方向 | 预期位移 |
@@ -520,7 +522,7 @@ pub fn smoke_autojoystick(
     mut run: Local<AutojoystickRun>,
     root_canvas: Option<Res<RootCanvas>>,
 ) {
-    let armed = env_secs("MOLY_JOYSTICK_AUTOSMOKE_SECS");
+    let armed = env_secs(&moly_config::keys::DEV_JOYSTICK_AUTOSMOKE_SECS);
     if armed <= 0.0 || time.elapsed_secs() >= armed {
         return;
     }
@@ -624,10 +626,9 @@ pub fn smoke_autojoystick(
     }
 }
 
-/// 环境变量秒数（缺省 0）：与各域冒烟钩子同款读法。
-fn env_secs(name: &str) -> f32 {
-    std::env::var(name)
-        .ok()
+/// The key's seconds (default 0): the read the smoke hooks share.
+fn env_secs(key: &'static moly_config::Key) -> f32 {
+    moly_config::text(key)
         .and_then(|raw| raw.trim().parse::<f64>().ok())
         .map(|v| v.max(0.0) as f32)
         .unwrap_or(0.0)

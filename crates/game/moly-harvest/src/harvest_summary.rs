@@ -100,12 +100,13 @@ const CANVAS_OUT_SECONDS: f32 = 0.1875;
 
 /// The server-decided inputs, as the mock panel sets them:
 /// - `player_total_exp`: `UserGamedata.totalExp`, the player's total
-///   experience (`MOLY_HARVEST_SUMMARY_MOCK_PLAYER_TOTAL_EXP`, default
-///   100000, our chosen value);
+///   experience (`dev.harvest_summary_mock_player_total_exp`,
+///   `MOLY_HARVEST_SUMMARY_MOCK_PLAYER_TOTAL_EXP`, default 100000, our
+///   chosen value);
 /// - `trip_exp`: the experience the server's replies add to it over one
 ///   harvest trip, applied when a harvest site becomes current while a
-///   harvest point is saved (`MOLY_HARVEST_SUMMARY_MOCK_TRIP_EXP`, default
-///   120, our chosen value);
+///   harvest point is saved (`dev.harvest_summary_mock_trip_exp`,
+///   `MOLY_HARVEST_SUMMARY_MOCK_TRIP_EXP`, default 120, our chosen value);
 /// - no current event (`GetCurrentEventPoint` returns null) and
 ///   `HarvestUserDataManager._wasHarvestInBreakTime` false.
 #[derive(Resource, Debug)]
@@ -116,15 +117,16 @@ pub struct HarvestSummaryMock {
 }
 
 impl HarvestSummaryMock {
-    fn panel(name: &str, default: i32) -> i32 {
-        match std::env::var(name) {
-            Ok(raw) => raw.trim().parse().unwrap_or_else(|_| {
+    fn panel(key: &'static moly_config::Key, default: i32) -> i32 {
+        match moly_config::text(key) {
+            Some(raw) => raw.trim().parse().unwrap_or_else(|_| {
                 warn!(
-                    "[harvest-summary] mock panel: {name}={raw:?} is not an int; using {default}"
+                    "[harvest-summary] mock panel: {}={raw:?} is not an int; using {default}",
+                    key.path
                 );
                 default
             }),
-            Err(_) => default,
+            None => default,
         }
     }
 }
@@ -132,8 +134,11 @@ impl HarvestSummaryMock {
 impl Default for HarvestSummaryMock {
     fn default() -> Self {
         Self {
-            player_total_exp: Self::panel("MOLY_HARVEST_SUMMARY_MOCK_PLAYER_TOTAL_EXP", 100_000),
-            trip_exp: Self::panel("MOLY_HARVEST_SUMMARY_MOCK_TRIP_EXP", 120),
+            player_total_exp: Self::panel(
+                &moly_config::keys::DEV_HARVEST_SUMMARY_MOCK_PLAYER_TOTAL_EXP,
+                100_000,
+            ),
+            trip_exp: Self::panel(&moly_config::keys::DEV_HARVEST_SUMMARY_MOCK_TRIP_EXP, 120),
             was_harvest_in_break_time: false,
         }
     }

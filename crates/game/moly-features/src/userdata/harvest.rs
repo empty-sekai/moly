@@ -90,8 +90,9 @@ pub struct HarvestUserData {
 /// `userMysekaiMaterialPossession` and `userMysekaiFixtures` sections set
 /// them; until a reply carries them, both levels are 1 (the lowest master
 /// level), there are no fixture rows, and the material quantity is 0 or the
-/// value `MOLY_HARVEST_MOCK_MATERIAL_POSSESSION` seats (an unparsable value
-/// is refused loudly and the 0 stands).
+/// value `dev.harvest_mock_material_possession`
+/// (`MOLY_HARVEST_MOCK_MATERIAL_POSSESSION`) seats (an unparsable value is
+/// refused loudly and the 0 stands).
 #[derive(Resource, Debug, Clone)]
 pub struct PossessionMock {
     /// `userMysekaiGamedata.mysekaiMaterialPossessionLevel`.
@@ -107,11 +108,13 @@ pub struct PossessionMock {
 impl Default for PossessionMock {
     fn default() -> Self {
         let mut material_quantity = 0;
-        if let Ok(raw) = std::env::var("MOLY_HARVEST_MOCK_MATERIAL_POSSESSION") {
+        if let Some(raw) =
+            moly_config::text(&moly_config::keys::DEV_HARVEST_MOCK_MATERIAL_POSSESSION)
+        {
             match raw.trim().parse::<i64>() {
                 Ok(value) if value >= 0 => material_quantity = value,
                 _ => error!(
-                    "[harvest-mock] MOLY_HARVEST_MOCK_MATERIAL_POSSESSION={raw:?} is not a quantity; the mock's 0 stands"
+                    "[harvest-mock] dev.harvest_mock_material_possession (MOLY_HARVEST_MOCK_MATERIAL_POSSESSION)={raw:?} is not a quantity; the mock's 0 stands"
                 ),
             }
         }

@@ -66,12 +66,13 @@ messages or URLs across unrelated pages.
 
 For the production object store, pass the complete prefix explicitly. The
 iframe and player-data traffic remain same-origin; only immutable engine and
-resource objects are fetched from the configured S3-compatible prefix. There
-is no implicit CDN or legacy OSS fallback:
+resource objects are fetched from the configured S3-compatible prefix. The
+loader carries no object-store address of its own, so nothing is fetched from
+another host unless the host names it:
 
 ```js
-resourceBase: "https://assets.pjsk.moe/sekai-extra-assets/",
-assets: "https://assets.pjsk.moe/sekai-extra-assets/snapshots/<region>-<gameVersion>-.../assets/",
+resourceBase: "https://resources.example/moly/",
+assets: "https://resources.example/moly/snapshots/<region>-<gameVersion>-.../assets/",
 ```
 
 Release objects use `releases/<id>/...`, snapshots use `snapshots/<id>/...`,

@@ -115,10 +115,9 @@ pub fn qa_open(
 ) {
     if !qa.initialized {
         qa.initialized = true;
-        qa.auto_open = std::env::var("MOLY_LIBRARY_OPEN")
-            .ok()
-            .is_some_and(|value| value == "1");
-        qa.output = std::env::var("MOLY_LIBRARY_QA_OUT").ok();
+        qa.auto_open =
+            moly_config::text(&moly_config::keys::DEV_LIBRARY_OPEN).as_deref() == Some("1");
+        qa.output = moly_config::text(&moly_config::keys::DEV_LIBRARY_QA_OUT);
     }
     if qa.auto_open && !qa.opened && catalog.talks_ready && context.revision > 0 {
         state.open = true;

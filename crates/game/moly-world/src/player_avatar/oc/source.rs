@@ -7,8 +7,8 @@
 //!
 //! The player chooses a model file on their own device: by dropping it on
 //! the game's window or page, through the settings panel's file picker, or,
-//! in native builds, by naming it in the `MOLY_OC_MODEL` environment
-//! variable. The file is read into memory and never sent anywhere or stored:
+//! in native builds, by naming it in `dev.oc_model` (`MOLY_OC_MODEL`). The
+//! file is read into memory and never sent anywhere or stored:
 //! its humanoid map is read ([`super::vrm::read_model`]) and the loader's copy
 //! is put into an in-memory asset source (`oc://`), from which the engine's
 //! glTF loader reads it once; the copy is dropped from that source when the
@@ -37,13 +37,15 @@ pub static MODEL_FILE: FileKind = FileKind {
     input_id: "moly-oc-model-file",
 };
 
-/// Native builds: a model file to wear from the start.
+/// Native builds: a model file to wear from the start
+/// (`dev.oc_model`, `MOLY_OC_MODEL`).
 #[cfg(not(target_arch = "wasm32"))]
-pub const MODEL_ENV: &str = "MOLY_OC_MODEL";
+pub const MODEL_KEY: &moly_config::Key = &moly_config::keys::DEV_OC_MODEL;
 
-/// Native builds: a character body to wear from the start, by unit id.
+/// Native builds: a character body to wear from the start, by unit id
+/// (`dev.oc_unit`, `MOLY_OC_UNIT`).
 #[cfg(not(target_arch = "wasm32"))]
-pub const UNIT_ENV: &str = "MOLY_OC_UNIT";
+pub const UNIT_KEY: &moly_config::Key = &moly_config::keys::DEV_OC_UNIT;
 
 /// The in-memory directory behind [`SOURCE`].
 #[derive(Resource, Clone)]
@@ -403,16 +405,16 @@ pub fn choose_character(
     selection.load_character(*unit, glb, rig, &server);
 }
 
-/// Native builds: the model named by [`MODEL_ENV`].
+/// Native builds: the model named by [`MODEL_KEY`].
 #[cfg(not(target_arch = "wasm32"))]
 pub fn from_environment(mut selection: ResMut<OcSelection>) {
-    if let Some(path) = std::env::var_os(MODEL_ENV).filter(|value| !value.is_empty()) {
+    if let Some(path) = moly_config::text(MODEL_KEY).filter(|value| !value.is_empty()) {
         selection.read_path(PathBuf::from(path));
     }
-    if let Ok(value) = std::env::var(UNIT_ENV) {
+    if let Some(value) = moly_config::text(UNIT_KEY) {
         match value.trim().parse::<u32>() {
             Ok(unit) => selection.want_character(CharacterChoice::Unit(unit)),
-            Err(_) => selection.refuse(UNIT_ENV, &format!("{value:?} is not a unit id")),
+            Err(_) => selection.refuse(UNIT_KEY.path, &format!("{value:?} is not a unit id")),
         }
     }
 }

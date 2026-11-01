@@ -120,10 +120,10 @@ fn set(world: &mut World, write: impl FnOnce(&mut EditGameState)) {
     world.insert_resource(state);
 }
 
-/// Instrument (`MOLY_EDIT_AUTOPLAY`): after visibility propagation, how many
-/// tweet balloons and emotes exist and how many are visible: every two
-/// seconds, and on every change of the recorded state and each second for
-/// three seconds after it.
+/// Instrument (`dev.edit_autoplay`, `MOLY_EDIT_AUTOPLAY`): after visibility
+/// propagation, how many tweet balloons and emotes exist and how many are
+/// visible: every two seconds, and on every change of the recorded state and
+/// each second for three seconds after it.
 #[derive(Default)]
 pub struct TweetSampler {
     key: Option<(bool, Option<u8>, bool)>,
@@ -138,7 +138,7 @@ pub fn sample_tweets(
     emotes: Query<&InheritedVisibility, With<moly_features::emoticon::EmoteDraw>>,
     mut run: Local<TweetSampler>,
 ) {
-    if std::env::var("MOLY_EDIT_AUTOPLAY").is_err() {
+    if moly_config::text(&moly_config::keys::DEV_EDIT_AUTOPLAY).is_none() {
         return;
     }
     let state = state.as_deref().copied().unwrap_or_default();

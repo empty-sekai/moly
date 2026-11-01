@@ -33,9 +33,10 @@
 //! not played.
 //!
 //! Instrument (off by default; game mode reads none):
-//! `MOLY_CRAFT_RESULT_CLOSE_SECS` taps the close area that many seconds
-//! after the dialog shows, near its top-left corner (the close area spans
-//! the screen, and the item button covers its centre).
+//! `dev.craft_result_close_secs` (`MOLY_CRAFT_RESULT_CLOSE_SECS`) taps the
+//! close area that many seconds after the dialog shows, near its top-left
+//! corner (the close area spans the screen, and the item button covers its
+//! centre).
 
 use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
@@ -285,8 +286,10 @@ pub fn place(
         if shown.close_tapped {
             continue;
         }
-        let Some(secs) = crate::userdata::client::instrument_env("MOLY_CRAFT_RESULT_CLOSE_SECS")
-            .and_then(|raw| raw.trim().parse::<f32>().ok())
+        let Some(secs) = crate::userdata::client::instrument_env(
+            &moly_config::keys::DEV_CRAFT_RESULT_CLOSE_SECS,
+        )
+        .and_then(|raw| raw.trim().parse::<f32>().ok())
         else {
             continue;
         };

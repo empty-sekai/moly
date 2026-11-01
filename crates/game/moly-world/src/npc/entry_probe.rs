@@ -1,7 +1,7 @@
 //! Developer instrument: drives the gate and cut-scene entries of
 //! [`super::gate_entries`] and [`super::dispose`] from a script, so a run can
 //! exercise each entry before the gate lane calls it. Only with developer
-//! tools installed and `MOLY_NPC_ENTRY_PROBE` set.
+//! tools installed and `dev.npc_entry_probe` (`MOLY_NPC_ENTRY_PROBE`) set.
 //!
 //! The script is `;`-separated steps `SECONDS:OP[:UNIT[:ARG]]`, each run once
 //! when the app clock passes `SECONDS`:
@@ -23,7 +23,7 @@ use bevy::prelude::*;
 
 use super::{dispose, gate_entries};
 
-const PROBE: &str = "MOLY_NPC_ENTRY_PROBE";
+const PROBE: &moly_config::Key = &moly_config::keys::DEV_NPC_ENTRY_PROBE;
 
 struct Step {
     at: f64,
@@ -179,10 +179,11 @@ pub fn step(world: &mut World) {
     let mut probe = std::mem::take(&mut *world.resource_mut::<EntryProbe>());
     if !probe.parsed {
         probe.parsed = true;
-        if let Ok(script) = std::env::var(PROBE) {
+        if let Some(script) = moly_config::text(PROBE) {
             probe.steps = parse(&script);
             info!(
-                "[npc-entry-probe] {PROBE}={script:?}: {} steps",
+                "[npc-entry-probe] {}={script:?}: {} steps",
+                PROBE.path,
                 probe.steps.len()
             );
         }

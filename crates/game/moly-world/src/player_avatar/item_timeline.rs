@@ -30,8 +30,9 @@
 //! updates the step item to the festival garden's
 //! `tl_site_prop_common_dewdrop01`, sets it up with `MoveEndTime` as its stop
 //! callback and plays it; its end action changes the loop flag, waits for
-//! the end, stops and clears it. `MOLY_STEP_ITEM=<bundle>|<file>` runs that
-//! sequence once, when the avatar is wired, to check the service alone.
+//! the end, stops and clears it. `dev.step_item` (`MOLY_STEP_ITEM`) set to
+//! `<bundle>|<file>` runs that sequence once, when the avatar is wired, to
+//! check the service alone.
 //!
 //! Data: `site-timeline/step-items/manifest.json` (version 1) lists each
 //! exported step item under `items["<bundle>|<file>"]` with its timeline
@@ -1199,7 +1200,8 @@ fn retire(world: &mut World, mut item: StepItem) {
     }
 }
 
-/// The sequence `MOLY_STEP_ITEM=<bundle>|<file>` runs once the avatar is
+/// The sequence `dev.step_item` (`MOLY_STEP_ITEM`) `<bundle>|<file>` runs once
+/// the avatar is
 /// wired: Update, Setup(MoveEndTime), Play; after 2 s, ChangeLoopFlag(false);
 /// WaitForTimelineEnd; Stop; after 1 s, ClearStepItemObject.
 #[derive(Default)]
@@ -1214,12 +1216,14 @@ fn drive_harness(world: &mut World, service: &mut PlayerStepItem) {
     if service.harness.stage == HARNESS_DONE {
         return;
     }
-    let Ok(request) = std::env::var("MOLY_STEP_ITEM") else {
+    let Some(request) = moly_config::text(&moly_config::keys::DEV_STEP_ITEM) else {
         service.harness.stage = HARNESS_DONE;
         return;
     };
     let Some((bundle, file)) = request.split_once('|') else {
-        error!("[step-item] MOLY_STEP_ITEM needs <bundle>|<file>, got {request}");
+        error!(
+            "[step-item] dev.step_item (MOLY_STEP_ITEM) needs <bundle>|<file>, got {request}"
+        );
         service.harness.stage = HARNESS_DONE;
         return;
     };

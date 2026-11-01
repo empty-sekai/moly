@@ -4212,7 +4212,8 @@ pub fn report(session: Option<Res<PlayerTalkSession>>, ledger: Res<PlayerTalkLed
 // 冒烟口：合成点按走拾取同链
 // ---------------------------------------------------------------------------
 
-/// Update（手势链内、拾取前）：冒烟口（`MOLY_PLAYER_TALK_AUTOTAP_SECS`，
+/// Update（手势链内、拾取前）：冒烟口（`dev.player_talk_autotap_secs`，
+/// `MOLY_PLAYER_TALK_AUTOTAP_SECS`，
 /// 同仓拾取/采集物仪表同款；`<until>` 或 `<from>:<until>` 秒）——窗口期内每隔 `SMOKE_TAP_INTERVAL` 秒
 /// 对一名**有通用对话候选**的在场 NPC 合成一次 TAP：世界位投影到屏面、
 /// 按该屏位发布手势事件，走与真实输入**同一条**链（投影 → 射线 →
@@ -4230,7 +4231,9 @@ pub fn smoke_autotap(
     mut index: Local<usize>,
 ) {
     let now = time.elapsed_secs();
-    if !crate::dev_tools::instrument_open("MOLY_PLAYER_TALK_AUTOTAP_SECS", now) || now < *next_at {
+    if !crate::dev_tools::instrument_open(&moly_config::keys::DEV_PLAYER_TALK_AUTOTAP_SECS, now)
+        || now < *next_at
+    {
         return;
     }
     *next_at = time.elapsed_secs() + SMOKE_TAP_INTERVAL;

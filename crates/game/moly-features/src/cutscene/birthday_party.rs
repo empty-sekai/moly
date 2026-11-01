@@ -118,9 +118,10 @@ pub const WORDINGS: &[&str] = &[
     RECEIVED_REWARD,
     "WORD_END_BIRTHDAY_CUTSCENE",
 ];
-/// `MOLY_BIRTHDAY_CLOSE_SECS=<seconds>`: the native instrument taps the close
-/// confirm's OK that many seconds after it shows.
-const CLOSE_INSTRUMENT: &str = "MOLY_BIRTHDAY_CLOSE_SECS";
+/// `dev.birthday_close_secs` (`MOLY_BIRTHDAY_CLOSE_SECS=<seconds>`): the
+/// native instrument taps the close confirm's OK that many seconds after it
+/// shows.
+const CLOSE_INSTRUMENT: &moly_config::Key = &moly_config::keys::DEV_BIRTHDAY_CLOSE_SECS;
 /// `mysekai/birthday/birthday_end_character_motion_data_list` as extracted.
 const END_MOTIONS: &str = "moly://birthday-end-character-motions.json";
 

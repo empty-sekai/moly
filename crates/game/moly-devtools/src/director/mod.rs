@@ -140,11 +140,11 @@
 //!
 //! Commands: `{"run": script}` (or a bare script), `{"stop": true}`,
 //! `{"pause": true}`, `{"resume": true}`. A native run reads a script file
-//! named by `MOLY_DIRECTOR_SCRIPT` at start, and a script with `exit` ends
-//! the app once its captures are on disk; the browser engine takes
-//! commands through [`director_command`] and reports through
-//! [`director_snapshot`] (status `idle`, `queued`, `running`, `paused`,
-//! `done`, `failed` or `stopped`).
+//! named by `dev.director_script` (`MOLY_DIRECTOR_SCRIPT`) at start, and a
+//! script with `exit` ends the app once its captures are on disk; the
+//! browser engine takes commands through [`director_command`] and reports
+//! through [`director_snapshot`] (status `idle`, `queued`, `running`,
+//! `paused`, `done`, `failed` or `stopped`).
 
 mod cond;
 mod hand;
@@ -332,11 +332,12 @@ pub fn install(app: &mut App) {
         .add_systems(Update, run::retire);
 }
 
-/// A native run's script file, from `MOLY_DIRECTOR_SCRIPT`.
+/// A native run's script file, from `dev.director_script`
+/// (`MOLY_DIRECTOR_SCRIPT`).
 fn load_native_script() {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let Some(path) = std::env::var_os("MOLY_DIRECTOR_SCRIPT") else {
+        let Some(path) = moly_config::text(&moly_config::keys::DEV_DIRECTOR_SCRIPT) else {
             return;
         };
         let path = std::path::PathBuf::from(path);
@@ -345,7 +346,10 @@ fn load_native_script() {
             .and_then(|text| director_command(&text));
         match loaded {
             Ok(()) => info!("[director] script {} queued", path.display()),
-            Err(error) => panic!("[director] MOLY_DIRECTOR_SCRIPT {}: {error}", path.display()),
+            Err(error) => panic!(
+                "[director] dev.director_script (MOLY_DIRECTOR_SCRIPT) {}: {error}",
+                path.display()
+            ),
         }
     }
 }

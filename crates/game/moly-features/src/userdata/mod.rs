@@ -20,8 +20,8 @@
 //! - [`housing_layout`]: the layout editor's save request.
 //! - [`local`]: the local document and the client-local lists.
 //! - [`talk_read`]: the talk read report and its reply.
-//! - [`instrument_env`]: the native instruments' environment variables,
-//!   which game mode never reads.
+//! - [`instrument_env`]: the native instruments' developer-switch keys, which
+//!   game mode never reads.
 //! - [`music_play`]: the owned `UserMysekaiMusicRecord` rows and the music
 //!   player's set and eject requests.
 //! - [`system_fixture_action`]: the `UserMysekaiSystemFixtureAction` rows

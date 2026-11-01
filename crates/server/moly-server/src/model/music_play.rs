@@ -22,8 +22,8 @@
 //! **Named default**: no owned record (the mock's user owns none; the
 //! records the tutorial and the game grant are server-side and not
 //! modelled). The panel grants records by editing the section; natively the
-//! instrument `MOLY_MUSIC_MOCK_OWNED_RECORDS` (comma-separated record ids,
-//! obtained at the server clock) seeds them.
+//! instrument `dev.music_mock_owned_records` (`MOLY_MUSIC_MOCK_OWNED_RECORDS`,
+//! comma-separated record ids, obtained at the server clock) seeds them.
 //!
 //! **Named policy** `policies.musicPlayReply` (the server's rules are not on
 //! disk): `success` (the product default) applies a set or an eject to
@@ -42,6 +42,7 @@
 //!   modelled).
 
 use bevy::prelude::*;
+use moly_config::keys;
 use serde_json::{json, Map, Value};
 
 use moly_protocol::rows::{MusicPlaySetting, OwnedMusicRecord};
@@ -58,6 +59,8 @@ pub(crate) const REPLY_SUCCESS: &str = "success";
 pub(crate) const REPLY_FAILURE: &str = "failure";
 /// The native instrument of the owned records.
 pub(crate) const OWNED_INSTRUMENT: &str = "MOLY_MUSIC_MOCK_OWNED_RECORDS";
+/// The instrument's key: `dev.music_mock_owned_records` (`MOLY_MUSIC_MOCK_OWNED_RECORDS`).
+pub(crate) const OWNED_KEY: &moly_config::Key = &keys::DEV_MUSIC_MOCK_OWNED_RECORDS;
 
 // ---------------------------------------------------------------------------
 // The owned records
@@ -129,7 +132,7 @@ pub(crate) fn parse_instrument(raw: &str, now: i64) -> Vec<OwnedMusicRecord> {
 
 /// The native overlay of the owned-record instrument onto the document.
 pub(crate) fn native_overlay(doc: &mut super::document::ServerDocument) {
-    let Some(raw) = super::instrument_env(OWNED_INSTRUMENT) else {
+    let Some(raw) = super::instrument_env(OWNED_KEY) else {
         return;
     };
     let now = super::clock::server_now_ms(doc.clock);

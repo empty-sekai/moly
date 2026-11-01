@@ -1,6 +1,9 @@
 //! The asset root's master identity and the paths it permits. A complete
-//! producer pin selects an immutable commit on the already admitted regional
-//! repository; it cannot supply a new host or fall back to moving mirrors.
+//! producer pin selects an immutable commit of the region's repository on
+//! the already admitted repository host; it cannot supply a new host or fall
+//! back to moving mirrors. The repository the pin names is the one the
+//! configuration gives the region (`masters.repository_<region>`); a pin that
+//! names another, or a region without a configured name, is refused by name.
 
 use bevy::asset::AssetPath;
 use serde_json::Value;
@@ -16,9 +19,22 @@ pub(super) struct MasterSource {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct MasterPin {
     pub(super) commit: String,
+    /// The pin's `owning-repository/name`; its name must be the region's
+    /// configured repository name.
+    pub(super) repository: String,
     data_version: String,
     asset_version: String,
     asset_hash: String,
+}
+
+impl MasterPin {
+    /// The pin names the repository `repository` (the configured name of its
+    /// region) or no repository this runtime reads.
+    fn names(&self, repository: &str) -> bool {
+        self.repository
+            .split_once('/')
+            .is_some_and(|(_, name)| name == repository)
+    }
 }
 
 impl MasterSource {
@@ -59,11 +75,19 @@ impl MasterSource {
 
     /// A pinned document must agree with both the producer's master identity
     /// and its bundle identity before any master table may be used.
-    pub(super) fn parse_version(&self, text: &str) -> Result<String, String> {
+    /// `repository` is the region's configured repository name.
+    pub(super) fn parse_version(
+        &self,
+        text: &str,
+        repository: &str,
+    ) -> Result<String, String> {
         let value: Value =
             serde_json::from_str(text).map_err(|error| format!("is not JSON ({error})"))?;
         let version = required(&value, "dataVersion", "upstream version")?;
         if let Some(pin) = &self.pin {
+            if !pin.names(repository) {
+                return Err(pin_repository_refusal(pin, self.region, repository));
+            }
             for (field, expected) in [
                 ("dataVersion", pin.data_version.as_str()),
                 ("assetVersion", pin.asset_version.as_str()),
@@ -81,6 +105,18 @@ impl MasterSource {
     }
 }
 
+/// The refusal of a pin whose repository is not the region's configured one,
+/// naming the repository it read and the key that names the expected one.
+fn pin_repository_refusal(pin: &MasterPin, region: Region, repository: &str) -> String {
+    format!(
+        "commit {} of master.repository {:?} is not the repository {:?} named by {}",
+        pin.commit,
+        pin.repository,
+        repository,
+        region.repository_key()
+    )
+}
+
 fn required<'a>(value: &'a Value, field: &str, owner: &str) -> Result<&'a str, String> {
     value[field]
         .as_str()
@@ -89,7 +125,9 @@ fn required<'a>(value: &'a Value, field: &str, owner: &str) -> Result<&'a str, S
 }
 
 /// A legacy root without master metadata keeps the moving regional sources.
-/// Once a pin is declared, a partial, conflicting or foreign pin is refused.
+/// Once a pin is declared, a partial or conflicting pin is refused. The pin's
+/// repository name is checked against the configuration when its commit is
+/// read ([`MasterSource::parse_version`]).
 pub(super) fn parse_source(text: &str) -> Result<MasterSource, String> {
     let value: Value =
         serde_json::from_str(text).map_err(|error| format!("is not JSON ({error})"))?;
@@ -103,20 +141,15 @@ pub(super) fn parse_source(text: &str) -> Result<MasterSource, String> {
     let Some(master) = value.get("master").filter(|master| !master.is_null()) else {
         return Ok(source);
     };
-    if master
-        .get("provider")
-        .is_some_and(|provider| provider.as_str() != Some("haruki"))
-    {
-        return Err("master.provider is not the admitted haruki repository provider".into());
-    }
     if required(master, "region", "master")? != name {
         return Err("master.region differs from source.region".into());
     }
     let repository = required(master, "repository", "master")?;
-    if repository != format!("Team-Haruki/{}", region.repository()) {
-        return Err(format!(
-            "master.repository {repository:?} is not the admitted {name} repository"
-        ));
+    let (owner, repo) = repository
+        .split_once('/')
+        .ok_or_else(|| "master.repository must be owner/name".to_owned())?;
+    if owner.is_empty() || repo.is_empty() || repo.contains('/') {
+        return Err("master.repository must be owner/name, with both parts non-empty".into());
     }
     let commit = required(master, "commit", "master")?;
     if commit.len() != 40
@@ -136,6 +169,7 @@ pub(super) fn parse_source(text: &str) -> Result<MasterSource, String> {
     }
     source.pin = Some(MasterPin {
         commit: commit.to_owned(),
+        repository: repository.to_owned(),
         data_version,
         asset_version,
         asset_hash,
@@ -148,12 +182,16 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The configured repository name of each region.
+    const JP: &str = "example-jp";
+    const CN: &str = "example-cn";
+
     fn identity() -> Value {
         json!({
             "version": 1,
             "source": {"region": "jp", "assetVersion": "7.0.0.30", "assetHash": "assets"},
             "master": {
-                "provider": "haruki", "repository": "Team-Haruki/haruki-sekai-master",
+                "repository": "example-owner/example-jp",
                 "region": "jp", "commit": "0123456789abcdef0123456789abcdef01234567",
                 "dataVersion": "7.0.0.32", "assetVersion": "7.0.0.30", "assetHash": "assets"
             }
@@ -183,7 +221,7 @@ mod tests {
                     Some(remote::master_version(host, source.region))
                 );
             }
-            assert!(source.parse_version(r#"{"dataVersion":"8.0.0"}"#).is_ok());
+            assert!(source.parse_version(r#"{"dataVersion":"8.0.0"}"#, JP).is_ok());
         }
     }
 
@@ -235,18 +273,45 @@ mod tests {
     }
 
     #[test]
-    fn foreign_repositories_regions_and_provider_are_refused() {
-        for (field, wrong) in [
-            ("repository", "someone/haruki-sekai-master"),
-            ("repository", "Team-Haruki/haruki-sekai-sc-master"),
-            ("repository", "https://example.org/evil"),
-            ("provider", "sekai-world"),
-            ("region", "cn"),
+    fn regions_that_differ_or_repositories_that_are_not_owner_slash_name_are_refused() {
+        for wrong in [
+            "example-owner",
+            "/example-jp",
+            "example-owner/",
+            "example-owner/example-jp/extra",
+            "https://example.org/evil",
         ] {
             let mut value = identity();
-            value["master"][field] = json!(wrong);
-            assert!(parsed(&value).is_err(), "{field}={wrong}");
+            value["master"]["repository"] = json!(wrong);
+            assert!(parsed(&value).is_err(), "{wrong}");
         }
+        // The record names the region of its source.
+        let mut value = identity();
+        value["master"]["region"] = json!("cn");
+        assert!(parsed(&value).is_err());
+        // The record needs no provider: a foreign name is read like any.
+        let mut value = identity();
+        value["master"]["provider"] = json!("someone-else");
+        assert!(parsed(&value).is_ok());
+    }
+
+    #[test]
+    fn a_pin_names_the_configured_repository_of_its_region() {
+        let source = parsed(&identity()).unwrap();
+        let version =
+            r#"{"dataVersion":"7.0.0.32","assetVersion":"7.0.0.30","assetHash":"assets"}"#;
+        assert_eq!(source.parse_version(version, JP).unwrap(), "7.0.0.32");
+        // Another region's configured name is not this pin's repository.
+        let error = source.parse_version(version, CN).unwrap_err();
+        assert!(
+            error.contains("example-owner/example-jp") && error.contains("masters.repository_jp"),
+            "{error}"
+        );
+        // The owner is the pin's own: only the repository name is configured.
+        let mut value = identity();
+        value["master"]["repository"] = json!("another-owner/example-jp");
+        let source = parsed(&value).unwrap();
+        assert!(source.parse_version(version, JP).is_ok());
     }
 
     #[test]
@@ -279,7 +344,7 @@ mod tests {
         let version =
             json!({"dataVersion":"7.0.0.32", "assetVersion":"7.0.0.30", "assetHash":"assets"});
         assert_eq!(
-            source.parse_version(&version.to_string()).unwrap(),
+            source.parse_version(&version.to_string(), JP).unwrap(),
             "7.0.0.32"
         );
         for field in ["dataVersion", "assetVersion", "assetHash"] {
@@ -287,12 +352,12 @@ mod tests {
             wrong[field] = json!("other");
             assert!(
                 source
-                    .parse_version(&wrong.to_string())
+                    .parse_version(&wrong.to_string(), JP)
                     .unwrap_err()
                     .contains(field)
             );
             wrong.as_object_mut().unwrap().remove(field);
-            assert!(source.parse_version(&wrong.to_string()).is_err());
+            assert!(source.parse_version(&wrong.to_string(), JP).is_err());
         }
     }
 }
