@@ -1,6 +1,6 @@
 # moly release package
 
-moly is a recreation of MYSEKAI, built with Rust and Bevy. This document is for users who have downloaded a release package, and describes its contents, how to run it and how to upgrade it. For a description of the project, see the [project repository](https://github.com/empty-sekai/moly).
+moly is an open-source game runtime compatible with MYSEKAI, built with Rust and Bevy. This document is for users who have downloaded a release package, and describes its contents, how to run it and how to upgrade it. For a description of the project, see the [project repository](https://github.com/empty-sekai/moly).
 
 Release packages do not contain any game resources. The models, textures, animations and audio needed to run the game are supplied by the user and are not distributed with the repository.
 
@@ -43,9 +43,9 @@ On Windows, after a new version is extracted into its own folder, the launcher t
 
 The resource directory can be changed in the 位置 (Locations) card on the launcher's home page, or in 设置 (Settings).
 
-## Running the server separately
+## Running the server on another machine of your own
 
-To run the server on a separate machine, use the `moly-server-<version>-<platform>` package. The listen address, resource directory and save directory are set with environment variables. See the [server documentation](https://github.com/empty-sekai/moly/blob/master/docs/server.md).
+To run the server on another machine of your own, for your own moly client to connect to, use the `moly-server-<version>-<platform>` package. The listen address, resource directory and save directory are set with environment variables. See the [server documentation](https://github.com/empty-sekai/moly/blob/master/docs/server.md).
 
 ## Reporting issues
 

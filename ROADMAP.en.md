@@ -7,7 +7,7 @@ release. Known issues are listed in [Issues](https://github.com/empty-sekai/moly
 
 moly has two parts:
 
-- **Original game**: client behaviour is recreated to match the original game. Values decided by
+- **Original game**: client behaviour is compatible with the original game. Values decided by
   the server are gathered in one editable simulation panel, with no network connection. The
   browser build runs the original game only.
 - **Plugins**: gameplay the original game does not have is built as plugins. Plugins are off by
@@ -230,11 +230,6 @@ plugin; the original mode does not change. Four steps, in dependency order:
 - Furniture can be stacked on any furniture and placed raised as a whole.
 - Players and characters can walk onto stacked furniture and steps, jump and drop; pathfinding
   includes the surfaces that can be stood on.
-
-**7. Multiplayer**
-- Visit other players' homes and gather, craft and decorate together on one site; the host's
-  world state is authoritative.
-- Agents can join as a player or by taking over a character.
 
 ## Original content (unscheduled)
 

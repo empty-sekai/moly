@@ -64,7 +64,7 @@ The stage deliberately exports no game persistence or developer-control API.
 
 > The Android version currently crashes shortly after it starts rendering frames on a physical device, so it is not yet usable. See [#2](https://github.com/empty-sekai/moly/issues/2).
 
-`android/` is the Android project. The native library (crate `moly-android`, target `arm64-v8a`) is built with `cargo ndk`, and Gradle packages the APK. The game connects to a separately running server. On first launch, it downloads resources from the public resource library into the app's private cache.
+`android/` is the Android project. The native library (crate `moly-android`, target `arm64-v8a`) is built with `cargo ndk`, and Gradle packages the APK. The build names the resource store (`MOLY_RESOURCE_BASE`) and the server (`MOLY_SERVER_URL`); an app built without them refuses to start and names the missing variable. On first launch, it downloads resources from that store into the app's private cache, and the game connects to that server.
 
 ```sh
 cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs build -p moly-android --release

@@ -1,6 +1,6 @@
 # Method
 
-moly reproduces the behaviour of the original game client in code written for this repository. This page describes how the behaviour is learned and reimplemented, which parts must match the original and which are moly's own, and how the match is checked.
+moly implements behaviour compatible with the original game client in code written for this repository. This page describes how the behaviour is learned and reimplemented, which parts must match the original and which are moly's own, and how the match is checked.
 
 ## Understanding first, then our own implementation
 

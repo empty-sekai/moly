@@ -1,6 +1,6 @@
 # Server
 
-The server `moly-server` (crate `moly-server-host`) stores player documents and answers requests from the game. It is included in each platform's package. A server-only package, `moly-server-<version>-<platform>`, is also available for running the server on a separate machine.
+The server `moly-server` (crate `moly-server-host`) stores player documents and answers requests from the game. It is moly's own implementation and has no interface or implementation in common with the original game's servers: it answers only `POST /rpc` in moly's binary protocol (`moly-protocol`), every request first declares moly's protocol version, and any other path is answered with 404. The original game client cannot connect to it; it serves only moly's client. It is included in each platform's package. A server-only package, `moly-server-<version>-<platform>`, is also available for running the server on another machine of your own, for your own moly client to connect to.
 
 The server and the game read the same resources. The listen address, resource directory and save directory are set in the configuration file `moly.toml` or through the environment variables that override its keys; see the [`[server]`](configuration.md#server) and [`[resources]`](configuration.md#resources) keys. For the commands to build and start the server from source, see [Native program](building.md#native-program).
 

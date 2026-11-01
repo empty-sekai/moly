@@ -77,7 +77,7 @@ See [importing player data](player-data.md). Setting `player_data.uid` (`MOLY_PL
 | `control_port` | `MOLY_SERVER_CONTROL_PORT` | whole number | server | The server's control port. Default: `15801`, always bound to `127.0.0.1`. |
 | `data` | `MOLY_SERVER_DATA` | path | server | The directory the server saves player documents in. Unset: documents are kept in memory only. |
 
-The server also reads `MOLY_SERVER_ADMIN`, from the environment only: `off` refuses the administration calls, `on` or unset allows them, and any other value stops the start. A server behind a reverse proxy listens on a loopback address and sets it to `off`.
+The server also reads `MOLY_SERVER_ADMIN`, from the environment only: `off` refuses the administration calls, `on` or unset allows them, and any other value stops the start.
 
 ### `[update]`
 
@@ -266,7 +266,7 @@ Two environment variables decide where the file is. They are read only from the 
 
 | Parameter | Description |
 |---|---|
-| `server` | Address of the server to connect to. Defaults to the public server. |
+| `server` | Address of the server to connect to, `http://host:port` or `https://host[:port]`. A page without it starts no game and names the parameter. |
 | `renderer=webgl2` | Uses the WebGL2 backend |
 | `player_uid`, `player_region`, `player_api` | Inputs for fetching player data |
 

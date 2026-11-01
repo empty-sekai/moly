@@ -34,7 +34,7 @@
 | `crates/app/moly-stage` | Embedded field runtime for the browser stage, without the full game's progression |
 | `crates/app/moly-server-host` | Server program `moly-server` |
 | `crates/app/moly-launcher` | Launcher: downloads resources, handles settings, and starts the server and the game (Tauri, with its pages in `ui/`) |
-| `crates/app/moly-android` | Android native library: game entry point that connects to a separately running server |
+| `crates/app/moly-android` | Android native library: game entry point that connects to the server named at build time |
 | `crates/vendor/cpal` | CPAL, with one fix for web audio |
 | `android` | Android project (Gradle) |
 | `web` | Browser pages and build tools |
