@@ -18,6 +18,7 @@ moly-fixture-edit = { path = "../moly-fixture-edit" }
 moly-delivery = { path = "../moly-delivery" }
 moly-harvest = { path = "../moly-harvest" }
 moly-content-library = { path = "../moly-content-library" }
+moly-cutscene = { path = "../moly-cutscene" }
 moly-devtools = { path = "../moly-devtools" }
 moly-assets = { path = "../../engine/moly-assets" }
 moly-config = { path = "../../base/moly-config" }

@@ -19,6 +19,7 @@ moly-world = { path = "../../game/moly-world" }
 moly-features = { path = "../../game/moly-features" }
 moly-fixture-edit = { path = "../../game/moly-fixture-edit" }
 moly-content-library = { path = "../../game/moly-content-library" }
+moly-cutscene = { path = "../../game/moly-cutscene" }
 moly-assets = { path = "../../engine/moly-assets" }
 moly-config = { path = "../../base/moly-config" }
 moly-perf = { path = "../../engine/moly-perf" }

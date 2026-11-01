@@ -162,7 +162,7 @@ pub use moly_features::bgm_select;
 pub use moly_features::birthday;
 pub use moly_features::browser_game;
 pub use moly_content_library as content_library;
-pub use moly_features::cutscene;
+pub use moly_cutscene as cutscene;
 pub use moly_delivery as delivery;
 pub use moly_features::effect_show;
 pub use moly_features::entry;

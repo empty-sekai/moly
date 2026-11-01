@@ -5,13 +5,13 @@
 //! Call order once `PlayCutSceneAsync` returns:
 //!
 //! - `CacheBirthdayBgm`: the cut-scene's BGM stays (its `EndAsync` passes
-//!   `restoreBGM false`, see [`crate::audio::cutscene`]).
+//!   `restoreBGM false`, see [`moly_features::audio::cutscene`]).
 //! - `ChangeUIForBirthday`: once the UI layer is idle, the Home and MyRoom
 //!   screens' `UpdateUI`; with the context `InProgress` it shows the
 //!   end-party button and hides the edit and site-map buttons.
 //! - `ForceBirthdayPartyTalk(party, 1)`, awaited: the first script plays on
 //!   the party's character (`MysekaiPlayerTalkAction.PlayAsync`, see
-//!   [`crate::player_talk::play_script`]).
+//!   [`moly_features::player_talk::play_script`]).
 //! - `SetCharacterWaitTalkObjective(2)`: the character's current objective
 //!   cancelled, the second script set as its birthday lua, the birthday wait
 //!   talk data and its interrupt (the next decision builds the birthday wait
@@ -39,7 +39,8 @@
 //! the screen, and `FadeOutAsync(t)` is `FadeOut((0,0,0,0), 0, t)`, which
 //! uncovers it; each waits for the fader's `onFinish`.
 //!
-//! While the context is set the action buttons of [`DISABLED`] are disabled:
+//! While the context is set the action buttons of
+//! [`DISABLED`](moly_features::birthday::DISABLED) are disabled:
 //! `ActionButtonRefresh` (event 45) hands the list to every button, whose
 //! `GetButtonEnable` is `!list.Contains(type)` and whose `ChangeEnableView`
 //! writes it to the button's `Behaviour.enabled`. Talk is not in the list, so
@@ -68,7 +69,7 @@
 //! The party's character is a new NPC whose AI starts at once. Its first
 //! decision finds no talk data and runs the general lottery over the client
 //! talk list, which the server panel's talk-list policy builds from the
-//! visitors' talks only (see [`crate::server_panel`]); the party's character
+//! visitors' talks only (see [`moly_features::server_panel`]); the party's character
 //! is not a visitor, so the lottery keeps no talk, the source's index error
 //! is raised, and that character's AI ends. The party's three talks do not
 //! read the AI: the first and the closing are played by the presenter, and
@@ -82,10 +83,10 @@ use moly_assets::json::JsonAsset;
 use moly_law::talk::FaceSlot;
 
 use super::birthday::BirthdayContext;
-use crate::birthday::{EndBirthdayPartyClick, PartyUi, PartyUiShown};
-use crate::common_dialog::Buttons;
-use crate::userdata::client::talk_read::UserResource;
-use crate::ui_layers::{BirthdayBackKey, DialogId, MysekaiBackKeyProcess};
+use moly_features::birthday::{EndBirthdayPartyClick, PartyUi, PartyUiShown};
+use moly_features::common_dialog::Buttons;
+use moly_features::userdata::client::talk_read::UserResource;
+use moly_features::ui_layers::{BirthdayBackKey, DialogId, MysekaiBackKeyProcess};
 
 const CLOSE_CONFIRM: &str = "WORD_MYSEKAI_BIRTHDAY_PARTY_CLOSE_CONFIRM";
 const RECEIVED_REWARD: &str = "MSG_RECEIVED_REWARD";
@@ -127,7 +128,7 @@ pub struct Party {
 
 /// `NPCAvatarPresenter.SetBirthdayLua`: the script the character's birthday
 /// wait plays when the player talks to it, with its scenario row.
-pub use crate::markers::BirthdayLua;
+pub use moly_features::markers::BirthdayLua;
 
 /// Where `ExecuteAsync` is.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -186,8 +187,8 @@ fn scenario_and_character(
     party: Party,
     seq: i64,
     caller: &str,
-) -> Option<(crate::player_talk::BirthdayScenario, Entity)> {
-    let scenario = match crate::player_talk::birthday_scenario(world, party.id, seq) {
+) -> Option<(moly_features::player_talk::BirthdayScenario, Entity)> {
+    let scenario = match moly_features::player_talk::birthday_scenario(world, party.id, seq) {
         Ok(Some(scenario)) => scenario,
         Ok(None) => {
             info!("[birthday-party] {caller}: GetMasterBirthdayScenario({}, {seq}) = null: the source returns silently", party.id);
@@ -198,7 +199,7 @@ fn scenario_and_character(
             return None;
         }
     };
-    let Some(npc) = crate::npc::gate_entries::find_npc(world, party.unit) else {
+    let Some(npc) = moly_features::npc::gate_entries::find_npc(world, party.unit) else {
         error!("[birthday-party] {caller}: GetMasterBirthdayScenario({}, {seq}) = row {} ({}); FindNPC({}) found no character: the source logs and returns", party.id, scenario.id, scenario.lua, party.unit);
         return None;
     };
@@ -211,12 +212,12 @@ fn force_talk(world: &mut World, party: Party, seq: i64, caller: &str) -> bool {
     let Some((scenario, npc)) = scenario_and_character(world, party, seq, caller) else {
         return false;
     };
-    let talk = crate::player_talk::ScriptTalk {
+    let talk = moly_features::player_talk::ScriptTalk {
         npc,
         scenario: scenario.id,
         lua: scenario.lua.clone(),
     };
-    match crate::player_talk::play_script(world, talk) {
+    match moly_features::player_talk::play_script(world, talk) {
         Ok(talk) => {
             info!("[birthday-party] {caller}: GetMasterBirthdayScenario({}, {seq}) = row {}; PlayAsync(mysekai/talk/scenario/talk, {}, [{npc:?}]): talk {talk} plays", party.id, scenario.id, scenario.lua);
             true
@@ -229,7 +230,7 @@ fn force_talk(world: &mut World, party: Party, seq: i64, caller: &str) -> bool {
 }
 
 fn talk_playing(world: &World) -> bool {
-    world.contains_resource::<crate::player_talk::PlayerTalkSession>()
+    world.contains_resource::<moly_features::player_talk::PlayerTalkSession>()
 }
 
 /// `SetCharacterWaitTalkObjective(2)`.
@@ -238,17 +239,17 @@ fn wait_for_talk(world: &mut World, party: Party) {
     let Some((scenario, npc)) = scenario_and_character(world, party, 2, caller) else {
         return;
     };
-    let cancelled = crate::npc::gate_entries::try_cancel_current_objective(world, npc);
+    let cancelled = moly_features::npc::gate_entries::try_cancel_current_objective(world, npc);
     if !cancelled {
         error!("[birthday-party] {caller}: TryCancelCurrentObjective on unit {} = false: the source logs and goes on", party.unit);
     }
-    crate::npc::gate_entries::drop_owed_force_updates(world, npc);
+    moly_features::npc::gate_entries::drop_owed_force_updates(world, npc);
     world.entity_mut(npc).insert(BirthdayLua {
         scenario: scenario.id,
         lua: scenario.lua.clone(),
     });
-    crate::npc::gate_entries::force_update_birthday_wait_talk(world, npc);
-    crate::npc::gate_entries::set_immediately_execute_next_objective(world, npc, true);
+    moly_features::npc::gate_entries::force_update_birthday_wait_talk(world, npc);
+    moly_features::npc::gate_entries::set_immediately_execute_next_objective(world, npc, true);
     info!("[birthday-party] {caller}: SetBirthdayLua({}) (row {}) on {npc:?}; ForceUpdateBirthdayWaitTalk; SetImmediatelyExecuteNextObjective(true)", scenario.lua, scenario.id);
 }
 
@@ -270,26 +271,26 @@ fn show_end_motion(world: &mut World, party: Party, list: &serde_json::Value) {
     };
     let field = |key: &str| row.get(key).and_then(|value| value.as_str()).unwrap_or("").to_owned();
     let (eye, mouth, motion) = (field("EyeName"), field("MouthName"), field("MotionName"));
-    let Some(npc) = crate::npc::gate_entries::find_npc(world, party.unit) else {
+    let Some(npc) = moly_features::npc::gate_entries::find_npc(world, party.unit) else {
         error!("[birthday-party] {caller}: FindNPC({}) found no character: the source logs", party.unit);
         return;
     };
     let handles = world
-        .get::<crate::character_material::ToonMaterials>(npc)
+        .get::<moly_features::character_material::ToonMaterials>(npc)
         .and_then(|toon| Some((toon.slot_handle("eye")?.clone(), toon.slot_handle("mouth")?.clone())));
     let Some((eye_handle, mouth_handle)) = handles else {
         error!("[birthday-party] {caller}: unit {} has no eye and mouth materials", party.unit);
         return;
     };
-    if !world.contains_resource::<crate::alone_action_runtime::FacialTables>() {
+    if !world.contains_resource::<moly_features::alone_action_runtime::FacialTables>() {
         error!("[birthday-party] {caller}: the facial tables are not loaded");
         return;
     }
     world.resource_scope(
-        |world, mut materials: Mut<Assets<crate::character_material::CharacterMaterial>>| {
-            let tables = world.resource::<crate::alone_action_runtime::FacialTables>();
+        |world, mut materials: Mut<Assets<moly_features::character_material::CharacterMaterial>>| {
+            let tables = world.resource::<moly_features::alone_action_runtime::FacialTables>();
             for (slot, pattern) in [(FaceSlot::Eye, &eye), (FaceSlot::Mouth, &mouth)] {
-                crate::delayed_faces::FaceCommand {
+                moly_features::delayed_faces::FaceCommand {
                     unit: i64::from(party.unit),
                     slot,
                     pattern: pattern.clone(),
@@ -352,18 +353,18 @@ fn delta(world: &World) -> f32 {
 
 fn ui_idle(world: &World) -> bool {
     world
-        .get_resource::<crate::ui_layers::ScreenManager>()
+        .get_resource::<moly_features::ui_layers::ScreenManager>()
         .is_none_or(|screens| !screens.is_ui_layer_working())
 }
 
 fn fade_done(world: &World) -> bool {
     world
-        .get_resource::<crate::screen_fade::ScreenFader>()
-        .is_none_or(crate::screen_fade::ScreenFader::finished)
+        .get_resource::<moly_features::screen_fade::ScreenFader>()
+        .is_none_or(moly_features::screen_fade::ScreenFader::finished)
 }
 
 fn set_back_key(world: &mut World, process: MysekaiBackKeyProcess, caller: &str) {
-    if let Some(mut screens) = world.get_resource_mut::<crate::ui_layers::ScreenManager>() {
+    if let Some(mut screens) = world.get_resource_mut::<moly_features::ui_layers::ScreenManager>() {
         screens.set_mysekai_back_key_process(process, caller);
     }
 }
@@ -465,7 +466,7 @@ pub fn advance(world: &mut World) {
                 world.resource_mut::<BirthdayParty>().stage = Stage::PlaceDelay { left };
                 return;
             }
-            crate::screen_fade::fade_out_color(
+            moly_features::screen_fade::fade_out_color(
                 world,
                 CLEAR,
                 0.0,
@@ -497,7 +498,7 @@ pub fn advance(world: &mut World) {
                 world.resource_mut::<BirthdayParty>().stage = Stage::EndMotionDelay { left };
                 return;
             }
-            crate::screen_fade::fade_in_color(
+            moly_features::screen_fade::fade_in_color(
                 world,
                 BLACK,
                 0.0,
@@ -522,7 +523,7 @@ pub fn advance(world: &mut World) {
         }
         Stage::Restore { elapsed } => {
             let elapsed = elapsed + dt;
-            if crate::npc::restore::done(world) {
+            if moly_features::npc::restore::done(world) {
                 info!("[birthday-party] RestoreNpcAsync finished after {elapsed:.3} s");
             } else if elapsed < RESTORE_TIMEOUT {
                 world.resource_mut::<BirthdayParty>().stage = Stage::Restore { elapsed };
@@ -530,9 +531,9 @@ pub fn advance(world: &mut World) {
             } else {
                 error!("[birthday-party] RestoreNpcAsync did not finish within {RESTORE_TIMEOUT} s: the timeout cancels it and ExecuteAsync throws; the close-down goes on here so the screen and the UI come back (named)");
             }
-            crate::audio::cutscene::release_bgm(world, "MysekaiBGMManager.PlayBGMAsync(siteId, SiteEnvironmentUtility.GetSiteEnvironmentId(siteId)): the site's music");
+            moly_features::audio::cutscene::release_bgm(world, "MysekaiBGMManager.PlayBGMAsync(siteId, SiteEnvironmentUtility.GetSiteEnvironmentId(siteId)): the site's music");
             info!("[birthday-party] DisposeBirthdayBgm: the stream table holds the cue, nothing to unload (named)");
-            crate::screen_fade::fade_out_color(
+            moly_features::screen_fade::fade_out_color(
                 world,
                 CLEAR,
                 0.0,
@@ -573,7 +574,7 @@ fn back_pressed(world: &mut World, from: &str) {
     }
     // IsEnableClickBackKey: GameStateManager.CurrentType < Edit.
     let (state, enabled) = world
-        .get_resource::<crate::game_state::GameStateManager>()
+        .get_resource::<moly_features::game_state::GameStateManager>()
         .map_or(("None", true), |manager| {
             (manager.current_type().name(), manager.allows_click_back_key())
         });
@@ -582,8 +583,8 @@ fn back_pressed(world: &mut World, from: &str) {
         return;
     }
     let caller = "BirthdayPartyPresenter.ShowCloseBirthdayConfirmDialog";
-    let body = crate::common_dialog::wording(world, caller, CLOSE_CONFIRM);
-    let Some(dialog) = crate::common_dialog::open(
+    let body = moly_features::common_dialog::wording(world, caller, CLOSE_CONFIRM);
+    let Some(dialog) = moly_features::common_dialog::open(
         world,
         caller,
         body,
@@ -608,7 +609,7 @@ fn close_confirm_answer(world: &mut World) {
     else {
         return;
     };
-    let Some(ok) = crate::common_dialog::answer(world, dialog) else {
+    let Some(ok) = moly_features::common_dialog::answer(world, dialog) else {
         return;
     };
     world.resource_mut::<BirthdayParty>().close_confirm = None;
@@ -625,12 +626,12 @@ fn close_confirm_answer(world: &mut World) {
         "BirthdayPartyPresenter.ExecuteAsync (-= OnBackKeyForBirthday: the handler is empty from here)",
     );
     // SetCharacterCantTalkState: FindNPC(unit)?.SetTalkEnabled(false).
-    let npc = crate::npc::gate_entries::find_npc(world, party.unit);
+    let npc = moly_features::npc::gate_entries::find_npc(world, party.unit);
     if let Some(npc) = npc {
-        crate::npc::gate_entries::set_talk_enabled(world, npc, false);
+        moly_features::npc::gate_entries::set_talk_enabled(world, npc, false);
     }
     info!("[birthday-party] SetCharacterCantTalkState: FindNPC({}) = {npc:?}; FadeInAsync(1)", party.unit);
-    crate::screen_fade::fade_in_color(
+    moly_features::screen_fade::fade_in_color(
         world,
         BLACK,
         0.0,
@@ -644,12 +645,12 @@ fn close_confirm_answer(world: &mut World) {
 /// of `RestoreCharacters`.
 fn remove_and_restore(world: &mut World, party: Party) -> Stage {
     info!("[birthday-party] RemoveCharactersActionButton: FindNPC({})'s button leaves the stack with the character, disposed next (named)", party.unit);
-    let disposed = crate::npc::dispose::dispose_npc_all(
+    let disposed = moly_features::npc::dispose::dispose_npc_all(
         world,
         "BirthdayPartyPresenter.DeleteBirthdayCharacters",
     );
     info!("[birthday-party] DeleteBirthdayCharacters: AvatarDataStore.DisposeNPCAll: NPCs {disposed:?}");
-    match crate::npc::restore::begin(world) {
+    match moly_features::npc::restore::begin(world) {
         Ok(()) => {
             info!("[birthday-party] RestoreCharacters: SceneMysekai.RestoreNpcAsync -> SetupNpcVisitingAsync(visitingFromGate false, hasReturnedFromOtherRoom true), 30 s timeout");
             Stage::Restore { elapsed: 0.0 }
@@ -677,7 +678,7 @@ fn finish(world: &mut World) {
         return;
     }
     let caller = "BirthdayPartyPresenter.ExecuteAsync: ShowSubWindowDialog<CommonRewardSubWindowDialog>";
-    match crate::get_resource::show_common_reward(world, caller, RECEIVED_REWARD, rewards.len()) {
+    match moly_features::get_resource::show_common_reward(world, caller, RECEIVED_REWARD, rewards.len()) {
         Ok(dialog) => info!(
             "[birthday-party] {caller} {dialog:?} on Layer_Dialog; Setup(rewards {:?}, 0, OpenSE.Reward, {RECEIVED_REWARD}, false); not awaited: ExecuteAsync ends",
             rewards
@@ -690,10 +691,10 @@ fn finish(world: &mut World) {
 }
 
 pub(super) fn install(app: &mut App) {
-    app.init_resource::<crate::ui_charsets::ShellTextSources>()
+    app.init_resource::<moly_features::ui_charsets::ShellTextSources>()
         .add_message::<EndBirthdayPartyClick>()
         .add_systems(Update, advance.before(super::advance));
     app.world_mut()
-        .resource_mut::<crate::ui_charsets::ShellTextSources>()
+        .resource_mut::<moly_features::ui_charsets::ShellTextSources>()
         .register_texts(TEXT_SOURCE, WORDINGS, &[]);
 }

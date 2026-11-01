@@ -1,18 +1,22 @@
-//! The home site's expansion cut-scene.
+//! Cut-scenes: the home site's expansion cut-scene, the cut-scenes with a
+//! cast that any caller starts, and the birthday cut-scene and party.
 //!
-//! Entry: `ScreenLayerMysekaiHome.OnFinishStartAnimation` runs
-//! `SiteActionExecutor.PlayHomeSitePerformAsync` when no performance is
-//! executing; its first step with a visible effect is
-//! `PlaySiteExpansionCutSceneIfNeeded(siteId)`: when the site needs an
-//! expansion ([`crate::site_expansion`]), it waits until no UI layer is
-//! working, then `MysekaiUtility.PlayUnlockSiteLevelCutScene(level)`:
+//! The expansion cut-scene starts once the home screen's start animation has
+//! finished, while no other performance runs, when the site needs an
+//! expansion ([`moly_features::site_expansion`]) and no UI layer is working
+//! (`ScreenLayerMysekaiHome.OnFinishStartAnimation`,
+//! `SiteActionExecutor.PlayHomeSitePerformAsync`,
+//! `PlaySiteExpansionCutSceneIfNeeded`). For the unlocked level
+//! (`MysekaiUtility.PlayUnlockSiteLevelCutScene`):
 //!
-//! - `GetMasterMysekaiCutScene(level id, mysekai_site_level)`; with no row it
-//!   saves the unlocked level and publishes the rank-up event only;
-//! - otherwise `SetCanUpdateDitherController(false)`, `SaveUnlockSiteLevel`,
-//!   `CutSceneExecutor.HideFixtureAll` (every fixture that is neither the gate
-//!   nor the house is hidden), then `CutSceneExecutor.PlayAsync` with the
-//!   current site's transform as the start transform.
+//! - with no cut-scene row for the level (`GetMasterMysekaiCutScene(level id,
+//!   mysekai_site_level)`), the unlocked level is saved and the rank-up event
+//!   is published; nothing plays;
+//! - with a row, the dither controller stops updating
+//!   (`SetCanUpdateDitherController(false)`), the unlocked level is saved,
+//!   every fixture other than the gate and the house is hidden
+//!   (`CutSceneExecutor.HideFixtureAll`), and the cut-scene plays at the
+//!   current site's transform (`CutSceneExecutor.PlayAsync`).
 //!
 //! `CutSceneExecutor.PlayAsync`: the cut-scene view is instantiated under the
 //! cut-scene root and placed at the start transform
@@ -32,7 +36,7 @@
 //! sampled time:
 //!
 //! - Cinemachine: the shot's virtual camera by the director's exposed
-//!   reference ([`crate::cutscene_camera`]);
+//!   reference ([`moly_features::cutscene_camera`]);
 //! - fade panel: `FadePanelBehaviour.UpdateAlpha` while a clip is active
 //!   (fade out: alpha `1 - p`, fade in: alpha `p`, `p` the clip progress,
 //!   held at 0 or 1 once `p > 0.95`) and `FadePanelMixerBehaviour.ClipSetup`
@@ -44,7 +48,7 @@
 //!   stops; logged (named render gap: the ring dither is not drawn);
 //! - site expansion: `SetSiteExtension` each frame with the clip's centre,
 //!   colours and radius `start + t (end - start)`, and `ResetGlobalDissolve`
-//!   when the graph stops, through [`crate::site_extension`] (the site
+//!   when the graph stops, through [`moly_features::site_extension`] (the site
 //!   shaders' global dissolve);
 //! - effect clips (`EffectTrack`, `EffectBehaviour`): the template prefab
 //!   is instantiated inactive with no parent (built from the package's
@@ -70,10 +74,19 @@
 //! level is written for that load).
 //!
 //! The same presenter plays cut-scenes with a cast for any caller
-//! ([`crate::cut_scene::start`]): the view at the start object's transform,
+//! ([`moly_features::cut_scene::start`]): the view at the start object's transform,
 //! a cast bound to the unit tracks, the gate's own clips when the start is a
 //! gate, the view's Control clips and the fade colours of the view; see
 //! `cast`.
+//!
+//! Boundaries: the crate reads the hub (`moly_features`) for the field, the
+//! characters, the fixtures, the camera, the audio, the dialogs and the site.
+//! It fills the hub's [`CutScenePlayer`], through which callers start a
+//! cut-scene with a cast, holds its input channels in [`InputClaims`] under
+//! [`CUT_SCENE`] and [`HOME_SITE_PERFORM`], reads the birthday button's click
+//! and the party's end click from `moly_features::birthday`, and registers its
+//! texts in the hub's shell text sources; the hub does not name the crate.
+//! The game installs it ([`install`]).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -83,20 +96,20 @@ use bevy::prelude::*;
 use moly_assets::json::JsonAsset;
 use serde_json::Value;
 
-use crate::cutscene_camera::{self, Shot};
-use crate::fixture_activity_provider::FixtureActivityProvider;
-use crate::fixture_activity_state::{FixtureActivityIdentity, FixtureActivityOwner};
-use crate::fixture_activity_timeline::{
+use moly_features::cutscene_camera::{self, Shot};
+use moly_features::fixture_activity_provider::FixtureActivityProvider;
+use moly_features::fixture_activity_state::{FixtureActivityIdentity, FixtureActivityOwner};
+use moly_features::fixture_activity_timeline::{
     self as timeline, CutScenePayload, ExpansionEffect, FixtureActivityTimelines, SourceAssetId,
     StartTimeline, TimelineBindings, TimelineClip, TimelineClipKey, TimelineDefinition,
     TimelineOwner, TimelineOwnerKind, TimelinePayload, TimelineStatus, TimelineTimeoutBudget,
     TimelineToken,
 };
-use crate::fixture_timeline_particles::{self as particles, ParticlePlayBinding};
-use crate::game_state::{self, GameStateType};
-use crate::site::{HomeObstacleLevel, HomeObstacleRing, SiteActive, SiteSelection};
-use crate::site_expansion::law::SiteLevelRow;
-use crate::site_expansion::{ExpansionMasters, MysekaiLocalSettings, UserMysekaiRank};
+use moly_features::fixture_timeline_particles::{self as particles, ParticlePlayBinding};
+use moly_features::game_state::{self, GameStateType};
+use moly_features::site::{HomeObstacleLevel, HomeObstacleRing, SiteActive, SiteSelection};
+use moly_features::site_expansion::law::SiteLevelRow;
+use moly_features::site_expansion::{ExpansionMasters, MysekaiLocalSettings, UserMysekaiRank};
 
 pub mod birthday;
 pub mod birthday_party;
@@ -104,10 +117,10 @@ mod cast;
 mod hidden_effects;
 mod screen;
 
-use crate::cut_scene::{
+use moly_features::cut_scene::{
     CutScenePlayer, CutSceneRequest, CutSceneSystems, HomeScreenStartAnimation,
 };
-use crate::input_claims::{Channels, InputChannel, InputClaims, CUT_SCENE, HOME_SITE_PERFORM};
+use moly_features::input_claims::{Channels, InputChannel, InputClaims, CUT_SCENE, HOME_SITE_PERFORM};
 
 const PACKAGE_PREFIX: &str = "mysekai__cut_scene__";
 /// `PlayableDirector.Play` has no timeout.
@@ -333,11 +346,12 @@ struct CastPerform {
     stage: Stage,
 }
 
-/// The installed [`CutScenePlayer`]: `CutSceneExecutor.PlayAsync` for a cast
-/// caller. It finds the cut-scene root, `MysekaiMagicaClothManager.RequestReset`
-/// (logged only), then `FadeAndSetUpAsync` loads the package's view. The
-/// caller hears back through its callbacks; the last runs when the
-/// presenter's fade out has finished (or the load was refused).
+/// The installed [`CutScenePlayer`] (`CutSceneExecutor.PlayAsync` for a cast
+/// caller). Refused while another cut-scene plays; otherwise the package's
+/// view loads under the cut-scene root (`FadeAndSetUpAsync`; the cloth reset
+/// `MysekaiMagicaClothManager.RequestReset` is logged only) and plays. The
+/// caller hears back through its callbacks; the last one runs once the
+/// presenter's fade out has finished, or when the load is refused.
 fn play(world: &mut World, play: CutSceneRequest) -> Result<(), String> {
     if world.contains_resource::<HomePerform>() || world.contains_resource::<CastPerform>() {
         return Err("another cut-scene is being played".into());
@@ -495,7 +509,7 @@ fn step(world: &mut World, slot: &mut Stage) -> bool {
             logged,
         } => {
             let working = !world
-                .get_resource::<crate::ui_layers::UiLayerStack>()
+                .get_resource::<moly_features::ui_layers::UiLayerStack>()
                 .is_some_and(|layers| layers.on_field());
             if working {
                 if !logged {
@@ -554,7 +568,7 @@ fn step(world: &mut World, slot: &mut Stage) -> bool {
         },
         Stage::PresenterFadeIn(mut plan) => {
             if !world
-                .resource::<crate::screen_fade::CutSceneFadeImage>()
+                .resource::<moly_features::screen_fade::CutSceneFadeImage>()
                 .finished()
             {
                 *perform = Stage::PresenterFadeIn(plan);
@@ -580,7 +594,7 @@ fn step(world: &mut World, slot: &mut Stage) -> bool {
         }
         Stage::PresenterFadeOut(caller) => {
             if !world
-                .resource::<crate::screen_fade::CutSceneFadeImage>()
+                .resource::<moly_features::screen_fade::CutSceneFadeImage>()
                 .finished()
             {
                 *perform = Stage::PresenterFadeOut(caller);
@@ -613,7 +627,7 @@ fn screen_cast(caller: &Caller, timeline: &str) -> screen::ScreenCast {
         Caller::Cast(cast) => screen::ScreenCast {
             caller: cast.play.caller.name.to_string(),
             voice_bank: cast.play.caller.voice_bank.as_ref().map(|bank| {
-                crate::audio::cutscene::bundle_package(&format!("{bank}/{timeline}"))
+                moly_features::audio::cutscene::bundle_package(&format!("{bank}/{timeline}"))
             }),
             members: cast.members(),
         },
@@ -740,7 +754,7 @@ fn hide_other_fixtures(world: &mut World) {
             .collect()
     };
     let homes = world
-        .get_resource::<crate::house::HomeFixtures>()
+        .get_resource::<moly_features::house::HomeFixtures>()
         .map(|homes| {
             placed
                 .iter()
@@ -1264,14 +1278,14 @@ fn play_clip_se(world: &mut World, cue: &str, package: &str, t: f64, bounds: &st
         error!("[cutscene] t={t:.4} SEClip {bounds}: SEBehaviour.PlaySE: the cue name is empty: the source logs that the SE does not exist; nothing plays");
         return;
     }
-    let Some(mut requests) = world.get_resource_mut::<crate::audio::SeRequests>() else {
+    let Some(mut requests) = world.get_resource_mut::<moly_features::audio::SeRequests>() else {
         error!("[cutscene] t={t:.4} SEClip {bounds}: PlaySEOneShot({cue}): the SE channel is not installed; nothing plays");
         return;
     };
-    requests.0.push(crate::audio::SeRequest {
+    requests.0.push(moly_features::audio::SeRequest {
         owner: None,
         cue: cue.to_owned(),
-        class: crate::audio::SeClass::Ingame,
+        class: moly_features::audio::SeClass::Ingame,
         source: "cut-scene SEClip",
     });
     info!("[cutscene] t={t:.4} SEClip {bounds}: SEBehaviour.OnBehaviourPlay under CutSceneRoot: PlaySEOneShot({cue}) (the clip's bundle {package:?} is not read); queued to the SE channel");
@@ -1846,7 +1860,7 @@ fn presenter_fade_in(world: &mut World, plan: &Plan) {
         _ => [0.0; 4],
     };
     let duration = match &plan.caller { Caller::Cast(cast) if !cast.play.caller.layer_fades => 0.0, _ => LAYER_FADE };
-    crate::screen_fade::cutscene_fade_in(world, color, duration, "CutScenePresenter.FadeInAsync");
+    moly_features::screen_fade::cutscene_fade_in(world, color, duration, "CutScenePresenter.FadeInAsync");
 }
 
 /// `SetupInternal`, then `CutSceneView.PlayAsync` starts the director.
@@ -1858,7 +1872,7 @@ fn begin_play(world: &mut World, plan: &mut Plan) -> Play {
     // Setup: ChangeState(CutScene) -> CutSceneGameState.OnEnter.
     game_state::enter(world, GameStateType::CutScene, "CutScenePresenter.Setup");
     if let Some(mut gate) =
-        world.get_resource_mut::<crate::alone_action_runtime::AloneExecutionGate>()
+        world.get_resource_mut::<moly_features::alone_action_runtime::AloneExecutionGate>()
     {
         gate.cutscene_active = true;
     }
@@ -2105,9 +2119,9 @@ fn play_frame(world: &mut World, plan: &mut Plan, play: &mut Play) -> bool {
                 TimelinePayload::CutScene(CutScenePayload::SiteExpansion(effect)) => {
                     if now {
                         play.dissolve = true;
-                        crate::site_extension::set_site_extension(
+                        moly_features::site_extension::set_site_extension(
                             world,
-                            crate::site_extension::SiteExtensionData::expansion_frame(
+                            moly_features::site_extension::SiteExtensionData::expansion_frame(
                                 effect.center,
                                 effect.start_radius,
                                 effect.end_radius,
@@ -2206,7 +2220,7 @@ fn play_frame(world: &mut World, plan: &mut Plan, play: &mut Play) -> bool {
         .any(|(start, duration, _, _)| t >= *start && t < start + duration);
     if let Some((alpha, colour)) = wrote {
         if in_clip || index != play.fade_index {
-            crate::screen_fade::set_cutscene_image(world, colour);
+            moly_features::screen_fade::set_cutscene_image(world, colour);
             if t - play.fade_logged >= 0.0 {
                 info!(
                     "[cutscene-fade] t={t:.4} FadePanel{} SetAlpha({alpha:.4}, ({:.0},{:.0},{:.0}))",
@@ -2504,7 +2518,7 @@ fn end_play(world: &mut World, plan: &mut Plan, play: &Play) {
         "CutScenePresenter.ResetCameraState: ChangeState(1 Normal)",
     );
     if let Some(mut gate) =
-        world.get_resource_mut::<crate::alone_action_runtime::AloneExecutionGate>()
+        world.get_resource_mut::<moly_features::alone_action_runtime::AloneExecutionGate>()
     {
         gate.cutscene_active = false;
     }
@@ -2524,7 +2538,7 @@ fn end_play(world: &mut World, plan: &mut Plan, play: &Play) {
         );
     }
     if play.dissolve {
-        crate::site_extension::reset_global_dissolve(world);
+        moly_features::site_extension::reset_global_dissolve(world);
         info!("[cutscene] ShowExpansionEffectBehaviour.OnGraphStop: ResetGlobalDissolve");
     }
     if let Some(token) = play.token {
@@ -2543,7 +2557,7 @@ fn end_play(world: &mut World, plan: &mut Plan, play: &Play) {
         if !cast.play.caller.restores_bgm {
             info!("[cutscene] EndAsync(restoreBGM false): the cut-scene's BGM plays on; {} hands it back", cast.play.caller.name);
         } else {
-            crate::audio::cutscene::release_bgm(
+            moly_features::audio::cutscene::release_bgm(
                 world,
                 "EndAsync(restoreBGM true): the site's BGM plays again",
             );
@@ -2552,7 +2566,7 @@ fn end_play(world: &mut World, plan: &mut Plan, play: &Play) {
         cast::restore_start_effects(world, cast);
         let (_, end) = cast.fade_colors();
         info!("[cutscene] RestoreEffects; CutScenePresenter.FadeOutAsync(_endFadeColor ({:.2},{:.2},{:.2},{:.2})): ScreenLayerMysekaiMysekaiCutScene.FadeOut({LAYER_FADE} s)", end[0], end[1], end[2], end[3]);
-        crate::screen_fade::cutscene_fade_out_color(
+        moly_features::screen_fade::cutscene_fade_out_color(
             world,
             end,
             if cast.play.caller.layer_fades { LAYER_FADE } else { 0.0 },
@@ -2560,11 +2574,11 @@ fn end_play(world: &mut World, plan: &mut Plan, play: &Play) {
         );
         return;
     }
-    crate::audio::cutscene::release_bgm(world, "EndAsync: the site's BGM plays again");
+    moly_features::audio::cutscene::release_bgm(world, "EndAsync: the site's BGM plays again");
     info!("[cutscene] NPC Show; player Show");
     show_fixtures(world);
     info!("[cutscene] RestoreEffects; CutScenePresenter.FadeOutAsync: ScreenLayerMysekaiMysekaiCutScene.FadeOut({LAYER_FADE} s)");
-    crate::screen_fade::cutscene_fade_out(world, LAYER_FADE, "CutScenePresenter.FadeOutAsync");
+    moly_features::screen_fade::cutscene_fade_out(world, LAYER_FADE, "CutScenePresenter.FadeOutAsync");
 }
 
 pub fn install(app: &mut App) {
@@ -2579,8 +2593,8 @@ pub fn install(app: &mut App) {
                 home_started,
                 advance
                     .in_set(CutSceneSystems)
-                    .after(crate::fixture_activity_timeline::advance),
-                crate::site::apply_obstacle_level,
+                    .after(moly_features::fixture_activity_timeline::advance),
+                moly_features::site::apply_obstacle_level,
             ),
         );
 }

@@ -52,7 +52,7 @@
 //! [`ClientSystemFixtureActions`]) and the
 //! `PostUserMysekaiSystemFixtureActionApi` reply
 //! (`policies.systemFixtureActionReply`; see
-//! [`crate::userdata::client::system_fixture_action`]). A refused reply is the source's
+//! [`moly_features::userdata::client::system_fixture_action`]). A refused reply is the source's
 //! null reply: `ExecuteAsync` stops before its cut-scene.
 //!
 //! Named differences: the overlap dialog (`ShowCommonSubWindowDialog`) and
@@ -85,15 +85,15 @@ use serde_json::Value;
 
 use std::collections::HashMap;
 
-use crate::birthday::{BirthdayButton, BirthdayCutSceneClick};
-use crate::cut_scene::{CutSceneCaller, CutSceneReport, CutSceneRequest};
+use moly_features::birthday::{BirthdayButton, BirthdayCutSceneClick};
+use moly_features::cut_scene::{CutSceneCaller, CutSceneReport, CutSceneRequest};
 use std::borrow::Cow;
-use crate::common_dialog::Buttons;
-use crate::fixture_activity_state::FixtureActivityIdentity;
-use crate::ui_layers::DialogId;
-use crate::userdata::client::system_fixture_action::ClientSystemFixtureActions;
-use crate::userdata::client::talk_read::UserResource;
-use crate::userdata::{Answered, ServerPending};
+use moly_features::common_dialog::Buttons;
+use moly_features::fixture_activity_state::FixtureActivityIdentity;
+use moly_features::ui_layers::DialogId;
+use moly_features::userdata::client::system_fixture_action::ClientSystemFixtureActions;
+use moly_features::userdata::client::talk_read::UserResource;
+use moly_features::userdata::{Answered, ServerPending};
 use moly_link::ServerLink;
 use moly_protocol::api::SystemFixtureActionRequest;
 use moly_protocol::{Call, Refusal, Reply};
@@ -131,7 +131,7 @@ const NIGO_MIKU_LENGTH: f32 = f32::from_bits(0x3f70_a3d7);
 /// `PutAndLookPlayerBesideFixture`: the player's distance from the fixture.
 const PLAYER_LENGTH: f32 = 0.5;
 
-pub use crate::markers::BirthdayContext;
+pub use moly_features::markers::BirthdayContext;
 
 /// The master tables, read from the region's master hosts.
 const PARTIES: MasterTable<Vec<Party>> = MasterTable {
@@ -253,7 +253,7 @@ pub(super) fn load(mut commands: Commands, mut masters: ResMut<MasterData>) {
     masters.request(&CHARACTER_UNITS);
     masters.request(&CHARACTERS);
     commands.insert_resource(BirthdayTables::Requested);
-    if let Some(raw) = crate::userdata::client::instrument_env(INSTRUMENT) {
+    if let Some(raw) = moly_features::userdata::client::instrument_env(INSTRUMENT) {
         let (seconds, fixture) = match raw.split_once(':') {
             Some((seconds, fixture)) => (seconds, Some(fixture)),
             None => (raw.as_str(), None),
@@ -433,7 +433,7 @@ fn tables(world: &mut World) -> Result<Option<Tables>, String> {
         chars.dedup();
     }
     world
-        .resource_mut::<crate::ui_charsets::ShellTextSources>()
+        .resource_mut::<moly_features::ui_charsets::ShellTextSources>()
         .fill(TEXT_SOURCE, chars);
     world.insert_resource(BirthdayTables::Taken(taken.clone()));
     taken.map(Some)
@@ -460,7 +460,7 @@ fn update_buttons(world: &mut World) {
         return;
     };
     let TableRows { parties, system, .. } = &*tables;
-    let now = crate::birthday::now_ms();
+    let now = moly_features::birthday::now_ms();
     let context = world.contains_resource::<BirthdayContext>();
     let placed: Vec<(Entity, i64, Option<BirthdayButton>)> = world
         .query::<(Entity, &FixtureActivityIdentity, Option<&BirthdayButton>)>()
@@ -475,7 +475,7 @@ fn update_buttons(world: &mut World) {
             .find(|row| row.fixture == master && row.kind == PARTY_FIXTURE_TYPE)
             .and_then(|row| parties.iter().find(|party| party.id == row.external))
             .is_some_and(|party| {
-                crate::birthday::is_within_time(now, party.start_at, party.closed_at)
+                moly_features::birthday::is_within_time(now, party.start_at, party.closed_at)
             });
         if !within && before.is_none() {
             continue;
@@ -506,7 +506,7 @@ fn beside(pose: &Transform, yaw_deg: f32, length: f32, facing_deg: f32) -> (Vec3
 
 fn player_entity(world: &mut World) -> Option<Entity> {
     world
-        .query_filtered::<Entity, With<crate::player::PlayerControlled>>()
+        .query_filtered::<Entity, With<moly_features::player::PlayerControlled>>()
         .iter(world)
         .next()
 }
@@ -527,7 +527,7 @@ fn instrument_press(world: &mut World) {
     if matches!(stage, InstrumentStage::Done)
         || now < after
         || !world
-            .get_resource::<crate::site::SiteActive>()
+            .get_resource::<moly_features::site::SiteActive>()
             .is_some_and(|site| site.site_type == "home_site")
     {
         return;
@@ -574,7 +574,7 @@ fn instrument_place(world: &mut World, wanted: Option<i32>, now: f64) {
         error!("[birthday] {INSTRUMENT}: no party fixture{} (system fixture type {PARTY_FIXTURE_TYPE}: master fixtures {party_fixtures:?}) is placed on the home site; no press", wanted.map_or(String::new(), |id| format!(" {id}")));
         return set_stage(world, InstrumentStage::Done);
     }
-    let clock = crate::birthday::now_ms();
+    let clock = moly_features::birthday::now_ms();
     let Some(&(entity, master, _)) = placed
         .iter()
         .find(|(_, _, button)| button.is_some_and(|button| button.can_show))
@@ -619,7 +619,7 @@ fn instrument_place(world: &mut World, wanted: Option<i32>, now: f64) {
 /// The instrument's second step: the tap once the button is the stack head.
 fn instrument_tap(world: &mut World, master: i32, at: f64, head_since: Option<f64>, now: f64) {
     let head = world
-        .get_resource::<crate::action_button::ActionButtonState>()
+        .get_resource::<moly_features::action_button::ActionButtonState>()
         .and_then(|state| state.current());
     if !head.is_some_and(|(button, _)| button == ButtonType::BirthdayCutScene) {
         if now - at > INSTRUMENT_HEAD_SECS {
@@ -663,7 +663,7 @@ fn instrument_tap(world: &mut World, master: i32, at: f64, head_since: Option<f6
         error!("[birthday] {INSTRUMENT}: no primary window; no press");
         return set_stage(world, InstrumentStage::Done);
     };
-    let mut screen: SystemState<crate::action_button::ActionButtonScreen> = SystemState::new(world);
+    let mut screen: SystemState<moly_features::action_button::ActionButtonScreen> = SystemState::new(world);
     let position = screen
         .get(world)
         .expect("system params")
@@ -732,10 +732,10 @@ fn on_click(world: &mut World, fixture: Entity) {
         return;
     };
     // IsWithinBirthdayStartTime(party).
-    let now = crate::birthday::now_ms();
-    if !crate::birthday::is_within_time(now, party.birthday_start_at, party.closed_at) {
-        let body = crate::common_dialog::wording(world, "DialogUtility.ShowCommon1ButtonDialog", CLOSED);
-        let dialog = crate::common_dialog::open_detached(
+    let now = moly_features::birthday::now_ms();
+    if !moly_features::birthday::is_within_time(now, party.birthday_start_at, party.closed_at) {
+        let body = moly_features::common_dialog::wording(world, "DialogUtility.ShowCommon1ButtonDialog", CLOSED);
+        let dialog = moly_features::common_dialog::open_detached(
             world,
             "DialogUtility.ShowCommon1ButtonDialog",
             body,
@@ -775,13 +775,13 @@ fn execute(world: &mut World, party: Party, row: SystemFixture, fixture: Entity,
     } else {
         ("BirthdayPartyPresenter.ShowFirstConfirmDialog", CONFIRM_FIRST, START)
     };
-    let format = crate::common_dialog::wording(world, caller, body_key);
+    let format = moly_features::common_dialog::wording(world, caller, body_key);
     let body = moly_law::text::custom_text_mesh::format_wording(&format, std::slice::from_ref(&given_name))
         .unwrap_or_else(|reason| {
             error!("[birthday] {caller}: {reason}; the body is drawn unformatted");
             format.clone()
         });
-    let Some(dialog) = crate::common_dialog::open(
+    let Some(dialog) = moly_features::common_dialog::open(
         world,
         caller,
         body,
@@ -809,7 +809,7 @@ fn confirm_answer(world: &mut World) {
     let Some(dialog) = world.get_resource::<BirthdayConfirm>().map(|confirm| confirm.dialog) else {
         return;
     };
-    let Some(ok) = crate::common_dialog::answer(world, dialog) else {
+    let Some(ok) = moly_features::common_dialog::answer(world, dialog) else {
         return;
     };
     if !ok {
@@ -919,11 +919,11 @@ fn begin_party(world: &mut World, confirm: BirthdayConfirm) {
         }
     };
     world.insert_resource(BirthdayContext { party: party.id });
-    world.insert_resource(crate::audio_inputs::BirthdayVoice { party: party.id });
+    world.insert_resource(moly_features::audio_inputs::BirthdayVoice { party: party.id });
     info!("[birthday] MultiplayCore.IsConnected (the server model's own room); GameStateManager.AddContext(Birthday) (MysekaiBirthdayPartyContext.OnEnter: InProgress; ActionButtonRefresh with its disabled types); no other players to hide");
-    if let Some(mut screens) = world.get_resource_mut::<crate::ui_layers::ScreenManager>() {
+    if let Some(mut screens) = world.get_resource_mut::<moly_features::ui_layers::ScreenManager>() {
         screens.set_mysekai_back_key_process(
-            crate::ui_layers::MysekaiBackKeyProcess::None,
+            moly_features::ui_layers::MysekaiBackKeyProcess::None,
             "BirthdayPartyPresenter.ExecuteAsync",
         );
     }
@@ -936,7 +936,7 @@ fn begin_party(world: &mut World, confirm: BirthdayConfirm) {
     else {
         error!("[birthday] PlayCutSceneAsync: GetMasterMysekaiBirthdayCutSceneByExternalId({}) = null; the source dereferences it and throws: nothing plays", party.id);
         world.remove_resource::<BirthdayContext>();
-        world.remove_resource::<crate::audio_inputs::BirthdayVoice>();
+        world.remove_resource::<moly_features::audio_inputs::BirthdayVoice>();
         return;
     };
     let play = CutSceneRequest {
@@ -949,7 +949,7 @@ fn begin_party(world: &mut World, confirm: BirthdayConfirm) {
         hide_player: false,
         show_ui: true,
     };
-    match crate::cut_scene::start(world, play) {
+    match moly_features::cut_scene::start(world, play) {
         Ok(()) => {
             world.insert_resource(BirthdayPresenter {
                 party,
@@ -960,7 +960,7 @@ fn begin_party(world: &mut World, confirm: BirthdayConfirm) {
         Err(reason) => {
             error!("[birthday] PlayCutSceneAsync: {reason}; nothing plays");
             world.remove_resource::<BirthdayContext>();
-            world.remove_resource::<crate::audio_inputs::BirthdayVoice>();
+            world.remove_resource::<moly_features::audio_inputs::BirthdayVoice>();
         }
     }
 }
@@ -991,18 +991,18 @@ fn start_fade_in_callback(world: &mut World, report: &CutSceneReport) {
     let members = &report.members;
     let caller = "BirthdayPartyPresenter.DestroyCharacters";
     let mut disposed = Vec::new();
-    for (unit, entity) in crate::npc::dispose::npc_list(world) {
+    for (unit, entity) in moly_features::npc::dispose::npc_list(world) {
         if members.iter().any(|(_, member)| *member == entity) {
             continue;
         }
-        match crate::npc::dispose::dispose_npc(world, entity, caller) {
+        match moly_features::npc::dispose::dispose_npc(world, entity, caller) {
             Ok(unit) => disposed.push(unit),
             Err(reason) => warn!("[birthday] {caller}: unit {unit}: {reason}"),
         }
     }
     // DisposeNPC takes a unit off the roster; the party's character keeps
     // its own registration.
-    if let Some(mut registry) = world.get_resource_mut::<crate::npc::Registry>() {
+    if let Some(mut registry) = world.get_resource_mut::<moly_features::npc::Registry>() {
         for (unit, _) in members {
             if !registry.character_unit_ids.contains(unit) {
                 registry.character_unit_ids.push(*unit);
@@ -1043,7 +1043,7 @@ fn end_fade_out_callback(world: &mut World, report: &CutSceneReport) {
     };
     let place =
         |yaw_deg: f32, length: f32, facing_deg: f32| beside(&pose, yaw_deg, length, facing_deg);
-    crate::npc::gate_entries::show(world, character);
+    moly_features::npc::gate_entries::show(world, character);
     // PutCharacterBesideFixture.
     let (offset, length) = if unit == NIGO_MIKU_UNIT {
         (NIGO_MIKU_ANGLE, NIGO_MIKU_LENGTH)
@@ -1051,8 +1051,8 @@ fn end_fade_out_callback(world: &mut World, report: &CutSceneReport) {
         (CHARACTER_ANGLE, CHARACTER_LENGTH)
     };
     let (at, rotation) = place(90.0 + offset, length, 180.0);
-    crate::npc::force_set_position(world, character, at.to_array());
-    if let Some(mut walk) = world.get_mut::<crate::npc::WalkState>(character) {
+    moly_features::npc::force_set_position(world, character, at.to_array());
+    if let Some(mut walk) = world.get_mut::<moly_features::npc::WalkState>(character) {
         walk.0.forward = (rotation * Vec3::Z).to_array();
     }
     if let Some(mut transform) = world.get_mut::<Transform>(character) {
@@ -1113,26 +1113,26 @@ fn cut_scene_returned(world: &mut World, report: &CutSceneReport) {
         (Ok(()), None) => {
             error!("[birthday] PlayCutSceneAsync returned with no presenter; the party cannot go on");
             world.remove_resource::<BirthdayContext>();
-            world.remove_resource::<crate::audio_inputs::BirthdayVoice>();
+            world.remove_resource::<moly_features::audio_inputs::BirthdayVoice>();
         }
         (Err(_), _) => {
             // The cut-scene did not play: nothing of the party is under way.
             world.remove_resource::<BirthdayContext>();
-            world.remove_resource::<crate::audio_inputs::BirthdayVoice>();
+            world.remove_resource::<moly_features::audio_inputs::BirthdayVoice>();
         }
     }
 }
 
 pub(super) fn install(app: &mut App) {
-    app.init_resource::<crate::ui_charsets::ShellTextSources>()
+    app.init_resource::<moly_features::ui_charsets::ShellTextSources>()
         .add_message::<BirthdayCutSceneClick>()
         .add_systems(Startup, load)
         .add_systems(Update, advance.before(super::advance))
         .add_systems(Update, read_action_answer.after(advance));
     app.world_mut()
-        .resource_mut::<crate::ui_charsets::ShellTextSources>()
+        .resource_mut::<moly_features::ui_charsets::ShellTextSources>()
         .register_texts(TEXT_SOURCE, WORDINGS, &[]);
     app.world_mut()
-        .resource_mut::<crate::ui_charsets::ShellTextSources>()
+        .resource_mut::<moly_features::ui_charsets::ShellTextSources>()
         .declare(TEXT_SOURCE);
 }

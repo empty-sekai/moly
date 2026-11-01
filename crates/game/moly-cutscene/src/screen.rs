@@ -25,7 +25,7 @@
 //!   falls exactly on its start plays nothing); else `PlayBGM(its cue)`
 //!   (the cue alone). The behaviour has no pause.
 //!
-//! The voice and the BGM are the audio channels' ([`crate::audio::cutscene`]).
+//! The voice and the BGM are the audio channels' ([`moly_features::audio::cutscene`]).
 //! Named gaps: the cut-scene screen's text window, label and talk window
 //! are the UI layer's (screen 639), not drawn here, and each call is logged
 //! with its values at its edge; a voice that played out while its clip
@@ -37,7 +37,7 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 
-use crate::fixture_activity_timeline::{TimelineClipKey, TimelineDefinition, TimelinePayload};
+use moly_features::fixture_activity_timeline::{TimelineClipKey, TimelineDefinition, TimelinePayload};
 
 /// `TextBehaviour._showingTextIntervalTime`.
 const TEXT_INTERVAL: f64 = 0.05;
@@ -245,7 +245,7 @@ pub(super) fn frame(world: &mut World, screen: &mut ScreenTracks, t: f64, cast: 
                         {
                             Some(found) => {
                                 info!("[cutscene-screen] t={t:.4} BGMBehaviour.OnBehaviourPlay {bounds}: the track's clip [{:.4}, {:.4}) holds the time: PlayBGM({})", found.start, found.end, found.value);
-                                crate::audio::cutscene::play_bgm(world, &found.value, &found.bundle, &cast.caller);
+                                moly_features::audio::cutscene::play_bgm(world, &found.value, &found.bundle, &cast.caller);
                             }
                             None => info!("[cutscene-screen] t={t:.4} BGMBehaviour.OnBehaviourPlay {bounds}: no clip of the track has start < {time:.4} < end: nothing plays"),
                         }
@@ -277,7 +277,7 @@ fn voice_frame(
     if state.playing {
         // PlayVoiceOnFinish: the voice played out (the bus reaped it).
         let sounding = state.playback.is_some_and(|playback| {
-            world.resource::<crate::audio::VoiceChannel>().active_sink() == Some(playback)
+            world.resource::<moly_features::audio::VoiceChannel>().active_sink() == Some(playback)
         });
         if state.playback.is_some() && !sounding {
             state.playback = None;
@@ -311,7 +311,7 @@ fn voice_frame(
         error!("[cutscene-screen] t={time:.4} VoiceBehaviour.PlayVoice({}) {bounds}: the caller {} downloads no voice bank for its cut-scene; nothing plays", clip.value, cast.caller);
         return;
     };
-    match crate::audio::cutscene::play_voice(world, &clip.value, bank, start, speaker) {
+    match moly_features::audio::cutscene::play_voice(world, &clip.value, bank, start, speaker) {
         Ok(playback) => state.playback = Some(playback),
         Err(reason) => warn!("[cutscene-screen] t={time:.4} VoiceBehaviour.PlayVoice({}) {bounds}: {reason}; nothing plays", clip.value),
     }
@@ -330,7 +330,7 @@ fn voice_pause(
     };
     info!("[cutscene-screen] t={t:.4} VoiceBehaviour.OnBehaviourPause {bounds}: StopVoice");
     if let Some(playback) = state.playback {
-        crate::audio::cutscene::stop_voice(world, playback);
+        moly_features::audio::cutscene::stop_voice(world, playback);
     }
 }
 
@@ -350,7 +350,7 @@ pub(super) fn stop(world: &mut World, screen: &mut ScreenTracks) {
                     if let Some(state) = screen.voices.remove(&clip.key) {
                         info!("[cutscene-screen] graph stop: VoiceBehaviour.OnBehaviourPause {bounds}: StopVoice");
                         if let Some(playback) = state.playback {
-                            crate::audio::cutscene::stop_voice(world, playback);
+                            moly_features::audio::cutscene::stop_voice(world, playback);
                         }
                     }
                 }

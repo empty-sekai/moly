@@ -5416,6 +5416,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "moly-cutscene"
+version = "0.0.5"
+dependencies = [
+ "bevy",
+ "moly-assets",
+ "moly-config",
+ "moly-features",
+ "moly-law",
+ "moly-link",
+ "moly-protocol",
+ "serde_json",
+]
+
+[[package]]
 name = "moly-delivery"
 version = "0.0.5"
 dependencies = [
@@ -5448,6 +5462,7 @@ dependencies = [
  "moly-config",
  "moly-content-library",
  "moly-core",
+ "moly-cutscene",
  "moly-delivery",
  "moly-features",
  "moly-fixture-edit",
@@ -5546,6 +5561,7 @@ dependencies = [
  "moly-content-library",
  "moly-convert",
  "moly-core",
+ "moly-cutscene",
  "moly-delivery",
  "moly-devtools",
  "moly-features",
@@ -5779,6 +5795,7 @@ dependencies = [
  "moly-config",
  "moly-content-library",
  "moly-core",
+ "moly-cutscene",
  "moly-features",
  "moly-fixture-edit",
  "moly-link",

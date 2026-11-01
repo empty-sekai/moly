@@ -27,7 +27,7 @@ pub use moly_core::weather_transition;
 pub use moly_features::action_button;
 pub use moly_features::birthday;
 pub use moly_content_library as content_library;
-pub use moly_features::cutscene;
+pub use moly_cutscene as cutscene;
 pub use moly_features::entry;
 pub use moly_fixture_edit as fixture_edit;
 pub use moly_features::footstep;

@@ -1,6 +1,6 @@
 //! A cut-scene played with a cast at a start object (`CutSceneExecutor.PlayAsync`
 //! with character unit ids and the object's view transform), for any caller
-//! of [`crate::cut_scene::start`]: the gate's invite and go-home cut-scenes,
+//! of [`moly_features::cut_scene::start`]: the gate's invite and go-home cut-scenes,
 //! the birthday party's and the tutorial's among them.
 //!
 //! `CutScenePresenter.Setup` binds each unit: with `useAlreadyExistCharacter`
@@ -60,15 +60,15 @@ use moly_assets::json::JsonAsset;
 use moly_assets::scene_state::{RefreshSourceActivity, SourceNodeActivity};
 use serde_json::Value;
 
-use crate::fixture_activity_provider::FixtureActivityProvider;
-use crate::fixture_activity_state::FixtureActivityIdentity;
-use crate::fixture_activity_timeline::{
+use moly_features::fixture_activity_provider::FixtureActivityProvider;
+use moly_features::fixture_activity_state::FixtureActivityIdentity;
+use moly_features::fixture_activity_timeline::{
     self as timeline, CutScenePayload, InfiniteClip, SourceAssetId, StartTimeline, TimelineClipKey,
     TimelineDefinition, TimelinePayload,
 };
-use crate::npc::{CharacterUnitId, MotionClips, MotionPhase};
+use moly_features::npc::{CharacterUnitId, MotionClips, MotionPhase};
 
-use crate::cut_scene::{CutSceneAvatar, CutSceneCastLease, CutSceneReport, CutSceneRequest};
+use moly_features::cut_scene::{CutSceneAvatar, CutSceneCastLease, CutSceneReport, CutSceneRequest};
 
 struct Member {
     unit: u32,
@@ -255,7 +255,7 @@ fn motion_clips(registry: &Value, unit: u32) -> Option<MotionClips> {
 fn present_npc(world: &mut World, unit: u32) -> Option<Entity> {
     world
         .query_filtered::<(Entity, &CharacterUnitId), (
-            Without<crate::player::PlayerControlled>,
+            Without<moly_features::player::PlayerControlled>,
             Without<CutSceneAvatar>,
         )>()
         .iter(world)
@@ -543,7 +543,7 @@ pub(super) fn prepare(
             // The host creates it here, while the package loads, beside the
             // roster the callback then disposes (see `super::birthday`).
             if cast.play.caller.creates_npcs {
-                let npc = crate::npc::create_npc_avatar_for_multi(world, unit)
+                let npc = moly_features::npc::create_npc_avatar_for_multi(world, unit)
                     .map_err(|reason| format!("CreateBirthdayCharacter(unit {unit}): {reason}"))?;
                 info!("[cutscene-cast] Setup: unit {unit}: CreateBirthdayCharacter: AvatarUtility.CreateAndSetupNPCAvatarView + AvatarFactory.CreateNPCAvatarForMulti(unit, view, 1): new NPC {npc:?} (hidden until the director's first frame), not taken over");
                 cast.members.push(Member {
@@ -559,7 +559,7 @@ pub(super) fn prepare(
             let takes_over = cast.play.take_over_present_npcs;
             let (entity, taken_over) = match (takes_over, present) {
                 (true, Some(npc)) => {
-                    let cancelled = crate::npc::gate_entries::take_over_for_cut_scene(world, npc);
+                    let cancelled = moly_features::npc::gate_entries::take_over_for_cut_scene(world, npc);
                     info!("[cutscene-cast] Setup: unit {unit}: FindNPC found it; useAlreadyExistCharacter: TryCancelCurrentObjective {cancelled}{}", if cancelled { ", ForceUpdateCutSceneObjective, SetImmediatelyExecuteNextObjective(true)" } else { ": not cancelled, its talk data kept" });
                     (npc, true)
                 }
@@ -598,10 +598,10 @@ pub(super) fn prepare(
             return Err(format!("unit {}'s character no longer exists", member.unit));
         }
         if world
-            .get::<crate::character::MotionDriver>(member.entity)
+            .get::<moly_features::character::MotionDriver>(member.entity)
             .is_none()
             || world
-                .get::<crate::character_material::ToonMaterials>(member.entity)
+                .get::<moly_features::character_material::ToonMaterials>(member.entity)
                 .is_none()
         {
             return Ok(Step::Wait(format!(
@@ -619,7 +619,7 @@ pub(super) fn prepare(
     for member in &cast.members {
         let (animator, graph) = {
             let driver = world
-                .get::<crate::character::MotionDriver>(member.entity)
+                .get::<moly_features::character::MotionDriver>(member.entity)
                 .expect("checked above");
             (driver.player, driver.graph.clone())
         };
@@ -834,7 +834,7 @@ pub(super) fn setup(
     let members: HashSet<Entity> = cast.members.iter().map(|member| member.entity).collect();
     // The NPCs not bound are hidden.
     let others: Vec<(Entity, u32, Visibility)> = world
-        .query_filtered::<(Entity, &CharacterUnitId, Option<&Visibility>), Without<crate::player::PlayerControlled>>()
+        .query_filtered::<(Entity, &CharacterUnitId, Option<&Visibility>), Without<moly_features::player::PlayerControlled>>()
         .iter(world)
         .filter(|(entity, _, _)| !members.contains(entity))
         .map(|(entity, unit, visibility)| (entity, unit.0, visibility.copied().unwrap_or_default()))
@@ -842,11 +842,11 @@ pub(super) fn setup(
     for (entity, _, prior) in &others {
         cast.hidden_npcs.push((*entity, *prior));
         if world
-            .get::<crate::npc_objective::ObjectiveMind>(*entity)
+            .get::<moly_features::npc_objective::ObjectiveMind>(*entity)
             .is_some()
         {
             // NPCAvatarPresenter.Hide: the model's visibility too.
-            crate::npc::gate_entries::hide(world, *entity);
+            moly_features::npc::gate_entries::hide(world, *entity);
         } else {
             world.entity_mut(*entity).insert(Visibility::Hidden);
         }
@@ -857,7 +857,7 @@ pub(super) fn setup(
     );
     if cast.play.hide_player {
         let players: Vec<(Entity, Visibility)> = world
-            .query_filtered::<(Entity, Option<&Visibility>), With<crate::player::PlayerControlled>>(
+            .query_filtered::<(Entity, Option<&Visibility>), With<moly_features::player::PlayerControlled>>(
             )
             .iter(world)
             .map(|(entity, visibility)| (entity, visibility.copied().unwrap_or_default()))
@@ -939,7 +939,7 @@ fn hide_fixtures_near_gate(world: &mut World, cast: &mut Cast, distance: i64) {
             })
             .collect()
     };
-    let homes = world.get_resource::<crate::house::HomeFixtures>();
+    let homes = world.get_resource::<moly_features::house::HomeFixtures>();
     let homes: Vec<bool> = rows
         .iter()
         .map(|(_, package, _)| homes.is_some_and(|homes| homes.is_home(package).unwrap_or(false)))
@@ -1154,7 +1154,7 @@ pub(super) fn frame(world: &mut World, cast: &mut Cast, definition: &TimelineDef
 
 fn set_player_visible(world: &mut World, visible: bool) {
     let players: Vec<Entity> = world
-        .query_filtered::<Entity, With<crate::player::PlayerControlled>>()
+        .query_filtered::<Entity, With<moly_features::player::PlayerControlled>>()
         .iter(world)
         .collect();
     for player in players {
@@ -1178,8 +1178,8 @@ pub(super) fn restore_cast_states(world: &mut World, cast: &mut Cast) {
             world
                 .entity_mut(member.entity)
                 .remove::<CutSceneCastLease>();
-            crate::npc::gate_entries::restore_state(world, member.entity);
-            let idle = crate::character::resume_idle_after_fixture(world, member.entity);
+            moly_features::npc::gate_entries::restore_state(world, member.entity);
+            let idle = moly_features::character::resume_idle_after_fixture(world, member.entity);
             info!(
                 "[cutscene-cast] RestoreStates: unit {}: ChangeState(Idle); its idle motion resumes: {idle:?}",
                 member.unit
@@ -1253,11 +1253,11 @@ pub(super) fn after_dispose(world: &mut World, cast: &mut Cast, definition: &Tim
         // NPCAvatarPresenter.Show for an NPC on the loaded site; a
         // member away from it keeps the host's residency hide.
         let npc = world
-            .get::<crate::npc_objective::ObjectiveMind>(entity)
+            .get::<moly_features::npc_objective::ObjectiveMind>(entity)
             .is_some()
-            && world.get::<crate::npc::residency::Away>(entity).is_none();
+            && world.get::<moly_features::npc::residency::Away>(entity).is_none();
         if npc {
-            crate::npc::gate_entries::show(world, entity);
+            moly_features::npc::gate_entries::show(world, entity);
         } else {
             world.entity_mut(entity).insert(prior);
         }
@@ -1306,7 +1306,7 @@ pub(super) fn release_refused(world: &mut World, cast: &mut Cast) {
             // The model's visibility the Hide above took.
             world
                 .entity_mut(entity)
-                .remove::<crate::npc::gate_entries::ModelHidden>();
+                .remove::<moly_features::npc::gate_entries::ModelHidden>();
         }
     }
 }

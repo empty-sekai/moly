@@ -16,6 +16,9 @@
   "moly-core": {
     "clippy::len_without_is_empty": 1
   },
+  "moly-cutscene": {
+    "clippy::unnecessary_to_owned": 1
+  },
   "moly-delivery": {
     "clippy::large_enum_variant": 1
   },
@@ -32,7 +35,6 @@
     "clippy::map_clone": 1,
     "clippy::option_map_or_none": 1,
     "clippy::unnecessary_literal_unwrap": 1,
-    "clippy::unnecessary_to_owned": 1,
     "deprecated": 10,
     "private_interfaces": 6,
     "unused_imports": 1,

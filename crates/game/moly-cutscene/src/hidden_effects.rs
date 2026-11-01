@@ -87,7 +87,7 @@ pub(super) fn prepare(
         return Ok(None);
     }
     let Some(package) = world
-        .get::<crate::fixture_activity_state::FixtureActivityIdentity>(focus)
+        .get::<moly_features::fixture_activity_state::FixtureActivityIdentity>(focus)
         .map(|identity| identity.model_package.clone())
     else {
         // No fixture model: no particle system to hide.

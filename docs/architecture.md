@@ -12,7 +12,7 @@
 | `crates/game/moly-masters` | Master table loading and typing |
 | `crates/game/moly-world` | Areas, furniture, walkable surfaces and character behaviour |
 | `crates/game/moly-ui` | Prefab UI, UI management and common dialogs |
-| `crates/game/moly-features` | The hub: the field flow, the menu shell, crafting, cutscenes, dialogs, and the shared types and registries the domain crates below install into |
+| `crates/game/moly-features` | The hub: the field flow, the menu shell, crafting, dialogs, and the shared types and registries the domain crates below install into |
 | `crates/game/moly-convert` | Conversion: the machine's slots, the items it converts and their screen and dialogs |
 | `crates/game/moly-mission` | Missions: their screen, list cells, detail and list dialogs and the reward receive |
 | `crates/game/moly-photo` | Photo mode: field capture, frame selection and saving the shot to a local file |
@@ -20,6 +20,7 @@
 | `crates/game/moly-delivery` | Delivery: the birthday party delivery site, its flow, drops, honor rewards and delivery screen |
 | `crates/game/moly-harvest` | Harvest: the harvest sites, gathering with tools, drops and pickup, stamina, bulk harvest and the harvest tool material |
 | `crates/game/moly-content-library` | Content library: browsing conversations, furniture and NPC activities, staging and playing a choice on the field, and the JSON bridge the browser page and developer tools drive |
+| `crates/game/moly-cutscene` | Cut-scenes: the home site's expansion cut-scene, the cut-scenes with a cast that the gate, the tutorial and the birthday start, and the birthday cut-scene and party |
 | `crates/game/moly-devtools` | Control port, director scripts and developer panel |
 | `crates/game/moly-game` | Assembles the layers above into the game |
 | `crates/net/moly-protocol` | Request, response and push message types between the game and the server |
