@@ -5353,6 +5353,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "moly-content-library"
+version = "0.0.5"
+dependencies = [
+ "arboard",
+ "bevy",
+ "moly-assets",
+ "moly-config",
+ "moly-core",
+ "moly-features",
+ "moly-law",
+ "serde_json",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "moly-convert"
 version = "0.0.5"
 dependencies = [
@@ -5430,6 +5446,7 @@ dependencies = [
  "moly-assets",
  "moly-audio",
  "moly-config",
+ "moly-content-library",
  "moly-core",
  "moly-delivery",
  "moly-features",
@@ -5504,6 +5521,7 @@ dependencies = [
  "bevy",
  "moly-assets",
  "moly-config",
+ "moly-content-library",
  "moly-features",
  "moly-law",
  "moly-layout",
@@ -5525,6 +5543,7 @@ dependencies = [
  "moly-assets",
  "moly-audio",
  "moly-config",
+ "moly-content-library",
  "moly-convert",
  "moly-core",
  "moly-delivery",
@@ -5758,6 +5777,7 @@ dependencies = [
  "moly-assets",
  "moly-audio",
  "moly-config",
+ "moly-content-library",
  "moly-core",
  "moly-features",
  "moly-fixture-edit",

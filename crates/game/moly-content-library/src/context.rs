@@ -9,7 +9,7 @@ pub fn refresh_context(
     runtime: Res<PlayerFixtureRuntime>,
     npcs: Query<(&CharacterUnitId, &NpcActions)>,
     fixtures: Query<(Entity, &FixtureActivityIdentity, Option<&GlobalTransform>)>,
-    players: Query<&GlobalTransform, With<crate::player::PlayerControlled>>,
+    players: Query<&GlobalTransform, With<moly_features::player::PlayerControlled>>,
     mut elapsed: Local<f32>,
     mut was_open: Local<bool>,
 ) {
@@ -80,9 +80,9 @@ pub fn refresh_context(
 /// arrange a real nearby position first, then must pass the SAME runtime
 /// preparation again. No missing binding/asset/identity is excused here.
 fn positional_preparation(
-    error: &crate::player_fixture_action::PlayerFixturePreparationError,
+    error: &moly_features::player_fixture_action::PlayerFixturePreparationError,
 ) -> bool {
-    use crate::player_fixture_action::PlayerFixturePreparationError as Error;
+    use moly_features::player_fixture_action::PlayerFixturePreparationError as Error;
     matches!(
         error,
         Error::Missing("locator radius tile identities")

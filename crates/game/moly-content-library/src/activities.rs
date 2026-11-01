@@ -1,7 +1,7 @@
-//! Read-only product projection of the existing, source-qualified NPC activity
-//! catalogue. It exposes authored variants and bubbles without inventing a talk.
+//! Read-only projection of the existing NPC activity catalogue. It exposes the
+//! authored variants and bubbles without inventing a talk.
 use super::*;
-use crate::fixture_activity_data::{
+use moly_features::fixture_activity_data::{
     ActivityKey, ActivityOrigin, ActivitySpec, FixtureActivityTables,
 };
 

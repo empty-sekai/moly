@@ -164,7 +164,6 @@ pub mod action_button;
 pub mod bgm_select;
 pub mod birthday;
 pub mod browser_game;
-pub mod content_library;
 pub mod cutscene;
 pub mod entry;
 pub mod fixture_put_limit;

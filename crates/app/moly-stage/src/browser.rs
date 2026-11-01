@@ -68,19 +68,19 @@ pub fn start_stage(backend: &str) -> Result<(), JsValue> {
 
 #[wasm_bindgen]
 pub fn library_command(command: &str) -> Result<(), JsValue> {
-    moly_features::content_library::bridge::library_command(command).map_err(error)
+    crate::content_library::bridge::library_command(command).map_err(error)
 }
 #[wasm_bindgen]
 pub fn library_snapshot() -> String {
-    moly_features::content_library::bridge::library_snapshot()
+    crate::content_library::bridge::library_snapshot()
 }
 #[wasm_bindgen]
 pub fn library_catalog() -> String {
-    moly_features::content_library::bridge::library_catalog()
+    crate::content_library::bridge::library_catalog()
 }
 #[wasm_bindgen]
 pub fn library_diagnostics() -> String {
-    moly_features::content_library::library_diagnostics()
+    crate::content_library::library_diagnostics()
 }
 #[wasm_bindgen]
 pub fn player_data_command(operation: &str, region: &str, json: &str) -> Result<(), JsValue> {

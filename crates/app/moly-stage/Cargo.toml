@@ -18,6 +18,7 @@ moly-ui = { path = "../../game/moly-ui" }
 moly-world = { path = "../../game/moly-world" }
 moly-features = { path = "../../game/moly-features" }
 moly-fixture-edit = { path = "../../game/moly-fixture-edit" }
+moly-content-library = { path = "../../game/moly-content-library" }
 moly-assets = { path = "../../engine/moly-assets" }
 moly-config = { path = "../../base/moly-config" }
 moly-perf = { path = "../../engine/moly-perf" }

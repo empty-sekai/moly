@@ -8,7 +8,7 @@
 use super::*;
 #[path = "camera_snapshot.rs"]
 mod camera_snapshot;
-use crate::{
+use moly_features::{
     npc::WalkState, npc_objective::ObjectiveFace, player::PlayerControlled, site::GroundEpoch,
     site::SiteScenesReady, talk::TalkHold,
 };
@@ -76,14 +76,14 @@ pub struct IndependentSession {
     elapsed: f32,
     required_units: Vec<u32>,
     required_fixtures: Vec<i32>,
-    rows: Vec<crate::fixture::EditableFixture>,
+    rows: Vec<moly_features::fixture::EditableFixture>,
     temporary_actors: Vec<Entity>,
     parked_actors: Vec<ParkedActor>,
     original_player: Option<(Entity, Transform)>,
     original_actors: Vec<(Entity, Transform)>,
     original_cameras: Vec<(Entity, Transform)>,
     original_camera_state: Option<camera_snapshot::CameraSnapshot>,
-    original_appearance: crate::room_appearance::RoomAppearance,
+    original_appearance: moly_features::room_appearance::RoomAppearance,
     failure: Option<String>,
 }
 impl IndependentSession {
@@ -115,12 +115,12 @@ impl IndependentSession {
 }
 
 fn owners_idle(world: &World) -> bool {
-    !crate::npc_fixture_activity::preview::active(world)
-        && !world.contains_resource::<crate::player_talk::PlayerTalkSession>()
-        && !world.contains_resource::<crate::talk::ActiveTalk>()
+    !moly_features::npc_fixture_activity::preview::active(world)
+        && !world.contains_resource::<moly_features::player_talk::PlayerTalkSession>()
+        && !world.contains_resource::<moly_features::talk::ActiveTalk>()
         && !world.resource::<PlayerFixtureRuntime>().active()
-        && !crate::fixture_gimmick::session::blocks_replacement(
-            world.resource::<crate::fixture_gimmick::Gimmicks>(),
+        && !moly_features::fixture_gimmick::session::blocks_replacement(
+            world.resource::<moly_features::fixture_gimmick::Gimmicks>(),
         )
 }
 
@@ -161,7 +161,7 @@ fn observer_anchor(
     actor: Option<Vec3>,
     independent_center: Option<Vec3>,
 ) -> Option<Vec3> {
-    // A fixture-bound actor still has to approach its source StartLoc after
+    // A fixture-bound actor still has to approach its authored StartLoc after
     // this staging pass. Its temporary nearby pose is not the content center.
     fixture.or(actor).or(independent_center)
 }
@@ -320,7 +320,7 @@ fn requirements(
                 .ok_or_else(|| "这段故事的数据暂不可用".to_owned())?;
             let pairs = if let EntryKey::Talk(TalkBackend::Fixture, id) = choice.key {
                 world
-                    .get_resource::<crate::talk::TalkStore>()
+                    .get_resource::<moly_features::talk::TalkStore>()
                     .and_then(|store| store.row(id))
                     .ok_or_else(|| "这段演出的剧本还在准备".to_owned())?
                     .pairs
@@ -350,7 +350,7 @@ fn preview_rows(
     catalog: &LibraryCatalog,
     ids: &[i32],
     ticket: u64,
-) -> Result<Vec<crate::fixture::EditableFixture>, String> {
+) -> Result<Vec<moly_features::fixture::EditableFixture>, String> {
     let mut rows = Vec::new();
     for (index, id) in ids.iter().copied().enumerate() {
         let fixture = catalog
@@ -368,7 +368,7 @@ fn preview_rows(
         } else {
             0
         };
-        rows.push(crate::fixture::EditableFixture {
+        rows.push(moly_features::fixture::EditableFixture {
             uid: format!("library-{ticket}-{id}-{index}"),
             package: source.package.clone(),
             texture_id: 1,
@@ -384,7 +384,7 @@ fn preview_rows(
 
 fn plan_current(world: &mut World, choice: &PlaybackChoice) -> Result<Vec<ActorPose>, String> {
     if world
-        .get_resource::<crate::field_modes::EditSessionActive>()
+        .get_resource::<moly_features::field_modes::EditSessionActive>()
         .is_some_and(|editor| editor.is_active())
     {
         return Err("请先退出家具布局编辑，再体验内容".into());
@@ -581,7 +581,7 @@ fn apply_preview(world: &mut World, choice: &PlaybackChoice, actors: Vec<ActorPo
     };
     for actor in &preview.actors {
         if actor.npc {
-            crate::npc::stop_for_external_activity(world, actor.entity);
+            moly_features::npc::stop_for_external_activity(world, actor.entity);
         }
         world.entity_mut(actor.entity).insert(actor.after);
         if let Some(mut walk) = world.get_mut::<WalkState>(actor.entity) {
@@ -627,7 +627,7 @@ fn independent_generation_ready(
 
 fn start_independent(world: &mut World, choice: &PlaybackChoice) -> Result<(), String> {
     if world
-        .get_resource::<crate::field_modes::EditSessionActive>()
+        .get_resource::<moly_features::field_modes::EditSessionActive>()
         .is_some_and(|editor| editor.is_active())
     {
         return Err("请先退出家具布局编辑，再开始独立体验".into());
@@ -640,7 +640,7 @@ fn start_independent(world: &mut World, choice: &PlaybackChoice) -> Result<(), S
     // first settled generation will advance to 1.
     let (epoch, origin_settled) = independent_origin(world);
     let original_site = world
-        .resource::<crate::site::SiteSelection>()
+        .resource::<moly_features::site::SiteSelection>()
         .site_type()
         .to_owned();
     // Furniture and character actions belong in a clean courtyard, not an
@@ -683,7 +683,7 @@ fn start_independent(world: &mut World, choice: &PlaybackChoice) -> Result<(), S
     };
     camera_snapshot::CameraSnapshot::prepare_temporary(world);
     if original_site != destination {
-        world.insert_resource(crate::site::TemporarySiteChangeRequest(destination.clone()));
+        world.insert_resource(moly_features::site::TemporarySiteChangeRequest(destination.clone()));
     } else {
         info!(
             "[content-library] independent ticket={} reuses current site {} while it settles",
@@ -691,7 +691,7 @@ fn start_independent(world: &mut World, choice: &PlaybackChoice) -> Result<(), S
         );
     }
     let original_appearance = world
-        .resource::<crate::room_appearance::RoomAppearance>()
+        .resource::<moly_features::room_appearance::RoomAppearance>()
         .clone();
     let appearance = match choice.key {
         EntryKey::Fixture(id) => world
@@ -701,7 +701,7 @@ fn start_independent(world: &mut World, choice: &PlaybackChoice) -> Result<(), S
         _ => None,
     };
     if let Some(FixturePresentation::Surface { skin, wall, .. }) = appearance {
-        let mut current = world.resource_mut::<crate::room_appearance::RoomAppearance>();
+        let mut current = world.resource_mut::<moly_features::room_appearance::RoomAppearance>();
         if wall {
             current.wall = skin;
         } else {
@@ -745,7 +745,7 @@ fn park_background_actors(world: &mut World, required: &[u32]) -> Vec<ParkedActo
         .map(|(entity, _, visibility)| (entity, *visibility))
         .collect();
     for (entity, _) in &actors {
-        crate::npc::stop_for_external_activity(world, *entity);
+        moly_features::npc::stop_for_external_activity(world, *entity);
         world
             .entity_mut(*entity)
             .insert((TalkHold, Visibility::Hidden));
@@ -774,8 +774,8 @@ fn restore_original_poses(world: &mut World, session: &IndependentSession) {
             player.insert((
                 pose,
                 GlobalTransform::from(pose),
-                crate::player::PlayerInput::default(),
-                crate::npc::MotionPhase::Dwelling { remaining: None },
+                moly_features::player::PlayerInput::default(),
+                moly_features::npc::MotionPhase::Dwelling { remaining: None },
             ));
         }
     }
@@ -844,7 +844,7 @@ fn actors_ready(world: &mut World, required: &[u32]) -> bool {
             id == unit
                 && *ready
                 && world
-                    .get::<crate::character::MotionDriver>(*entity)
+                    .get::<moly_features::character::MotionDriver>(*entity)
                     .is_some()
         })
     })
@@ -858,7 +858,7 @@ fn reserve_required_actors(world: &mut World, required: &[u32]) {
         .map(|(entity, _)| entity)
         .collect();
     for entity in actors {
-        crate::npc::stop_for_external_activity(world, entity);
+        moly_features::npc::stop_for_external_activity(world, entity);
     }
 }
 
@@ -934,7 +934,7 @@ fn drive_independent(world: &mut World) {
                 restore_preview(world);
                 restore_background_actors(world, &session.parked_actors);
                 session.parked_actors = park_background_actors(world, &units);
-                match crate::npc::spawn_temporary_units(world, &units) {
+                match moly_features::npc::spawn_temporary_units(world, &units) {
                     Ok(actors) => session.temporary_actors.extend(actors),
                     Err(reason) => {
                         fail_independent(world, &mut session, reason);
@@ -982,7 +982,7 @@ fn drive_independent(world: &mut World) {
     match session.phase {
         IndependentPhase::SwitchingSite => {
             let selection_ready = world
-                .get_resource::<crate::site::SiteSelection>()
+                .get_resource::<moly_features::site::SiteSelection>()
                 .is_some_and(|selection| selection.site_type() == session.destination);
             let epoch = world.get_resource::<GroundEpoch>().map(|epoch| epoch.0);
             let site_ready = independent_generation_ready(
@@ -991,12 +991,12 @@ fn drive_independent(world: &mut World) {
                 session.departure_epoch,
                 epoch,
             ) && world.contains_resource::<SiteScenesReady>()
-                && world.contains_resource::<crate::site_material::SiteMaterialsSwapped>()
+                && world.contains_resource::<moly_features::site_material::SiteMaterialsSwapped>()
                 && world
-                    .get_resource::<crate::fixture::FixturePlacements>()
+                    .get_resource::<moly_features::fixture::FixturePlacements>()
                     .is_some_and(|layout| layout.site_type() == session.destination);
             if selection_ready && site_ready {
-                if let Err(reason) = crate::fixture::install_temporary_layout(world, &session.rows)
+                if let Err(reason) = moly_features::fixture::install_temporary_layout(world, &session.rows)
                 {
                     fail_independent(world, &mut session, reason);
                 } else {
@@ -1013,13 +1013,13 @@ fn drive_independent(world: &mut World) {
             }
         }
         IndependentPhase::LoadingContent => {
-            if let Some(failure) = world.get_resource::<crate::fixture::FixtureLoadFailure>() {
+            if let Some(failure) = world.get_resource::<moly_features::fixture::FixtureLoadFailure>() {
                 let reason = failure.0.clone();
                 fail_independent(world, &mut session, reason);
                 world.insert_resource(session);
                 return;
             }
-            let controller_ready = match crate::fixture_gimmick::catalog_stream::ready_for(
+            let controller_ready = match moly_features::fixture_gimmick::catalog_stream::ready_for(
                 world,
                 &session.required_fixtures,
             ) {
@@ -1031,8 +1031,8 @@ fn drive_independent(world: &mut World) {
                 }
             };
             let epoch = world.get_resource::<GroundEpoch>().map(|epoch| epoch.0);
-            let room_status = world.resource::<crate::room_appearance::RoomAppearanceState>();
-            if world.resource::<crate::site::SiteSelection>().is_room() {
+            let room_status = world.resource::<moly_features::room_appearance::RoomAppearanceState>();
+            if world.resource::<moly_features::site::SiteSelection>().is_room() {
                 if let Some(error) = &room_status.error {
                     let reason = error.clone();
                     fail_independent(world, &mut session, reason);
@@ -1040,24 +1040,24 @@ fn drive_independent(world: &mut World) {
                     return;
                 }
             }
-            let room_ready = !world.resource::<crate::site::SiteSelection>().is_room()
+            let room_ready = !world.resource::<moly_features::site::SiteSelection>().is_room()
                 || world
-                    .resource::<crate::room_appearance::RoomAppearanceState>()
+                    .resource::<moly_features::room_appearance::RoomAppearanceState>()
                     .ready;
             let scene_ready = room_ready
-                && world.contains_resource::<crate::site_material::SiteMaterialsSwapped>()
+                && world.contains_resource::<moly_features::site_material::SiteMaterialsSwapped>()
                 && epoch.is_some_and(|epoch| {
-                    world.contains_resource::<crate::fixture::FixtureScenesReady>()
+                    world.contains_resource::<moly_features::fixture::FixtureScenesReady>()
                         && world
-                            .contains_resource::<crate::fixture_material::FixtureMaterialsSwapped>()
+                            .contains_resource::<moly_features::fixture_material::FixtureMaterialsSwapped>()
                         && world.get_resource::<ObjectiveFace>().is_some_and(|face| {
                             face.is_fresh(epoch)
                                 && world
-                                    .get_resource::<crate::walk_face::WalkFace>()
+                                    .get_resource::<moly_features::walk_face::WalkFace>()
                                     .is_some_and(|navigation| {
                                         navigation.layout_revision()
                                             == world
-                                                .resource::<crate::fixture::FixtureLayoutRevision>()
+                                                .resource::<moly_features::fixture::FixtureLayoutRevision>()
                                                 .0
                                             && face.navigation_generation()
                                                 == navigation.generation()
@@ -1066,7 +1066,7 @@ fn drive_independent(world: &mut World) {
                 });
             if scene_ready {
                 if session.temporary_actors.is_empty() {
-                    match crate::npc::spawn_temporary_units(world, &session.required_units) {
+                    match moly_features::npc::spawn_temporary_units(world, &session.required_units) {
                         Ok(actors) => session.temporary_actors = actors,
                         Err(reason) => fail_independent(world, &mut session, reason),
                     }
@@ -1177,20 +1177,20 @@ fn drive_independent(world: &mut World) {
                 restore_preview(world);
                 restore_background_actors(world, &session.parked_actors);
                 session.parked_actors.clear();
-                crate::npc::remove_temporary_units(world, &session.temporary_actors);
+                moly_features::npc::remove_temporary_units(world, &session.temporary_actors);
                 session.temporary_actors.clear();
                 // Withdraw an unconsumed preview before either rollback path.
                 // Otherwise cancellation before read_switch could switch later.
-                world.remove_resource::<crate::site::TemporarySiteChangeRequest>();
+                world.remove_resource::<moly_features::site::TemporarySiteChangeRequest>();
                 world.insert_resource(session.original_appearance.clone());
                 let never_left = world
-                    .get_resource::<crate::site::SiteSelection>()
+                    .get_resource::<moly_features::site::SiteSelection>()
                     .is_some_and(|selection| selection.site_type() == session.original_site)
                     && world
                         .get_resource::<GroundEpoch>()
                         .is_some_and(|epoch| epoch.0 == session.departure_epoch)
-                    && !world.contains_resource::<crate::site::TemporarySiteActive>()
-                    && !world.contains_resource::<crate::fixture::TemporaryFixtureLayout>();
+                    && !world.contains_resource::<moly_features::site::TemporarySiteActive>()
+                    && !world.contains_resource::<moly_features::fixture::TemporaryFixtureLayout>();
                 if never_left {
                     restore_original_poses(world, &session);
                     library_mut(world, |state| {
@@ -1209,8 +1209,8 @@ fn drive_independent(world: &mut World) {
                     .get_resource::<GroundEpoch>()
                     .map(|epoch| epoch.0)
                     .unwrap_or(0);
-                world.remove_resource::<crate::site::TemporarySiteChangeRequest>();
-                world.insert_resource(crate::site::SiteChangeRequest(
+                world.remove_resource::<moly_features::site::TemporarySiteChangeRequest>();
+                world.insert_resource(moly_features::site::SiteChangeRequest(
                     session.original_site.clone(),
                 ));
                 session.phase = IndependentPhase::Returning;
@@ -1224,7 +1224,7 @@ fn drive_independent(world: &mut World) {
         IndependentPhase::Returning => {
             let epoch = world.get_resource::<GroundEpoch>().map(|epoch| epoch.0);
             let restored = world
-                .get_resource::<crate::site::SiteSelection>()
+                .get_resource::<moly_features::site::SiteSelection>()
                 .is_some_and(|selection| selection.site_type() == session.original_site)
                 && epoch.is_some_and(|epoch| epoch > session.return_epoch)
                 && world.contains_resource::<SiteScenesReady>()
@@ -1576,8 +1576,8 @@ mod lifecycle_regressions {
         let mut world = World::new();
         world.insert_resource(SiteScenesReady);
         world.insert_resource(GroundEpoch(2));
-        assert!(!world.contains_resource::<crate::site::SiteReady>());
-        assert!(!world.contains_resource::<crate::inactive_nodes::SiteSettled>());
+        assert!(!world.contains_resource::<moly_features::site::SiteReady>());
+        assert!(!world.contains_resource::<moly_features::inactive_nodes::SiteSettled>());
         assert!(world.contains_resource::<SiteScenesReady>());
         assert_eq!(world.resource::<GroundEpoch>().0, 2);
     }

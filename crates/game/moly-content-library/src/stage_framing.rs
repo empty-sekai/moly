@@ -9,14 +9,14 @@ fn distance_for(radius: f32, vertical_fov: f32, aspect: f32, minimum: f32, maxim
     let half_vertical = vertical_fov.to_radians() * 0.5;
     let half_horizontal = (half_vertical.tan() * aspect.max(0.25)).atan();
     let half_angle = half_vertical.min(half_horizontal).max(0.05);
-    // A small composition margin avoids touching canvas edges; never expand
-    // source camera limits or replace source-scale models to make them fit.
+    // A small composition margin avoids touching canvas edges; never widen
+    // the camera limits or rescale models to make them fit.
     (radius * 1.08 / half_angle.sin()).clamp(minimum, maximum)
 }
 
 pub(super) fn prepare(world: &mut World, choice: &PlaybackChoice, player_pose: Transform) {
     if choice.mode != ExperienceMode::Independent
-        || !world.contains_resource::<crate::browser_stage::BrowserStage>()
+        || !world.contains_resource::<moly_features::browser_stage::BrowserStage>()
     {
         return;
     }
@@ -68,7 +68,7 @@ pub(super) fn prepare(world: &mut World, choice: &PlaybackChoice, player_pose: T
         delta.z.abs() * 0.5 + dimensions.z * 0.5 + 0.12,
     )
     .length();
-    let Some(mut camera) = world.get_resource_mut::<crate::camera::FieldCameraModel>() else {
+    let Some(mut camera) = world.get_resource_mut::<moly_features::camera::FieldCameraModel>() else {
         return;
     };
     let distance = distance_for(

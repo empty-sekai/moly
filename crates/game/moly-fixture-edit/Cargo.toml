@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 moly-config = { path = "../../base/moly-config" }
 moly-features = { path = "../moly-features" }
+moly-content-library = { path = "../moly-content-library" }
 moly-protocol = { path = "../../net/moly-protocol" }
 moly-link = { path = "../../net/moly-link" }
 moly-layout = { path = "../../net/moly-layout" }

@@ -1,14 +1,14 @@
 //! Admission and transport state. Script execution remains in its original owner.
 use super::*;
-use crate::npc_fixture_activity::preview::{PreviewPhase, PreviewRecord};
-use crate::player_talk::{PlayerTalkLedger, PlayerTalkOutcome};
+use moly_features::npc_fixture_activity::preview::{PreviewPhase, PreviewRecord};
+use moly_features::player_talk::{PlayerTalkLedger, PlayerTalkOutcome};
 
 pub fn dispatch(
     mut commands: Commands,
     mut state: LibraryMut,
     catalog: Res<LibraryCatalog>,
-    player_session: Option<Res<crate::player_talk::PlayerTalkSession>>,
-    pair_session: Option<Res<crate::talk::ActiveTalk>>,
+    player_session: Option<Res<moly_features::player_talk::PlayerTalkSession>>,
+    pair_session: Option<Res<moly_features::talk::ActiveTalk>>,
     mut runtime: ResMut<PlayerFixtureRuntime>,
     npcs: Query<(Entity, &CharacterUnitId, &NpcActions)>,
     instances: Query<&FixtureActivityIdentity>,
@@ -17,8 +17,8 @@ pub fn dispatch(
     ledger: Option<ResMut<PlayerTalkLedger>>,
     preview: Option<Res<staging::ScenePreview>>,
     staged: Query<(&Transform, &GlobalTransform)>,
-    epoch: Option<Res<crate::site::GroundEpoch>>,
-    balloon_art: Option<Res<crate::balloon::BalloonArt>>,
+    epoch: Option<Res<moly_features::site::GroundEpoch>>,
+    balloon_art: Option<Res<moly_features::balloon::BalloonArt>>,
 ) {
     if state.cleanup_frames != 0
         || player_session.is_some()
@@ -85,7 +85,7 @@ pub fn dispatch(
             };
             let ticket = choice.ticket;
             commands.queue(move |world: &mut World| {
-                crate::npc_fixture_activity::preview::start(world, key, target, ticket);
+                moly_features::npc_fixture_activity::preview::start(world, key, target, ticket);
             });
         }
         EntryKey::Talk(_, _) => {
@@ -125,7 +125,7 @@ pub fn dispatch(
                 }
                 let ticket = choice.ticket;
                 commands.queue(move |world: &mut World| {
-                    crate::balloon::show_talk_preview(world, entity, unit, &tweet, ticket);
+                    moly_features::balloon::show_talk_preview(world, entity, unit, &tweet, ticket);
                 });
                 state.active = Some(ActiveChoice {
                     title: catalog.title(choice.key),
@@ -233,20 +233,20 @@ pub fn dispatch(
 pub fn observe_start(
     time: Res<Time>,
     mut state: LibraryMut,
-    player_session: Option<Res<crate::player_talk::PlayerTalkSession>>,
-    pair_session: Option<Res<crate::talk::ActiveTalk>>,
+    player_session: Option<Res<moly_features::player_talk::PlayerTalkSession>>,
+    pair_session: Option<Res<moly_features::talk::ActiveTalk>>,
     runtime: ResMut<PlayerFixtureRuntime>,
     ledger: Option<Res<PlayerTalkLedger>>,
     mut cancel: MessageWriter<TalkCancelRequest>,
     mut fixtures: MessageWriter<PlayerFixtureRequest>,
-    gimmicks: Res<crate::fixture_gimmick::Gimmicks>,
+    gimmicks: Res<moly_features::fixture_gimmick::Gimmicks>,
     activity: Option<Res<PreviewRecord>>,
 ) {
     let effect_running = state
         .active
         .as_ref()
         .and_then(|active| active.effect_owner)
-        .is_some_and(|owner| crate::fixture_gimmick::session::active(&gimmicks, owner));
+        .is_some_and(|owner| moly_features::fixture_gimmick::session::active(&gimmicks, owner));
     let busy = player_session.is_some()
         || pair_session.is_some()
         || runtime.active()
@@ -313,7 +313,7 @@ pub fn observe_start(
     };
     if !active.started {
         if matches!(active.choice.key, EntryKey::Fixture(_)) && !running {
-            use crate::player_fixture_action::PlayerFixtureOutcome;
+            use moly_features::player_fixture_action::PlayerFixtureOutcome;
             let reason = match &runtime.last_outcome {
                 Some(PlayerFixtureOutcome::GimmickNotPrepared { target, reason })
                     if active.choice.target.as_ref() == Some(target) =>
@@ -387,7 +387,7 @@ pub fn observe_start(
         // failed to load, or the runner refused to start it) reports why,
         // not a finished performance.
         if matches!(active.choice.key, EntryKey::Fixture(_)) {
-            use crate::player_fixture_action::PlayerFixtureOutcome;
+            use moly_features::player_fixture_action::PlayerFixtureOutcome;
             let unplayed = match &runtime.last_outcome {
                 Some(PlayerFixtureOutcome::LoadFailed { target, error })
                     if active.choice.target.as_ref() == Some(target) =>
@@ -592,7 +592,7 @@ pub fn reap_preview_owners(world: &mut World) {
                 .map(|active| active.choice.ticket)
         }
     };
-    crate::npc_fixture_activity::preview::reap(world, retained);
+    moly_features::npc_fixture_activity::preview::reap(world, retained);
     let current = world
         .resource::<ContentLibrary>()
         .active
@@ -604,7 +604,7 @@ pub fn reap_preview_owners(world: &mut World) {
         .filter(|owner| Some(*owner) != current)
         .collect();
     for owner in retired {
-        crate::fixture_gimmick::session::finish_owner(world, owner);
+        moly_features::fixture_gimmick::session::finish_owner(world, owner);
         if let Ok(entity) = world.get_entity_mut(owner) {
             entity.despawn();
         }

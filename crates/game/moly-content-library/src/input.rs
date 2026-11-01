@@ -27,15 +27,17 @@ pub struct LibraryInput<'w, 's> {
     windows: Query<'w, 's, &'static mut Window, With<PrimaryWindow>>,
     cancel_talk: MessageWriter<'w, TalkCancelRequest>,
     fixtures: MessageWriter<'w, PlayerFixtureRequest>,
-    pub(super) settings: MessageWriter<'w, crate::game_settings::SettingsPanelRequest>,
-    pub(super) audio_gate: ResMut<'w, crate::audio::AudioGate>,
-    /// 宿主天气钮的写入端：改服务端面板的当前日程行，面板再写出档位请求。
-    pub(super) weather: MessageWriter<'w, crate::server_panel::PhenomenaScheduleEdit>,
-    /// 宿主地点选择的写入端：换站请求交给站点域的同一条拆站重装链。
+    pub(super) settings: MessageWriter<'w, moly_features::game_settings::SettingsPanelRequest>,
+    pub(super) audio_gate: ResMut<'w, moly_features::audio::AudioGate>,
+    /// Writer for the host's weather dial: it edits the server panel's current
+    /// schedule row, and the panel then writes the weather request.
+    pub(super) weather: MessageWriter<'w, moly_features::server_panel::PhenomenaScheduleEdit>,
+    /// Writer for the host's site choice: the site change request takes the
+    /// site's usual teardown and reload path.
     pub(super) commands: Commands<'w, 's>,
     paste: Res<'w, PasteInbox>,
     /// GameState SiteMove: site commands wait for the move to end.
-    pub(super) site_move: Option<Res<'w, crate::site_move::SiteMoveActive>>,
+    pub(super) site_move: Option<Res<'w, moly_features::site_move::SiteMoveActive>>,
 }
 
 pub fn input(
@@ -93,7 +95,7 @@ pub fn input(
         keyboard.clear();
         actions.clear();
     } else if state.fixture_dialog.is_some() {
-        // The source furniture dialog is modal. Its buttons stay in `actions`,
+        // The furniture dialog is modal. Its buttons stay in `actions`,
         // while catalogue shortcuts and text entry behind it are suppressed.
         keyboard.clear();
     }

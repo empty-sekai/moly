@@ -1,6 +1,6 @@
 //! Restore all camera state after free exploration in a temporary scene.
 //! Restoring Transform alone is overwritten by the next follow-avatar frame.
-use crate::camera::{
+use moly_features::camera::{
     CameraTween, FieldCameraModel, FieldCameraState, FpsViewMemory, NormalCameraMemory,
 };
 use bevy::prelude::*;
@@ -28,7 +28,7 @@ impl CameraSnapshot {
                 .map(|(entity, projection)| (entity, projection.clone()))
                 .collect(),
             visibility: world
-                .query_filtered::<(Entity, &Visibility), With<crate::character::AvatarRoot>>()
+                .query_filtered::<(Entity, &Visibility), With<moly_features::character::AvatarRoot>>()
                 .iter(world)
                 .map(|(entity, visibility)| (entity, *visibility))
                 .collect(),
@@ -38,11 +38,11 @@ impl CameraSnapshot {
     /// when the saved original scene was first person. The snapshot retains
     /// the original lens, FPS memory and avatar visibility for return.
     pub(super) fn prepare_temporary(world: &mut World) {
-        world.insert_resource(FieldCameraState(crate::camera::CameraStateType::Normal));
+        world.insert_resource(FieldCameraState(moly_features::camera::CameraStateType::Normal));
         world.remove_resource::<CameraTween>();
         world.remove_resource::<NormalCameraMemory>();
         let fov = world
-            .get_resource::<crate::camera::CameraSetting>()
+            .get_resource::<moly_features::camera::CameraSetting>()
             .map(|setting| setting.fov.to_radians());
         if let Some(fov) = fov {
             for mut projection in world
@@ -55,7 +55,7 @@ impl CameraSnapshot {
             }
         }
         for mut visibility in world
-            .query_filtered::<&mut Visibility, With<crate::character::AvatarRoot>>()
+            .query_filtered::<&mut Visibility, With<moly_features::character::AvatarRoot>>()
             .iter_mut(world)
         {
             visibility.set_if_neq(Visibility::Visible);
@@ -94,13 +94,13 @@ mod tests {
     #[test]
     fn return_restores_first_person_state_projection_and_player_visibility() {
         let mut world = World::new();
-        world.insert_resource(FieldCameraState(crate::camera::CameraStateType::Normal));
+        world.insert_resource(FieldCameraState(moly_features::camera::CameraStateType::Normal));
         world.insert_resource(FpsViewMemory {
             yaw: 12.,
             pitch: 3.,
         });
         let player = world
-            .spawn((crate::character::AvatarRoot, Visibility::Visible))
+            .spawn((moly_features::character::AvatarRoot, Visibility::Visible))
             .id();
         let camera = world
             .spawn((
@@ -109,7 +109,7 @@ mod tests {
             ))
             .id();
         let snapshot = CameraSnapshot::capture(&mut world);
-        world.insert_resource(FieldCameraState(crate::camera::CameraStateType::Fps));
+        world.insert_resource(FieldCameraState(moly_features::camera::CameraStateType::Fps));
         world.insert_resource(FpsViewMemory {
             yaw: 99.,
             pitch: 40.,
@@ -124,7 +124,7 @@ mod tests {
         snapshot.restore(&mut world);
         assert_eq!(
             world.resource::<FieldCameraState>().0,
-            crate::camera::CameraStateType::Normal
+            moly_features::camera::CameraStateType::Normal
         );
         assert_eq!(world.resource::<FpsViewMemory>().yaw, 12.);
         assert_eq!(
@@ -139,15 +139,15 @@ mod tests {
     #[test]
     fn temporary_scene_normalizes_fps_without_losing_saved_first_person_return() {
         let mut world = World::new();
-        world.insert_resource(FieldCameraState(crate::camera::CameraStateType::Fps));
+        world.insert_resource(FieldCameraState(moly_features::camera::CameraStateType::Fps));
         let player = world
-            .spawn((crate::character::AvatarRoot, Visibility::Hidden))
+            .spawn((moly_features::character::AvatarRoot, Visibility::Hidden))
             .id();
         let snapshot = CameraSnapshot::capture(&mut world);
         CameraSnapshot::prepare_temporary(&mut world);
         assert_eq!(
             world.resource::<FieldCameraState>().0,
-            crate::camera::CameraStateType::Normal
+            moly_features::camera::CameraStateType::Normal
         );
         assert_eq!(
             *world.get::<Visibility>(player).unwrap(),
@@ -156,7 +156,7 @@ mod tests {
         snapshot.restore(&mut world);
         assert_eq!(
             world.resource::<FieldCameraState>().0,
-            crate::camera::CameraStateType::Fps
+            moly_features::camera::CameraStateType::Fps
         );
         assert_eq!(
             *world.get::<Visibility>(player).unwrap(),

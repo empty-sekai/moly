@@ -3,8 +3,19 @@
 //! Entries retain authored backend/identity and full transcripts. Playback
 //! re-enters the existing conversation and placed-fixture owners; the library
 //! coordinates admission, cancellation and a small transport, not a new player.
+//!
+//! Boundaries: the crate reads the hub (`moly_features`) for the field, the
+//! characters and their conversations, the fixtures, the camera, the weather
+//! and the site. It publishes its input channels in
+//! [`InputClaims`] under [`CONTENT_LIBRARY`] and its field gates in
+//! `moly_features::field_modes::LibraryMode`; the hub does not name the
+//! crate. The game and stage schedules install it, the fixture editor's info
+//! button calls [`ContentLibrary::inspect_fixture`], and the developer tools
+//! and the browser stage reach it through the JSON bridge
+//! ([`bridge::library_command`], [`bridge::library_snapshot`],
+//! [`bridge::library_catalog`]).
 
-use crate::{
+use moly_features::{
     input_claims,
     fixture_activity_state::{FixtureActivityIdentity, FixtureTarget},
     npc::{CharacterUnitId, NpcActions},
@@ -99,7 +110,7 @@ pub enum ExperienceMode {
 pub enum EntryKey {
     Talk(TalkBackend, i32),
     Fixture(i32),
-    Activity(crate::fixture_activity_data::ActivityKey),
+    Activity(moly_features::fixture_activity_data::ActivityKey),
 }
 #[derive(Clone, Debug)]
 struct DialogueLine {
@@ -505,7 +516,7 @@ impl ContentLibrary {
             self.narrow_detail = true;
             self.external_open = true;
         } else {
-            // The source editor's info button opens FixtureDescriptionDialog,
+            // The editor's info button opens FixtureDescriptionDialog,
             // not the full content browser and not ScreenLayerMysekaiInfo.
             self.fixture_dialog = Some(fixture_id);
             self.fixture_dialog_tab = FixtureDialogTab::Details;
@@ -750,22 +761,22 @@ pub fn install(app: &mut App) {
     app.init_resource::<ContentLibrary>()
         .init_resource::<InputClaims>()
         .add_systems(Last, check_published_channels)
-        .init_resource::<crate::field_modes::LibraryMode>()
-        .insert_resource(crate::field_modes::FixtureTalkObserverPort(
+        .init_resource::<moly_features::field_modes::LibraryMode>()
+        .insert_resource(moly_features::field_modes::FixtureTalkObserverPort(
             stage_fixture_talk_observer,
         ))
         .init_resource::<LibraryCatalog>()
         .init_resource::<LibraryContext>()
         .add_message::<TalkCancelRequest>();
 }
-/// Publishes the library's gates on the field ([`crate::field_modes::LibraryMode`]).
+/// Publishes the library's gates on the field ([`moly_features::field_modes::LibraryMode`]).
 /// The world and camera gates include the host's capture.
 pub fn publish_mode(
     library: Res<ContentLibrary>,
     claims: Res<InputClaims>,
-    mut mode: ResMut<crate::field_modes::LibraryMode>,
+    mut mode: ResMut<moly_features::field_modes::LibraryMode>,
 ) {
-    let next = crate::field_modes::LibraryMode {
+    let next = moly_features::field_modes::LibraryMode {
         reads_availability: library.reads_availability(),
         blocks_world_input: library.blocks_world_input()
             || claims.holds_channel(HOST_INPUT, InputChannel::World),
@@ -807,7 +818,7 @@ fn excerpt(value: &str, limit: usize) -> String {
     }
 }
 fn plain_text(value: &str) -> String {
-    // Display source prose, not Unity/TMP formatting directives.
+    // Display the authored prose without Unity/TMP formatting directives.
     let mut tag = false;
     value
         .chars()
@@ -825,9 +836,9 @@ fn plain_text(value: &str) -> String {
         .collect()
 }
 fn human_preparation_error(
-    error: &crate::player_fixture_action::PlayerFixturePreparationError,
+    error: &moly_features::player_fixture_action::PlayerFixturePreparationError,
 ) -> String {
-    use crate::player_fixture_action::PlayerFixturePreparationError as Error;
+    use moly_features::player_fixture_action::PlayerFixturePreparationError as Error;
     match error {
         Error::Missing(reason)
             if reason.contains("source SD action mapping")
@@ -886,7 +897,7 @@ mod tests {
     }
     #[test]
     fn every_playback_phase_allows_only_camera_inspection() {
-        use crate::fixture_activity_data::{ActivityKey, ActivityOrigin};
+        use moly_features::fixture_activity_data::{ActivityKey, ActivityOrigin};
         for key in [
             EntryKey::Fixture(1),
             EntryKey::Talk(TalkBackend::Fixture, 1),

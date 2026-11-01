@@ -496,7 +496,7 @@ fn parse_thumbnails(value: &Value, catalog: &mut LibraryCatalog) {
 pub fn build_talk_catalog(
     store: Option<Res<PlayerTalkStore>>,
     fixtures: Option<Res<TalkStore>>,
-    activities: Option<Res<crate::fixture_activity_data::FixtureActivityTables>>,
+    activities: Option<Res<moly_features::fixture_activity_data::FixtureActivityTables>>,
     mut catalog: ResMut<LibraryCatalog>,
 ) {
     if catalog.talks_ready || !catalog.source_ready {
@@ -544,7 +544,7 @@ pub fn build_talk_catalog(
                 TalkContent {
                     master_id: row.talk_id,
                     backend: TalkBackend::General,
-                    is_general: Some(crate::player_talk::is_general_row(row)),
+                    is_general: Some(moly_features::player_talk::is_general_row(row)),
                 },
                 vec![*unit],
                 fixture_ids,

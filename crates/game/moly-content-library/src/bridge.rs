@@ -9,7 +9,7 @@ use super::*;
 mod export;
 #[path = "bridge_presentation.rs"]
 mod presentation;
-use crate::fixture_activity_data::{ActivityKey, ActivityOrigin};
+use moly_features::fixture_activity_data::{ActivityKey, ActivityOrigin};
 pub use export::library_catalog;
 use serde_json::{json, Value};
 use std::sync::{
@@ -236,8 +236,9 @@ fn parse_command(input: &str) -> Result<BrowserCommand, String> {
                 .and_then(Value::as_bool)
                 .ok_or("输入焦点值不正确")?,
         ),
-        // The target档位, never an index: the host picks from the catalogue the
-        // runtime published, so a wrong ID can only come from a stale page.
+        // The target weather by ID, never an index: the host picks from the
+        // catalogue the runtime published, so a wrong ID can only come from a
+        // stale page.
         "weather" => BrowserCommand::Weather(
             value
                 .get("value")
@@ -250,7 +251,7 @@ fn parse_command(input: &str) -> Result<BrowserCommand, String> {
         // checks the loaded master row before it tears anything down.
         "site" => {
             let site = string(&value, "value")?;
-            if !crate::site::is_supported(site) {
+            if !moly_features::site::is_supported(site) {
                 return Err("未知的地点".into());
             }
             BrowserCommand::Site(site.to_owned())
@@ -343,7 +344,7 @@ pub(super) fn apply_command(
         }
         BrowserCommand::Settings => {
             io.settings
-                .write(crate::game_settings::SettingsPanelRequest::Toggle);
+                .write(moly_features::game_settings::SettingsPanelRequest::Toggle);
         }
         BrowserCommand::Sound(enabled) => {
             io.audio_gate.enabled = enabled;
@@ -354,7 +355,7 @@ pub(super) fn apply_command(
         // native key. A stale ID is refused there with a log line.
         BrowserCommand::Weather(id) => {
             io.weather
-                .write(crate::server_panel::PhenomenaScheduleEdit::Set(id));
+                .write(moly_features::server_panel::PhenomenaScheduleEdit::Set(id));
         }
         // A site switch changes the scene an experience would own, so it waits
         // until that experience is stopped and restored. The ordinary switch
@@ -369,7 +370,7 @@ pub(super) fn apply_command(
                 return;
             }
             io.commands
-                .insert_resource(crate::site::SiteChangeRequest(site));
+                .insert_resource(moly_features::site::SiteChangeRequest(site));
         }
         BrowserCommand::Focus(value) => {
             state.capture_host_input(value);
@@ -739,29 +740,29 @@ pub fn publish(
     world: Res<LibraryContext>,
     mut previous: Local<String>,
     mut scene_unmet: Local<Option<&'static str>>,
-    site_ready: Option<Res<crate::site::SiteScenesReady>>,
-    site_materials: Option<Res<crate::site_material::SiteMaterialsSwapped>>,
+    site_ready: Option<Res<moly_features::site::SiteScenesReady>>,
+    site_materials: Option<Res<moly_features::site_material::SiteMaterialsSwapped>>,
     player_visual: Query<
         (),
         (
-            With<crate::player::PlayerControlled>,
-            With<crate::player_avatar::AvatarDriver>,
+            With<moly_features::player::PlayerControlled>,
+            With<moly_features::player_avatar::AvatarDriver>,
         ),
     >,
-    text_art: Option<Res<crate::balloon::BalloonArt>>,
-    layouts: Option<Res<crate::ui_layout::UiLayouts>>,
+    text_art: Option<Res<moly_features::balloon::BalloonArt>>,
+    layouts: Option<Res<moly_features::ui_layout::UiLayouts>>,
     (phenomenon, catalogue, weather_transition): (
-        Option<Res<crate::weather::CurrentPhenomenonId>>,
-        Option<Res<crate::weather::PhenomenonCatalogue>>,
-        Option<Res<crate::weather_transition::WeatherTransition>>,
+        Option<Res<moly_features::weather::CurrentPhenomenonId>>,
+        Option<Res<moly_features::weather::PhenomenonCatalogue>>,
+        Option<Res<moly_features::weather_transition::WeatherTransition>>,
     ),
     (sites, selection, entry_ready): (
-        Option<Res<crate::site::Sites>>,
-        Option<Res<crate::site::SiteSelection>>,
-        Option<ResMut<crate::entry::StageSceneReady>>,
+        Option<Res<moly_features::site::Sites>>,
+        Option<Res<moly_features::site::SiteSelection>>,
+        Option<ResMut<moly_features::entry::StageSceneReady>>,
     ),
     server: Res<AssetServer>,
-    mut audio_startup: Option<ResMut<crate::audio_startup::BrowserAudioStartup>>,
+    mut audio_startup: Option<ResMut<moly_features::audio_startup::BrowserAudioStartup>>,
     preview: Option<Res<staging::ScenePreview>>,
     staged: Query<(&Transform, &GlobalTransform)>,
 ) {
@@ -807,8 +808,9 @@ pub fn publish(
             mirror.0 = scene_ready;
         }
     }
-    // 天气档位进戳：宿主画的那颗钮读同一份投影，切档必须重发一页，否则
-    // 「档位变了但页面没变」会一直停在旧值上。
+    // The weather is part of the stamp: the host's dial reads the same
+    // projection, so a weather change has to publish a new page, or the
+    // dial would keep showing the previous weather.
     let weather_id = phenomenon
         .as_deref()
         .map(|phenomenon| phenomenon.0)
@@ -843,8 +845,8 @@ pub fn publish(
         fixture_ids.sort_unstable();
         snapshot["scene"] =
             json!({"ready":scene_ready,"actorUnits":actors,"fixtureIds":fixture_ids});
-        // The weather dial rides the same projection as the catalogue: current
-        // 档 plus the ordered list the runtime actually resolved. An unresolved
+        // The weather dial rides the same projection as the catalogue: the
+        // current weather plus the ordered list the runtime resolved. An unresolved
         // catalogue omits the block instead of publishing an empty dial, so the
         // host never renders a control with nothing to choose.
         if let Some(catalogue) = catalogue.as_deref().filter(|c| !c.0.is_empty()) {
@@ -897,7 +899,7 @@ pub fn gate_input(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::input_claims::{InputChannel, InputClaims, CONTENT_LIBRARY};
+    use moly_features::input_claims::{InputChannel, InputClaims, CONTENT_LIBRARY};
 
     /// The claims a reader sees with `state` published: the library's own
     /// channels, and the host capturing input when `captured`.
@@ -1040,15 +1042,15 @@ mod tests {
         world.init_resource::<Messages<MouseWheel>>();
         world.init_resource::<Messages<TalkCancelRequest>>();
         world.init_resource::<Messages<PlayerFixtureRequest>>();
-        world.init_resource::<Messages<crate::game_settings::SettingsPanelRequest>>();
-        world.init_resource::<Messages<crate::server_panel::PhenomenaScheduleEdit>>();
+        world.init_resource::<Messages<moly_features::game_settings::SettingsPanelRequest>>();
+        world.init_resource::<Messages<moly_features::server_panel::PhenomenaScheduleEdit>>();
         world.init_resource::<input::PasteInbox>();
         // The audio gate is a `ResMut` of `LibraryInput`; a missing resource
         // makes the system parameters panic. It became part of `LibraryInput`
         // with the sound switch, and this minimal World must install it too,
         // otherwise four bridge tests fail with "resource does not exist",
         // which says nothing about the command semantics under test.
-        world.init_resource::<crate::audio::AudioGate>();
+        world.init_resource::<moly_features::audio::AudioGate>();
         world.init_resource::<InputClaims>();
         world.insert_resource(std::mem::take(state));
         let mut system = SystemState::<(LibraryMut, input::LibraryInput)>::new(&mut world);
@@ -1194,7 +1196,7 @@ mod tests {
     }
     #[test]
     fn furniture_and_activity_details_keep_artwork_and_original_bubble() {
-        use crate::fixture_activity_data::{ActivitySpec, ActivityTimeline};
+        use moly_features::fixture_activity_data::{ActivitySpec, ActivityTimeline};
         let mut catalog = LibraryCatalog::default();
         catalog.fixtures.push(LibraryFixture {
             id: 837,

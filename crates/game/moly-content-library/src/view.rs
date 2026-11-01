@@ -1,5 +1,6 @@
 //! Retained, responsive chrome. Only a visible page and the selected transcript
 //! are materialized; scrolling never reconstructs the whole catalog.
+use moly_core::set_if_neq;
 use super::*;
 use bevy::text::FontSize;
 const INK: Color = Color::srgb(0.91, 0.95, 0.98);
@@ -134,9 +135,9 @@ fn surface(c: &mut Commands, parent: Entity, node: Node, region: Region) -> Enti
 }
 pub fn setup(
     mut c: Commands,
-    ui_font: Res<crate::ui_font::UiFontAsset>,
+    ui_font: Res<moly_features::ui_font::UiFontAsset>,
     state: Res<ContentLibrary>,
-    hud: Query<Entity, With<crate::balloon::HudCamera>>,
+    hud: Query<Entity, With<moly_features::balloon::HudCamera>>,
 ) {
     if state.external_ui {
         // refresh retains the same SystemParam contract, but the web shell
@@ -925,9 +926,9 @@ fn populate_fixture_dialog(
             if !fixture.description.is_empty() && fixture.description != fixture.name {
                 text(c, body, font, &fixture.description, 15., INK);
             }
-            // The source page also has hashtags, recycle state, layout cost and
-            // bonus panes. The current runtime master slice does not contain all
-            // of those source fields, so they stay absent rather than fabricated.
+            // FixtureDescriptionDialog also has hashtag, recycle state, layout
+            // cost and bonus panes. The runtime master slice does not carry all
+            // of those fields, so the panes stay absent rather than fabricated.
         }
         FixtureDialogTab::Reactions => {
             let groups = catalog.fixture_reactions(fixture_id);
