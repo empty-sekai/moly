@@ -1,7 +1,7 @@
 # moly-launcher
 
-The native entry point. The launcher downloads and verifies a resource version, then starts the
-server and the game. It also installs program updates.
+The native entry point. The launcher downloads and verifies a resource version from an address the
+user enters, then starts the server and the game. It also installs program updates.
 
 ## Resource versions
 

@@ -58,7 +58,7 @@
 
 1. 从 [Releases](https://github.com/empty-sekai/moly/releases) 下载 Windows 程序包并解压。
    包内有游戏 `moly-app.exe`、服务端 `moly-server.exe` 与启动器 `moly-launcher.exe`。
-2. 运行启动器，选择资源版本并下载。下载完成后逐个核对 SHA-256，中断后可以继续。
+2. 运行启动器，提供自己的资源：在设置中把资源目录指向自己准备好的资源，或填写自己的资源地址后从中下载一个版本（下载后逐个核对 SHA-256，中断后可以继续）。本项目不提供任何资源，也不提供资源地址。
 3. 点击「开始游戏」。启动器先启动服务端，再启动游戏。
 
 启动器的数据目录、资源目录与迁移规则见 [启动器说明](crates/app/moly-launcher/README.md)。
