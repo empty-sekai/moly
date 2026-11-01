@@ -10,8 +10,9 @@
 //!   whether any row names the id. The user id is the session's and is not
 //!   kept.
 //! - `MysekaiSystemFixtureActionService.ExecuteAPI(systemFixtureId)` is one
-//!   `Call::SystemFixtureAction` on the server link (see
-//!   [`crate::cutscene::birthday`]); the reply's `updatedResources` reach
+//!   `Call::SystemFixtureAction` on the server link (the birthday party
+//!   sends it when it starts at a fixture not yet actioned); the reply's
+//!   `updatedResources` reach
 //!   this copy with the arrived sections.
 //! - [`STARTER_HOUSE`]: the house the layout owner appends to the home site,
 //!   with its unrotated footprint corners.

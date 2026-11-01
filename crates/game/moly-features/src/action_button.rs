@@ -619,7 +619,7 @@ struct Candidate<'a> {
     /// The house's inside-door point, for a HouseEntry candidate.
     house_entry: Option<Vec3>,
     /// A party fixture's button state (the birthday cut-scene's).
-    birthday: Option<crate::cutscene::birthday::BirthdayButton>,
+    birthday: Option<crate::birthday::BirthdayButton>,
 }
 
 /// A registered NPC, as the scan saw it this frame.
@@ -984,7 +984,7 @@ pub fn advance(
             Option<&FixtureActivityIdentity>,
             Option<&ActionButtonFixture>,
             Option<&crate::site_move::door::HouseEntryPoint>,
-            Option<&crate::cutscene::birthday::BirthdayButton>,
+            Option<&crate::birthday::BirthdayButton>,
         ),
         With<FixtureRoot>,
     >,
@@ -994,7 +994,7 @@ pub fn advance(
     room_door: Option<Res<crate::site_move::room_door::RoomDoor>>,
     (system_fixtures, birthday, stage): (
         Res<crate::system_fixture::SystemFixtures>,
-        Option<Res<crate::cutscene::birthday::BirthdayContext>>,
+        Option<Res<crate::markers::BirthdayContext>>,
         Option<Res<crate::browser_stage::BrowserStage>>,
     ),
 ) {
@@ -1002,7 +1002,7 @@ pub fn advance(
     // `ActionButtonRefresh` (event 45): the birthday context publishes its
     // disabled types when it enters and an empty list when it exits.
     let disabled: &'static [ButtonType] = if birthday.is_some() {
-        crate::cutscene::birthday_party::DISABLED
+        crate::birthday::DISABLED
     } else {
         &[]
     };
@@ -2379,7 +2379,7 @@ fn dispatch(
         (ButtonType::BirthdayCutScene, target) => match fixture_target {
             // OnClickBirthdayCutScene runs in the birthday party's presenter.
             Some(fixture) => {
-                commands.write_message(crate::cutscene::birthday::BirthdayCutSceneClick {
+                commands.write_message(crate::birthday::BirthdayCutSceneClick {
                     fixture: fixture.entity,
                 });
                 info!("[action_button] birthday cut-scene button pressed on {target:?} ({:?}): OnClickBirthdayCutScene", fixture.entity);

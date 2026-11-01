@@ -79,41 +79,20 @@
 use bevy::asset::LoadState;
 use bevy::prelude::*;
 use moly_assets::json::JsonAsset;
-use moly_law::action_button::ButtonType;
 use moly_law::talk::FaceSlot;
 
 use super::birthday::BirthdayContext;
+use crate::birthday::{EndBirthdayPartyClick, PartyUi, PartyUiShown};
 use crate::common_dialog::Buttons;
 use crate::userdata::client::talk_read::UserResource;
 use crate::ui_layers::{BirthdayBackKey, DialogId, MysekaiBackKeyProcess};
 
-/// `_disableActionButtonTypes`: the types the `Birthday` context disables
-/// while it is set.
-pub const DISABLED: &[ButtonType] = &[
-    ButtonType::GimmickFixture,
-    ButtonType::TimelineFixture,
-    ButtonType::HouseEntry,
-    ButtonType::OpenChest,
-    ButtonType::GateEdit,
-    ButtonType::GateInvitation,
-    ButtonType::OpenCraftTool,
-    ButtonType::OpenMysekaiInfo,
-    ButtonType::OpenMysekaiBgmSelect,
-    ButtonType::OpenMysekaiConvert,
-    ButtonType::OpenOtherMysekai,
-    ButtonType::OpenAvatarDressUp,
-    ButtonType::OpenSecretShop,
-    ButtonType::GoHomeSite,
-    ButtonType::LeaveMysekai,
-    ButtonType::Sketch,
-    ButtonType::Delivery,
-    ButtonType::BirthdayCutScene,
-];
-
 const CLOSE_CONFIRM: &str = "WORD_MYSEKAI_BIRTHDAY_PARTY_CLOSE_CONFIRM";
 const RECEIVED_REWARD: &str = "MSG_RECEIVED_REWARD";
+/// The key the party's wordings are registered under for the shell's glyph set.
+const TEXT_SOURCE: &str = "birthday_party";
 /// The wordings the party's screens draw.
-pub const WORDINGS: &[&str] = &[
+const WORDINGS: &[&str] = &[
     CLOSE_CONFIRM,
     RECEIVED_REWARD,
     "WORD_END_BIRTHDAY_CUTSCENE",
@@ -149,16 +128,6 @@ pub struct Party {
 /// `NPCAvatarPresenter.SetBirthdayLua`: the script the character's birthday
 /// wait plays when the player talks to it, with its scenario row.
 pub use crate::markers::BirthdayLua;
-
-/// `MysekaiBirthdayPartyContext.BirthdayContextType`, as the screens' last
-/// `UpdateUI` drew it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PartyUi {
-    /// 1: the end-party button shows; the edit and site-map buttons hide.
-    InProgress,
-    /// 2: the end-party button hides too and the menu button is disabled.
-    AfterClose,
-}
 
 /// Where `ExecuteAsync` is.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -197,9 +166,6 @@ enum Stage {
 pub struct BirthdayParty {
     party: Party,
     stage: Stage,
-    /// The context as the screens' last `UpdateUI` drew it; `None` before
-    /// `ChangeUIForBirthday` and after the last `UpdateUI`.
-    ui: Option<PartyUi>,
     /// `ShowCloseBirthdayConfirmDialog` while it is shown.
     close_confirm: Option<DialogId>,
     /// `obtainedResources` of the API reply; `None` when the fixture was
@@ -212,18 +178,6 @@ pub struct BirthdayParty {
     /// list.
     end_motion_pending: bool,
 }
-
-impl BirthdayParty {
-    /// The field menu's `ShowUI` branch for the party.
-    pub fn ui(&self) -> Option<PartyUi> {
-        self.ui
-    }
-}
-
-/// A press on the end-party button (`SetOnClickEndBirthdayPartyButton`:
-/// `OnClickBackButton().Forget()`).
-#[derive(Message, Clone, Copy, Debug)]
-pub struct EndBirthdayPartyClick;
 
 /// `GetMasterBirthdayScenario(party, seq)` and `FindNPC(unit)`: the row and
 /// the character, or `None` after the source's silent return or error log.
@@ -381,10 +335,10 @@ fn advance_end_motion(world: &mut World) {
 pub fn start(world: &mut World, party: Party, rewards: Option<Vec<UserResource>>) {
     info!("[birthday-party] ExecuteAsync(party {}, unit {}) goes on: CacheBirthdayBgm (the cut-scene's BGM plays on); ChangeUIForBirthday: WaitUntil(!ScreenManager.IsUILayerWorking)", party.id, party.unit);
     let end_motions = world.resource::<AssetServer>().load::<JsonAsset>(END_MOTIONS);
+    world.remove_resource::<PartyUiShown>();
     world.insert_resource(BirthdayParty {
         party,
         stage: Stage::ChangeUi,
-        ui: None,
         close_confirm: None,
         rewards,
         end_motions,
@@ -481,7 +435,7 @@ pub fn advance(world: &mut World) {
             if !ui_idle(world) {
                 return;
             }
-            world.resource_mut::<BirthdayParty>().ui = Some(PartyUi::InProgress);
+            world.insert_resource(PartyUiShown(PartyUi::InProgress));
             info!("[birthday-party] ChangeUIForBirthday: the UI layer is idle; ScreenLayerMysekaiHome/MyRoom.UpdateUI -> ShowUI -> SetUIForBirthday (InProgress): the end-party button shows, the edit and site-map buttons hide, VisibleMissionPanel(false); SetOnClickEndBirthdayPartyButton(OnClickBackButton)");
             if force_talk(world, party, 1, "ForceBirthdayPartyTalk") {
                 set_stage(world, Stage::FirstTalk, "the first talk plays");
@@ -663,7 +617,7 @@ fn close_confirm_answer(world: &mut World) {
         return;
     }
     let party = world.resource::<BirthdayParty>().party;
-    world.resource_mut::<BirthdayParty>().ui = Some(PartyUi::AfterClose);
+    world.insert_resource(PartyUiShown(PartyUi::AfterClose));
     info!("[birthday-party] ShowCloseBirthdayConfirmDialog = true: SetAfterClosedStateType (AfterClose); _birthdayEndFlag = true; UpdateUI -> SetUIForBirthday (AfterClose): the end-party button hides, EnableMenuButton(false), the mission panel hidden");
     set_back_key(
         world,
@@ -711,7 +665,9 @@ fn remove_and_restore(world: &mut World, party: Party) -> Stage {
 
 /// `UpdateUI` (normal) and the reward dialog: `ExecuteAsync` ends.
 fn finish(world: &mut World) {
-    let Some(party) = world.remove_resource::<BirthdayParty>() else {
+    let party = world.remove_resource::<BirthdayParty>();
+    world.remove_resource::<PartyUiShown>();
+    let Some(party) = party else {
         return;
     };
     info!("[birthday-party] UpdateUI -> SetUIForNormal(owner): the end-party button hides, the menu button is enabled, the edit and site-map buttons show; the room's multiplay calls have no objects here (named)");
@@ -734,6 +690,10 @@ fn finish(world: &mut World) {
 }
 
 pub(super) fn install(app: &mut App) {
-    app.add_message::<EndBirthdayPartyClick>()
+    app.init_resource::<crate::ui_charsets::ShellTextSources>()
+        .add_message::<EndBirthdayPartyClick>()
         .add_systems(Update, advance.before(super::advance));
+    app.world_mut()
+        .resource_mut::<crate::ui_charsets::ShellTextSources>()
+        .register_texts(TEXT_SOURCE, WORDINGS, &[]);
 }

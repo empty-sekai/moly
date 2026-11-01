@@ -21,7 +21,7 @@ use moly_law::ui::graphic_tap_effect as tap_rule;
 use crate::site::SiteActive;
 use crate::sitemap::SITEMAP_LAYER;
 use crate::ui_layers::{LayerCommand, LayerId, UiLayerStack};
-use crate::cutscene::birthday_party::{BirthdayParty, EndBirthdayPartyClick, PartyUi};
+use crate::birthday::{EndBirthdayPartyClick, PartyUi};
 use crate::ui_layout::{UiLayouts, UiPrefabView};
 
 const SITES_DATA: &str = "moly://site/sites.json";
@@ -867,10 +867,9 @@ pub fn parse(
     sources: Option<Res<crate::ui_charsets::ShellTextSources>>,
     phenomena: Option<Res<crate::learn_phenomena_dialog::PhenomenonGlyphs>>,
     inventory: Option<Res<crate::inventory::InventoryGlyphs>>,
-    (get_resource_inputs, get_resource, birthday): (
+    (get_resource_inputs, get_resource): (
         Option<Res<crate::get_resource::GetResourceInputs>>,
         Option<Res<crate::get_resource::GetResourceCharset>>,
-        Option<Res<crate::cutscene::birthday::BirthdayCharset>>,
     ),
 ) {
     let Some(handle) = handle else { return; };
@@ -898,17 +897,9 @@ pub fn parse(
     // The acquisition dialogs' names and wordings (masters and wordings
     // read), when the acquisition dialogs are installed.
     if get_resource_inputs.is_some() && get_resource.is_none() { return; }
-    // The birthday confirm's character names, when the birthday party is
-    // installed.
-    let birthday_names = match birthday.as_deref() {
-        Some(birthday) => match &birthday.chars {
-            Some(chars) => chars.as_slice(),
-            None => return,
-        },
-        None => &[],
-    };
     // The texts of the screens that declared a source (the photo screen's
-    // frame names and labels), once every one is filled.
+    // frame names and labels, the birthday confirm's character names), once
+    // every one is filled.
     let source_chars = match sources.as_deref() {
         Some(sources) => match sources.chars() {
             Some(chars) => chars.collect::<Vec<char>>(),
@@ -932,7 +923,6 @@ pub fn parse(
     if let Some(get_resource) = get_resource.as_deref() {
         chars.extend(get_resource.chars.iter().copied());
     }
-    chars.extend(birthday_names.iter().copied());
     for wording in ["WORD_LEFT_ROOM", "WORD_CANCEL", "MSG_CONFIRM_LEAVE_MYSEKAI",
         "WORD_NOT_SAVE_RETURN", "WORD_SAVE_RETURN", "WORD_EDIT_SAVE_CONFIRMATION", "MSG_LEARN_PHENOMENA",
         // The weather forecast dialog's labels.
@@ -946,8 +936,6 @@ pub fn parse(
     for wording in crate::option_dialog::WORDINGS
         .iter()
         .chain(crate::common_dialog::WORDINGS)
-        .chain(crate::cutscene::birthday::WORDINGS)
-        .chain(crate::cutscene::birthday_party::WORDINGS)
         .chain(crate::info::WORDINGS)
         .chain(crate::inventory::WORDINGS)
         .chain(crate::stamina_recover_dialog::WORDINGS)
@@ -1058,7 +1046,7 @@ pub fn place(
     (user, real, party): (
         Option<Res<crate::userdata::client::ClientUserData>>,
         Res<Time<Real>>,
-        Option<Res<BirthdayParty>>,
+        Option<Res<crate::birthday::PartyUiShown>>,
     ),
 ) {
     let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else { return; };
@@ -1088,7 +1076,7 @@ pub fn place(
                 .expect("TimeUtility.GetCurrentTimestamp before the server model's first response")
                 .current_timestamp(real.elapsed_secs())
         };
-        let party = party.as_deref().and_then(BirthdayParty::ui);
+        let party = party.as_deref().map(|shown| shown.0);
         // The home mission panel (`MysekaiMissionHomePanel`), with the gauge
         // and chrome motion of advance_view_with_mission.
         root.advance_view_with_mission(
@@ -1224,7 +1212,7 @@ const PARTY_INSTRUMENT_FINGER: u64 = 99022;
 pub fn end_party_instrument(
     mut events: MessageWriter<bevy::window::WindowEvent>,
     mut instrument: ResMut<EndPartyInstrument>,
-    party: Option<Res<BirthdayParty>>,
+    party: Option<Res<crate::birthday::PartyUiShown>>,
     layouts: Res<UiLayouts>,
     active: Option<Res<SiteActive>>,
     roots: Query<(&MenuShellRoot, &UiPrefabView)>,
@@ -1248,7 +1236,7 @@ pub fn end_party_instrument(
     }
     let Some(after) = instrument.after else { return; };
     if instrument.tapped || time.elapsed_secs_f64() < after { return; }
-    if party.as_deref().and_then(BirthdayParty::ui) != Some(PartyUi::InProgress) { return; }
+    if party.as_deref().map(|shown| shown.0) != Some(PartyUi::InProgress) { return; }
     let (Ok((window_entity, window)), Some(root_canvas), Some(active)) =
         (windows.single(), root_canvas.as_deref(), active.as_deref())
     else {
@@ -1310,12 +1298,12 @@ pub fn click(
     root_canvas: Option<Res<RootCanvas>>,
     (mut sounds, party, mut end_party): (
         ResMut<crate::audio::SeRequests>,
-        Option<Res<BirthdayParty>>,
+        Option<Res<crate::birthday::PartyUiShown>>,
         MessageWriter<EndBirthdayPartyClick>,
     ),
 ) {
     let (mut captures, mut edit_commands) = requests;
-    let party = party.as_deref().and_then(BirthdayParty::ui);
+    let party = party.as_deref().map(|shown| shown.0);
     let taps: Vec<Vec2> = gestures.read()
         .filter(|event| event.kind.is_tap_family() && event.state == GestureState::End)
         .map(|event| event.position).collect();

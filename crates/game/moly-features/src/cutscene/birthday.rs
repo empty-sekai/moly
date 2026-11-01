@@ -85,6 +85,7 @@ use serde_json::Value;
 
 use std::collections::HashMap;
 
+use crate::birthday::{BirthdayButton, BirthdayCutSceneClick};
 use crate::cut_scene::{CutSceneCaller, CutSceneReport, CutSceneRequest};
 use std::borrow::Cow;
 use crate::common_dialog::Buttons;
@@ -108,9 +109,11 @@ const CONFIRM_AFTER: &str = "WORD_MYSEKAI_BIRTHDAY_PARTY_REMEMBER_CONFIRM";
 const START: &str = "WORD_START_BIRTHDAY_PARTY";
 const CLOSED: &str = "MSG_MYSEKAI_BIRTHDAY_PARTY_CLOSED";
 
+/// The key the birthday wordings are registered under for the shell's glyph set.
+const TEXT_SOURCE: &str = "birthday";
 /// The wordings the birthday dialogs and the site map's no-party dialog
 /// draw (the shell charset takes them).
-pub const WORDINGS: &[&str] = &[
+const WORDINGS: &[&str] = &[
     CONFIRM_FIRST,
     CONFIRM_AFTER,
     START,
@@ -127,30 +130,6 @@ const NIGO_MIKU_ANGLE: f32 = 49.0;
 const NIGO_MIKU_LENGTH: f32 = f32::from_bits(0x3f70_a3d7);
 /// `PutAndLookPlayerBesideFixture`: the player's distance from the fixture.
 const PLAYER_LENGTH: f32 = 0.5;
-
-/// A click on the party fixture's birthday cut-scene button.
-#[derive(Message, Clone, Copy, Debug)]
-pub struct BirthdayCutSceneClick {
-    pub fixture: Entity,
-}
-
-/// A placed party fixture's button state, kept on the fixture every frame
-/// for the action buttons:
-/// - `within`: `IsWithinBirthdayTimeByFixtureId(fixtureId)` (the party's
-///   `startAt`/`closedAt` window holds the server clock).
-///   `MysekaiActionButtonsPresenter.GetPlayerActionButtonType` gives the
-///   fixture the `BirthdayCutScene` button type when it holds, after the
-///   gimmick and timeline checks and before the fixture's action type.
-/// - `can_show`: `CanShowBirthdayCutSceneButton` (not visiting, no
-///   `Birthday` context, the fixture exists, `within`), which
-///   `IsActionButtonTypeAvailable(BirthdayCutScene)` answers. The product is
-///   never visiting and the component sits on a placed fixture, so it is
-///   `within` without the context.
-#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BirthdayButton {
-    pub within: bool,
-    pub can_show: bool,
-}
 
 pub use crate::markers::BirthdayContext;
 
@@ -180,14 +159,6 @@ const CHARACTERS: MasterTable<HashMap<i64, String>> = MasterTable {
     name: "gameCharacters (the birthday confirm's given name)",
     parse: parse_characters,
 };
-
-/// The glyphs the birthday dialogs draw beyond their wordings: the party
-/// characters' given names, once the tables are taken (empty when a table
-/// failed, which the master layer names).
-#[derive(Resource, Default)]
-pub struct BirthdayCharset {
-    pub chars: Option<Vec<char>>,
-}
 
 /// The tables: requested, then taken once all of them have resolved (a
 /// missing or malformed table is named once by the master layer and kept
@@ -461,7 +432,9 @@ fn tables(world: &mut World) -> Result<Option<Tables>, String> {
         chars.sort_unstable();
         chars.dedup();
     }
-    world.resource_mut::<BirthdayCharset>().chars = Some(chars);
+    world
+        .resource_mut::<crate::ui_charsets::ShellTextSources>()
+        .fill(TEXT_SOURCE, chars);
     world.insert_resource(BirthdayTables::Taken(taken.clone()));
     taken.map(Some)
 }
@@ -1151,9 +1124,15 @@ fn cut_scene_returned(world: &mut World, report: &CutSceneReport) {
 }
 
 pub(super) fn install(app: &mut App) {
-    app.init_resource::<BirthdayCharset>()
+    app.init_resource::<crate::ui_charsets::ShellTextSources>()
         .add_message::<BirthdayCutSceneClick>()
         .add_systems(Startup, load)
         .add_systems(Update, advance.before(super::advance))
         .add_systems(Update, read_action_answer.after(advance));
+    app.world_mut()
+        .resource_mut::<crate::ui_charsets::ShellTextSources>()
+        .register_texts(TEXT_SOURCE, WORDINGS, &[]);
+    app.world_mut()
+        .resource_mut::<crate::ui_charsets::ShellTextSources>()
+        .declare(TEXT_SOURCE);
 }

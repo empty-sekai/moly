@@ -24,7 +24,7 @@
 //! (`GetPlayerActionButtonType`'s `IsWithinBirthdayTimeByFixtureId` arm),
 //! gated by `MysekaiFixtureUtility.CanShowBirthdayCutSceneButton` (not
 //! visiting, no birthday context, `IsWithinBirthdayTimeByFixtureId`): the
-//! party fixture's `crate::cutscene::birthday::BirthdayButton`.
+//! party fixture's `BirthdayButton` (`moly_features::birthday`).
 //!
 //! The sensor type maps to the button type through
 //! [`ButtonType::from_action_type`]. Which of the classified buttons the

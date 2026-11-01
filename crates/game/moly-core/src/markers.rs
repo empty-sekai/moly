@@ -18,8 +18,7 @@ pub fn is_room(site_type: &str) -> bool {
 
 /// `NPCAvatarPresenter.SetBirthdayLua`: the script a character's birthday
 /// wait plays when the player talks to it, with its scenario row. The birthday
-/// party's own module (`crate::cutscene::birthday_party`) writes it; the field's
-/// talk chain reads it.
+/// party writes it; the field's talk chain reads it.
 #[derive(Component, Clone, Debug)]
 pub struct BirthdayLua {
     pub scenario: i64,

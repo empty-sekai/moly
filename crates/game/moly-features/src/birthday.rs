@@ -25,6 +25,7 @@
 //! stays in the gate's session check and is left out of the delivery's.
 
 use bevy::prelude::*;
+use moly_law::action_button::ButtonType;
 
 use moly_assets::json::master::{self, MasterData, MasterTable};
 
@@ -237,6 +238,77 @@ pub fn is_within_time(check_at: i64, start_at: i64, end_at: i64) -> bool {
 pub fn now_ms() -> i64 {
     crate::userdata::clock::server_now_ms().unwrap_or_else(crate::userdata::clock::device_now_ms)
 }
+
+// ---------------------------------------------------------------------------
+// The birthday cut-scene and the party it opens
+// ---------------------------------------------------------------------------
+
+/// A click on the party fixture's birthday cut-scene button.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct BirthdayCutSceneClick {
+    pub fixture: Entity,
+}
+
+/// A placed party fixture's button state, kept on the fixture every frame
+/// for the action buttons:
+/// - `within`: `IsWithinBirthdayTimeByFixtureId(fixtureId)` (the party's
+///   `startAt`/`closedAt` window holds the server clock).
+///   `MysekaiActionButtonsPresenter.GetPlayerActionButtonType` gives the
+///   fixture the `BirthdayCutScene` button type when it holds, after the
+///   gimmick and timeline checks and before the fixture's action type.
+/// - `can_show`: `CanShowBirthdayCutSceneButton` (not visiting, no
+///   `Birthday` context, the fixture exists, `within`), which
+///   `IsActionButtonTypeAvailable(BirthdayCutScene)` answers. The product is
+///   never visiting and the component sits on a placed fixture, so it is
+///   `within` without the context.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BirthdayButton {
+    pub within: bool,
+    pub can_show: bool,
+}
+
+/// `_disableActionButtonTypes`: the types the `Birthday` context disables
+/// while it is set.
+pub const DISABLED: &[ButtonType] = &[
+    ButtonType::GimmickFixture,
+    ButtonType::TimelineFixture,
+    ButtonType::HouseEntry,
+    ButtonType::OpenChest,
+    ButtonType::GateEdit,
+    ButtonType::GateInvitation,
+    ButtonType::OpenCraftTool,
+    ButtonType::OpenMysekaiInfo,
+    ButtonType::OpenMysekaiBgmSelect,
+    ButtonType::OpenMysekaiConvert,
+    ButtonType::OpenOtherMysekai,
+    ButtonType::OpenAvatarDressUp,
+    ButtonType::OpenSecretShop,
+    ButtonType::GoHomeSite,
+    ButtonType::LeaveMysekai,
+    ButtonType::Sketch,
+    ButtonType::Delivery,
+    ButtonType::BirthdayCutScene,
+];
+
+/// `MysekaiBirthdayPartyContext.BirthdayContextType`, as the screens' last
+/// `UpdateUI` drew it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PartyUi {
+    /// 1: the end-party button shows; the edit and site-map buttons hide.
+    InProgress,
+    /// 2: the end-party button hides too and the menu button is disabled.
+    AfterClose,
+}
+
+/// The birthday party's UI state as the screens last drew it; absent while
+/// no party runs or before its first `UpdateUI`.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PartyUiShown(pub PartyUi);
+
+/// A press on the end-party button (`SetOnClickEndBirthdayPartyButton`:
+/// `OnClickBackButton().Forget()`).
+#[derive(Message, Clone, Copy, Debug)]
+pub struct EndBirthdayPartyClick;
 
 #[cfg(test)]
 mod row_refusal_tests {
