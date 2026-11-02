@@ -2975,7 +2975,7 @@ fn begin_animation(
             let end_clip = format!("{previous}_E");
             if lib.named_animations.contains_key(end_clip.as_str()) {
                 let unit = runtime.unit;
-                driver.claim(&mut runtime.body, BodyOwner::Talk);
+                driver.enter(&mut runtime.body, BodyOwner::Talk);
                 let node = driver.clip_node(graphs, lib, &end_clip, unit);
                 transitions
                     .play(
@@ -3026,7 +3026,7 @@ fn start_motion(
         return;
     }
     let unit = runtime.unit;
-    driver.claim(&mut runtime.body, BodyOwner::Talk);
+    driver.enter(&mut runtime.body, BodyOwner::Talk);
     let node = driver.clip_node(graphs, lib, &clip, unit);
     transitions
         .play(
@@ -3116,7 +3116,15 @@ fn advance_talk_segments(
             }) => {
                 let clip = format!("{motion}_L");
                 if lib.named_animations.contains_key(clip.as_str()) {
-                    driver.claim(&mut runtime.body, BodyOwner::Talk);
+                    // The loop segment carries on its start segment's run.
+                    if !driver.keeps(&mut runtime.body) {
+                        info!(
+                            "[talk] 段 {} unit={unit}：起始段播完时播放器已被别的状态接走，不再接循环段 {}",
+                            active.talk_id,
+                            ascii_or(&clip)
+                        );
+                        continue;
+                    }
                     let node = driver.clip_node(graphs, lib, &clip, unit);
                     transitions
                         .play(&mut player, node, Duration::from_secs_f32(blend.max(0.0)))
@@ -3201,11 +3209,16 @@ fn finish_talk(
         }
         if let Ok((mut phase, _, mut driver)) = npcs.get_mut(entity).map(|(p, w, d, _)| (p, w, d)) {
             *phase = MotionPhase::Dwelling { remaining: None };
-            if let Ok(mut runtime) = talk_runtimes.get_mut(entity) {
-                driver.hand_back_slot(&mut runtime.body);
-            }
+            let released = match talk_runtimes.get_mut(entity) {
+                Ok(mut runtime) => driver.hand_back_slot(&mut runtime.body),
+                Err(_) => false,
+            };
             driver.playing = None;
-            play_idle(&mut driver, players, transitions, unit);
+            // Idle only when the body was still the talk's: a state that took
+            // it meanwhile keeps playing its own clip.
+            if released {
+                play_idle(&mut driver, players, transitions, unit);
+            }
         }
         if let Ok(mut entity_commands) = commands.get_entity(entity) {
             entity_commands.remove::<TalkHold>().remove::<TalkRuntime>();

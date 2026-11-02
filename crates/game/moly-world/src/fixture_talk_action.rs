@@ -528,8 +528,10 @@ fn prepare(world: &mut World, session: &mut Session) -> Result<(), (bool, String
             .get_mut::<TalkFixtureActorLease>(member.actor)
             .unwrap()
             .approaching = false;
+        // The pre-action enters the member's body at arrival; its later
+        // completion hands the token back through `PriorActor::body`.
         if let Some(mut driver) = world.get_mut::<MotionDriver>(member.actor) {
-            driver.claim(&mut prior.body, BodyOwner::FixtureTalk);
+            driver.enter(&mut prior.body, BodyOwner::FixtureTalk);
         }
     }
     world.init_resource::<FixtureActivityTimelines>();

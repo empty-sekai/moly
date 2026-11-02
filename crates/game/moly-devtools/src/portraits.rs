@@ -11,7 +11,7 @@ use bevy::{
 use moly_assets::json::JsonAsset;
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::{Arc, Mutex}, time::Instant};
-use crate::{character::{BodyOwner, CharacterPack, CharacterShell, MotionDriver}, character_material::ToonMaterials, npc::CharacterUnitId};
+use crate::{character::{BodyOwner, BodyToken, CharacterPack, CharacterShell, MotionDriver}, character_material::ToonMaterials, npc::CharacterUnitId};
 
 const SIZE: u32 = 512;
 const PHOTO_LAYER: usize = 30;
@@ -31,6 +31,7 @@ struct PortraitJob {
     target: Option<Handle<Image>>,
     warm: u32,
     frozen: bool,
+    pose: Option<BodyToken>,
     capturing: bool,
     received: Arc<Mutex<Option<Result<Value, String>>>>,
     records: Vec<Value>,
@@ -40,7 +41,7 @@ struct PortraitJob {
 
 pub fn configure(app: &mut App, directory: PathBuf, only: Option<u32>) {
     app.insert_resource(PortraitJob { directory, only, manifest: None, metadata: None, rows: vec![], source: None,
-        index: 0, actor: None, temporary: vec![], target: None, warm: 0, frozen: false,
+        index: 0, actor: None, temporary: vec![], target: None, warm: 0, frozen: false, pose: None,
         capturing: false, received: Default::default(), records: vec![], started: Instant::now(), last_report: 0 });
     app.add_systems(Last, advance);
     app.add_systems(PostUpdate, frame
@@ -111,6 +112,7 @@ fn advance_inner(world: &mut World, job: &mut PortraitJob) -> Result<(), String>
         job.index += 1;
         job.warm = 0;
         job.frozen = false;
+        job.pose = None;
         job.capturing = false;
     }
     if job.index >= job.rows.len() {
@@ -154,12 +156,22 @@ fn advance_inner(world: &mut World, job: &mut PortraitJob) -> Result<(), String>
     let Some(driver) = world.get::<MotionDriver>(actor) else { return Ok(()); };
     let (player, idle) = (driver.player, driver.idle);
     if !job.frozen {
+        // The still pose holds the body for as long as the capture lasts. A
+        // later state that takes the body ends the pose, and the capture keeps
+        // whatever that state plays.
+        match world.get_mut::<MotionDriver>(actor) {
+            Some(mut driver) if job.pose.is_none() => {
+                job.pose = Some(driver.take(BodyOwner::Portrait));
+            }
+            Some(driver) if !driver.keeps(&mut job.pose) => {
+                job.frozen = true;
+                return Ok(());
+            }
+            _ => {}
+        }
         let Some(mut animations) = world.get_mut::<AnimationPlayer>(player) else { return Ok(()); };
         animations.stop_all();
         animations.play(idle).repeat().seek_to(0.5).pause();
-        // The paused pose keeps the body until the actor is despawned with the
-        // temporary units; nothing here hands it back to locomotion.
-        world.get_mut::<MotionDriver>(actor).unwrap().take(BodyOwner::Portrait);
         job.frozen = true;
         return Ok(());
     }

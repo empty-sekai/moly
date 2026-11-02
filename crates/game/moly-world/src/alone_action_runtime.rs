@@ -942,7 +942,7 @@ pub fn advance(
             rt.rest_epoch = epoch;
             if let (Some(epoch), Some(_)) = (epoch, rt.program.as_ref()) {
                 rt.script = Some(law::ScriptState::new(wall));
-                driver.claim(&mut rt.body, BodyOwner::Alone);
+                driver.enter(&mut rt.body, BodyOwner::Alone);
                 play_idle(driver, &mut players, &mut transitions, unit.0);
                 info!("[alone] unit={} Rest epoch={epoch}：新脚本启动", unit.0);
             }
@@ -999,7 +999,12 @@ pub fn advance(
                 } => {
                     assert!(!play_end_motion, "待机脚本的自动 End 跟随尚无已支持的编排");
                     let clip = format!("{motion}_{}", phase.map(suffix_letter).unwrap_or("S"));
-                    driver.claim(&mut rt.body, BodyOwner::Alone);
+                    // The script entered the body when its Rest epoch began,
+                    // and plays a motion only while that entry holds it.
+                    if !driver.keeps(&mut rt.body) {
+                        end_script(rt, &mut emote_requests, npc, unit.0, "播放器已被别的状态接走");
+                        break;
+                    }
                     let node = driver.clip_node(&mut graphs, lib, &clip, unit.0);
                     let mut player = players.get_mut(driver.player).expect("角色播放器未装配");
                     let mut transition = transitions
@@ -1049,7 +1054,10 @@ pub fn advance(
                 let name = format!("{base}_L");
                 let speed = *speed;
                 let blend = *blend;
-                driver.claim(&mut rt.body, BodyOwner::Alone);
+                if !driver.keeps(&mut rt.body) {
+                    end_script(rt, &mut emote_requests, npc, unit.0, "起始段播完时播放器已被别的状态接走");
+                    continue;
+                }
                 let node = driver.clip_node(&mut graphs, lib, &name, unit.0);
                 let mut player = players.get_mut(driver.player).expect("角色播放器未装配");
                 let mut transition = transitions
@@ -1064,15 +1072,27 @@ pub fn advance(
         }
         // This system runs after conversation admission. A Rest state never
         // survives TalkHold, and never steals a continuing dialogue's player.
-        if talk.is_none()
-            && (rt.script.is_some() || epoch.is_some()) {
-                if rt.script.is_some() {
-                    driver.claim(&mut rt.body, BodyOwner::Alone);
-                } else {
-                    driver.hand_back_slot(&mut rt.body);
-                }
-            }
+        // A script whose body was taken over ends here instead.
+        if talk.is_none() && rt.script.is_some() && !driver.keeps(&mut rt.body) {
+            end_script(rt, &mut emote_requests, npc, unit.0, "播放器已被别的状态接走");
+        }
     }
+}
+
+/// The script's run is over: its state, segments, pending emotes and the
+/// body's hold go away; the animator itself is left to its new holder.
+fn end_script(
+    rt: &mut AloneRuntime,
+    emote_requests: &mut crate::emoticon::RestEmoteRequests,
+    npc: Entity,
+    unit: u32,
+    reason: &str,
+) {
+    rt.script = None;
+    rt.seg = SegPlay::Empty;
+    rt.body = None;
+    emote_requests.hide(npc);
+    info!("[alone] unit={unit} 脚本结束：{reason}");
 }
 
 #[cfg(target_arch = "wasm32")]

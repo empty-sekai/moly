@@ -29,6 +29,8 @@ struct Running {
     start: Option<(String, f32, f32)>,
     /// The loop's hold on the body while it plays the actor's animator.
     body: Option<BodyToken>,
+    /// Another state took the body: this playback epoch plays nothing more.
+    over: bool,
 }
 
 #[derive(Resource, Default)]
@@ -133,18 +135,19 @@ fn advance(
         let playback = playback.filter(|_| talk.is_none());
         let Some(playback) = playback else {
             if let Some(mut running) = runtime.0.remove(&entity) {
-                emotes.hide(entity); driver.hand_back_slot(&mut running.body);
-                if talk.is_none() { shared::play_idle(&mut driver, &mut players, &mut transitions, unit.0); }
+                emotes.hide(entity);
+                if driver.hand_back_slot(&mut running.body) && talk.is_none() { shared::play_idle(&mut driver, &mut players, &mut transitions, unit.0); }
             }
             continue;
         };
         let Some(program) = programs.0.get(&unit.0) else { continue; };
         retained.insert(entity);
-        let rt = runtime.0.entry(entity).or_insert_with(|| Running { epoch: playback.epoch, rng: Lcg::seeded(unit.0), steps: Vec::new(), cursor: 0, wait: None, start: None, body: None });
-        if rt.epoch != playback.epoch { rt.epoch = playback.epoch; rt.steps.clear(); rt.cursor = 0; rt.wait = None; rt.start = None; }
-        driver.claim(&mut rt.body, BodyOwner::Communication);
+        let rt = runtime.0.entry(entity).or_insert_with(|| Running { epoch: playback.epoch, rng: Lcg::seeded(unit.0), steps: Vec::new(), cursor: 0, wait: None, start: None, body: None, over: false });
+        if rt.epoch != playback.epoch { rt.epoch = playback.epoch; rt.steps.clear(); rt.cursor = 0; rt.wait = None; rt.start = None; rt.over = false; }
+        if rt.over { continue; }
         let events = next_events(rt, program, &playback.participants, clock.delta());
         if gate.cutscene_active { continue; }
+        let mut taken = false;
         for step in events {
             match step {
                 Step::ChangeEye { pattern, .. } => if let Some(eye) = toon.slot_handle("eye") { shared::apply_eye_pattern(&mut materials, eye, tables.eye_pattern(&pattern)); },
@@ -152,6 +155,14 @@ fn advance(
                 Step::ChangeAnimation { motion, phase, speed, blend, play_end_motion, .. } => {
                     assert!(!play_end_motion, "communication end-segment chaining needs an explicit authored sequence");
                     let clip = format!("{motion}_{}", phase.map(shared::suffix_letter).unwrap_or("S"));
+                    // The loop enters the body with its first motion and plays
+                    // later ones only while that entry holds it.
+                    if rt.body.is_none() {
+                        driver.enter(&mut rt.body, BodyOwner::Communication);
+                    } else if !driver.keeps(&mut rt.body) {
+                        taken = true;
+                        break;
+                    }
                     let node = driver.clip_node(&mut graphs, lib, &clip, unit.0);
                     let mut player = players.get_mut(driver.player).expect("communication actor player is installed");
                     let mut transition = transitions.get_mut(driver.player).expect("communication actor transitions are installed");
@@ -168,10 +179,21 @@ fn advance(
         if let Some((motion, speed, blend)) = rt.start.clone() {
             let done = driver.added_clip_node(&format!("{motion}_S")).is_some_and(|node| players.get(driver.player).is_ok_and(|player| player.playing_animations().any(|(id, state)| *id == node && state.is_finished())));
             if done {
-                let node = driver.clip_node(&mut graphs, lib, &format!("{motion}_L"), unit.0);
-                let mut player = players.get_mut(driver.player).unwrap(); let mut transition = transitions.get_mut(driver.player).unwrap();
-                transition.play(&mut player, node, Duration::from_secs_f32(blend)).set_speed(speed).repeat(); rt.start = None;
+                if !driver.keeps(&mut rt.body) {
+                    taken = true;
+                } else {
+                    let node = driver.clip_node(&mut graphs, lib, &format!("{motion}_L"), unit.0);
+                    let mut player = players.get_mut(driver.player).unwrap(); let mut transition = transitions.get_mut(driver.player).unwrap();
+                    transition.play(&mut player, node, Duration::from_secs_f32(blend)).set_speed(speed).repeat(); rt.start = None;
+                }
             }
+        }
+        // A motion the loop could not play because another state took the
+        // body ends the loop for this epoch: its steps and emotes go, and the
+        // animator is left to its holder.
+        if taken {
+            rt.over = true; rt.steps.clear(); rt.cursor = 0; rt.wait = None; rt.start = None;
+            emotes.hide(entity);
         }
     }
     runtime.0.retain(|entity, _| retained.contains(entity));

@@ -1410,12 +1410,15 @@ fn end_clip(world: &mut World, actor: Entity, unit: u32) {
         Query<&mut AnimationTransitions>,
     )>::new(world);
     let (mut drivers, mut players, mut transitions) = params.get_mut(world).expect("system params");
-    if let Ok(mut driver) = drivers.get_mut(actor) {
-        if let Some(clip) = clip {
-            driver.hand_back(clip.body);
+    let Ok(mut driver) = drivers.get_mut(actor) else { return; };
+    if let Some(clip) = clip {
+        // The idle plays only where the body is still the clip's; a body a
+        // later state took keeps that state's clip.
+        if !driver.hand_back(clip.body) {
+            return;
         }
-        crate::alone_action_runtime::play_idle(&mut driver, &mut players, &mut transitions, unit);
     }
+    crate::alone_action_runtime::play_idle(&mut driver, &mut players, &mut transitions, unit);
 }
 
 /// ShowTweet's first part: `CanShowEntryReaction` (`None` when it fails),

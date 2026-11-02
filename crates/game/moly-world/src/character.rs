@@ -267,16 +267,26 @@ impl MotionDriver {
         token
     }
 
-    /// The token in `slot` while it still holds the body, otherwise a new
-    /// one for `owner`, stored back in `slot`. For owners that play several
-    /// clips in a row and keep their token between them.
-    pub fn claim(&mut self, slot: &mut Option<BodyToken>, owner: BodyOwner) -> BodyToken {
+    /// [`Self::take`] for a state that keeps its token in `slot` while it
+    /// plays several clips in a row. Called where the state enters the body
+    /// (its first clip, or a new motion it is told to play), never to carry
+    /// on: a state carrying on asks [`Self::keeps`].
+    pub fn enter(&mut self, slot: &mut Option<BodyToken>, owner: BodyOwner) -> BodyToken {
+        let token = self.take(owner);
+        *slot = Some(token);
+        token
+    }
+
+    /// Whether the token in `slot` still holds the body. A later state that
+    /// took the body replaced this one: its run is over, so the slot is
+    /// emptied and the caller writes nothing more to the animator (the new
+    /// holder plays it, and plays idle when it lets go).
+    pub fn keeps(&self, slot: &mut Option<BodyToken>) -> bool {
         match *slot {
-            Some(token) if self.holds(token) => token,
+            Some(token) if self.holds(token) => true,
             _ => {
-                let token = self.take(owner);
-                *slot = Some(token);
-                token
+                *slot = None;
+                false
             }
         }
     }

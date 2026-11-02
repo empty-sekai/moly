@@ -193,6 +193,31 @@ pub(crate) fn hand_back_body(world: &mut World, actor: Entity, body: Option<Body
     }
 }
 
+/// The `NpcFixtureMotionOwner` the photo shot inserts for its walk to the
+/// overlap cell. Its generation names the photo owner, which no fixture
+/// activity ever holds.
+const PHOTO_MOVE_GENERATION: u64 = u64::MAX - 1;
+
+/// The owner the photo shot holds its walk's body for.
+pub(crate) fn photo_move_owner(actor: Entity) -> FixtureActivityOwner {
+    FixtureActivityOwner {
+        actor,
+        generation: PHOTO_MOVE_GENERATION,
+    }
+}
+
+/// Removes the photo shot's movement owner (see [`photo_move_owner`]) from
+/// `actor` if it is still there. A fixture activity's own movement owner
+/// stays.
+pub(crate) fn clear_photo_move(world: &mut World, actor: Entity) {
+    if world
+        .get::<NpcFixtureMotionOwner>(actor)
+        .is_some_and(|held| held.0 == photo_move_owner(actor))
+    {
+        world.entity_mut(actor).remove::<NpcFixtureMotionOwner>();
+    }
+}
+
 /// The draws one no-talk factory call made on the member generator: one
 /// sort key per no-talk row (the source orders the rows by a fresh Guid
 /// each), then, on a hit, one engine range over the chosen group's

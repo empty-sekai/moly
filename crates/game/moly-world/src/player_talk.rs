@@ -3800,7 +3800,7 @@ fn begin_talk_animation(
         if let Some(previous) = runtime.original.clone() {
             let end_clip = format!("{previous}_E");
             if lib.named_animations.contains_key(end_clip.as_str()) {
-                driver.claim(&mut runtime.body, BodyOwner::PlayerTalk);
+                driver.enter(&mut runtime.body, BodyOwner::PlayerTalk);
                 let node = driver.clip_node(graphs, lib, &end_clip, unit);
                 transitions
                     .play(
@@ -3860,7 +3860,7 @@ fn start_talk_motion(
         );
         return;
     }
-    driver.claim(&mut runtime.body, BodyOwner::PlayerTalk);
+    driver.enter(&mut runtime.body, BodyOwner::PlayerTalk);
     let node = driver.clip_node(graphs, lib, &clip, unit);
     transitions
         .play(
@@ -3953,7 +3953,15 @@ fn advance_talk_segments(
         }) => {
             let clip = format!("{motion}_L");
             if lib.named_animations.contains_key(clip.as_str()) {
-                driver.claim(&mut runtime.body, BodyOwner::PlayerTalk);
+                // The loop segment carries on its start segment's run.
+                if !driver.keeps(&mut runtime.body) {
+                    info!(
+                        "[player-talk] talk {} unit={unit}: the animator was taken over, no loop segment {}",
+                        session.talk_id,
+                        ascii_or(&clip)
+                    );
+                    return;
+                }
                 let node = driver.clip_node(graphs, lib, &clip, unit);
                 transition
                     .play(
@@ -4038,11 +4046,16 @@ fn finish_session(
     if let Ok((mut phase, _, mut driver)) = npcs.get_mut(session.npc).map(|(p, w, d, _)| (p, w, d))
     {
         *phase = MotionPhase::Dwelling { remaining: None };
-        if let Ok(mut runtime) = runtimes.get_mut(session.npc) {
-            driver.hand_back_slot(&mut runtime.body);
-        }
+        let released = match runtimes.get_mut(session.npc) {
+            Ok(mut runtime) => driver.hand_back_slot(&mut runtime.body),
+            Err(_) => false,
+        };
         driver.playing = None;
-        play_idle(&mut driver, players, transitions, session.unit);
+        // Idle only when the body was still the talk's: a state that took it
+        // meanwhile keeps playing its own clip.
+        if released {
+            play_idle(&mut driver, players, transitions, session.unit);
+        }
     }
     if let Ok(mut entity) = commands.get_entity(session.npc) {
         entity.remove::<TalkHold>().remove::<PlayerTalkRuntime>();

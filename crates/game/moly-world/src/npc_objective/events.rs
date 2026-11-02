@@ -172,7 +172,7 @@ fn request_photo_call(world: &mut World, entity: Entity) {
     }
     if let Some(mut emotes) = world.get_resource_mut::<crate::emoticon::RestEmoteRequests>() { emotes.hide(entity); }
     world.entity_mut(entity).remove::<crate::npc_look_at::NpcLookAt>();
-    world.entity_mut(entity).remove::<crate::npc_fixture_activity::NpcFixtureMotionOwner>();
+    crate::npc_fixture_activity::clear_photo_move(world, entity);
     if let Some(mut motion)=world.get_mut::<crate::npc::MotionPhase>(entity) { *motion=crate::npc::MotionPhase::Dwelling { remaining: None }; }
     if let Some(mut event) = world.get_mut::<EventLower>(entity) {
         event.phase = 0;
@@ -405,7 +405,7 @@ pub fn exit(world: &mut World, entity: Entity) {
         }
         if let Some(mut actions) = world.get_mut::<NpcActions>(entity) { actions.reserved_move_position = None; }
         crate::npc::stop_movement(world, entity);
-        world.entity_mut(entity).remove::<crate::npc_fixture_activity::NpcFixtureMotionOwner>();
+        crate::npc_fixture_activity::clear_photo_move(world, entity);
         stop_photo_clip(world, entity);
         reset_face(world, entity);
         crate::npc_ik::clear(world,entity);
@@ -451,9 +451,16 @@ fn photo_face(world: &mut World, entity: Entity, row: &PhotoRow) {
 }
 
 fn stop_photo_clip(world: &mut World, entity: Entity) {
+    // The idle plays unless another state holds the body: that state keeps
+    // its own clip.
+    let foreign = world.get::<MotionDriver>(entity).is_some_and(|driver| {
+        !driver.locomotion_owns()
+            && world.get::<EventBody>(entity).is_none_or(|held| !driver.holds(held.0))
+    });
     cancel_animation(world, entity);
-    let Some((player, idle)) = world.get::<crate::character::MotionDriver>(entity).map(|d|(d.player,d.idle)) else { return; };
     release_event_body(world, entity);
+    if foreign { return; }
+    let Some((player, idle)) = world.get::<crate::character::MotionDriver>(entity).map(|d|(d.player,d.idle)) else { return; };
     if let Some(mut driver) = world.get_mut::<MotionDriver>(entity) { driver.playing = None; }
     let mut query = world.query::<(&mut AnimationPlayer, &mut AnimationTransitions)>();
     if let Ok((mut player, mut transitions)) = query.get_mut(world, player) {
@@ -463,6 +470,9 @@ fn stop_photo_clip(world: &mut World, entity: Entity) {
 
 fn play_animation_clip(world: &mut World, entity: Entity, name: &str, blend: f32, repeat: bool) -> Option<(AnimationNodeIndex, f32)> {
     let (player, graph) = world.get::<crate::character::MotionDriver>(entity).map(|d|(d.player,d.graph.clone()))?;
+    // A clip continues the event's run only while the run still holds the
+    // body: a body a later state took is not written again.
+    if !event_body_owned(world, entity) { return None; }
     let handle = world.get_resource::<crate::character::MotionLibrary>()?.gltf.clone();
     let library = world.get_resource::<Assets<bevy::gltf::Gltf>>()?.get(&handle)?;
     let clip = library.named_animations.get(name)?.clone();
@@ -480,7 +490,7 @@ fn play_animation_clip(world: &mut World, entity: Entity, name: &str, blend: f32
     let playing = transitions.play(&mut animation, node, std::time::Duration::from_secs_f32(blend.max(0.0)));
     playing.set_speed(1.0);
     if repeat { playing.repeat(); }
-    hold_event_body(world, entity);
+    enter_event_body(world, entity);
     if let Some(mut driver) = world.get_mut::<MotionDriver>(entity) { driver.playing = None; }
     Some((node, duration))
 }
@@ -628,6 +638,8 @@ fn begin_animation_inner(world:&mut World,entity:Entity,name:&str,suffix:Option<
     }
     world.resource_mut::<AnimationOutcomes>().0.insert(lease.0,AnimationOutcome::Pending);
     world.entity_mut(entity).insert(animation);
+    // The new motion enters the actor's body, as ChangeAnimation does.
+    enter_event_body(world,entity);
     if let Err(reason) = advance_animation(world,entity,0.0) {
         forget_animation_outcome(world, lease);
         return Err(reason);
@@ -664,12 +676,31 @@ pub(crate) fn cancel_animation(world:&mut World,entity:Entity) {
 #[derive(Component)]
 struct EventBody(BodyToken);
 
-/// An event clip takes (or keeps) the actor's body.
-fn hold_event_body(world: &mut World, entity: Entity) {
+/// The run enters the actor's body, as a new motion does.
+fn enter_event_body(world: &mut World, entity: Entity) {
     let mut slot = world.get::<EventBody>(entity).map(|held| held.0);
     let Some(mut driver) = world.get_mut::<MotionDriver>(entity) else { return; };
-    let token = driver.claim(&mut slot, BodyOwner::Event);
+    let token = driver.enter(&mut slot, BodyOwner::Event);
     world.entity_mut(entity).insert(EventBody(token));
+}
+
+/// Whether this run may write the actor's body: it has no body yet, or the
+/// body is still its own. A body a later state took is not written again.
+fn event_body_owned(world: &World, entity: Entity) -> bool {
+    match world.get::<EventBody>(entity) {
+        None => true,
+        Some(EventBody(token)) => world
+            .get::<MotionDriver>(entity)
+            .is_some_and(|driver| driver.holds(*token)),
+    }
+}
+
+/// The run continues: its body token still holds the actor.
+fn hold_event_run(world: &World, entity: Entity) -> bool {
+    let Some(EventBody(token)) = world.get::<EventBody>(entity) else { return false; };
+    world
+        .get::<MotionDriver>(entity)
+        .is_some_and(|driver| driver.holds(*token))
 }
 
 /// The event's clips let go of the actor's body, if they still hold it.
@@ -688,6 +719,16 @@ fn advance_animation(world: &mut World, entity: Entity, dt: f32) -> Result<(), S
             }
         }
         return Ok(()); // The replacement view and its driver are untouched.
+    }
+    // A body a later state took ended this run: the script is dropped, its
+    // outcome cancelled, and nothing more is played.
+    if !hold_event_run(world, entity) {
+        if let Some(mut outcomes) = world.get_resource_mut::<AnimationOutcomes>() {
+            if let Some(outcome) = outcomes.0.get_mut(&animation.lease.0) {
+                if *outcome == AnimationOutcome::Pending { *outcome = AnimationOutcome::Cancelled; }
+            }
+        }
+        return Ok(());
     }
     let result = (|| -> Result<(), String> {
         if let Some(wait) = animation.wait.as_mut() {
@@ -806,7 +847,7 @@ fn step_photo(world: &mut World, entity: Entity, dt: f32) -> bool {
             if let (Some(pose), Some(speed)) = (world.get::<Transform>(entity).copied(), world.get::<crate::npc::WalkSpeed>(entity).map(|s|s.0)) {
                 call.move_to = crate::npc_fixture_activity::LocalMove::new(pose,target,pose.rotation,speed).ok();
                 call.last_camera = None;
-                world.entity_mut(entity).insert(crate::npc_fixture_activity::NpcFixtureMotionOwner(FixtureActivityOwner { actor: entity, generation: u64::MAX - 1 }));
+                world.entity_mut(entity).insert(crate::npc_fixture_activity::NpcFixtureMotionOwner(crate::npc_fixture_activity::photo_move_owner(entity)));
                 if let Some(mut actions) = world.get_mut::<NpcActions>(entity) { actions.reserved_move_position = Some(target.to_array()); }
             }
         }
@@ -820,7 +861,7 @@ fn step_photo(world: &mut World, entity: Entity, dt: f32) -> bool {
             if let Some(mut phase)=world.get_mut::<crate::npc::MotionPhase>(entity) { *phase=motion; }
             if done {
                 call.move_to = None;
-                world.entity_mut(entity).remove::<crate::npc_fixture_activity::NpcFixtureMotionOwner>();
+                crate::npc_fixture_activity::clear_photo_move(world, entity);
                 if let Some(mut actions)=world.get_mut::<NpcActions>(entity) { actions.reserved_move_position=None; }
             }
             !done
