@@ -29,7 +29,9 @@ use std::collections::HashMap;
 
 use bevy::asset::AssetId;
 use bevy::camera::primitives::Aabb;
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use moly_features::character_material::ToonMaterials;
 use moly_features::camera_hold::{CameraHold, HeldPose};
 use moly_features::fixture_material::FixtureMaterial;
 use moly_features::markers::AvatarRoot;
@@ -108,6 +110,44 @@ pub fn install(app: &mut App) {
         );
 }
 
+/// Where the cast's bodies are. A fixture timeline can carry a body away from
+/// its root (a seat a metre ahead of it) and turn it, so the lens frames the
+/// body: its hips over the ground under the root, turned the way the hips
+/// face (the hips bone's Z axis is the body's front).
+#[derive(SystemParam)]
+pub struct Bodies<'w, 's> {
+    roots: Query<'w, 's, &'static GlobalTransform>,
+    skeletons: Query<'w, 's, &'static ToonMaterials>,
+}
+
+impl Bodies<'_, '_> {
+    fn get(&self, entity: Entity) -> Option<GlobalTransform> {
+        let root = *self.roots.get(entity).ok()?;
+        let Some(hips) = self
+            .skeletons
+            .get(entity)
+            .ok()
+            .and_then(|skeleton| self.roots.get(skeleton.hips_entity()).ok())
+        else {
+            return Some(root);
+        };
+        let (scale, root_rotation, feet) = root.to_scale_rotation_translation();
+        let front = (hips.rotation() * Vec3::Z).xz();
+        // A body lying face up or down has no front on the ground: the root's.
+        let rotation = if front.length() > 0.3 {
+            Quat::from_rotation_y(front.x.atan2(front.y))
+        } else {
+            root_rotation
+        };
+        let hips = hips.translation();
+        Some(GlobalTransform::from(Transform {
+            translation: Vec3::new(hips.x, feet.y, hips.z),
+            rotation,
+            scale,
+        }))
+    }
+}
+
 /// What the lens is aimed at; a change starts a new push-in.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Framing {
@@ -166,8 +206,8 @@ fn follow_speaker(
     talk: Option<Res<moly_features::talk::ActiveTalk>>,
     window: Option<Res<moly_features::talk_window::TalkWindowState>>,
     time: Res<Time>,
-    characters: Query<(&moly_features::npc::CharacterUnitId, &GlobalTransform)>,
-    bodies: Query<&GlobalTransform>,
+    characters: Query<(Entity, &moly_features::npc::CharacterUnitId)>,
+    bodies: Bodies,
     player: Query<&GlobalTransform, With<AvatarRoot>>,
     fixtures: Res<FixtureBounds>,
     mut motion: Local<LensMotion>,
@@ -187,9 +227,10 @@ fn follow_speaker(
     let aimed = match talk.as_deref() {
         Some(talk) => aim(lens, talk, window.as_deref(), time.elapsed_secs(), &bodies, &fixtures, player, motion.framing),
         None => lens.idle_unit.and_then(|unit| {
-            let (_, body) = characters.iter().find(|(id, _)| id.0 == unit)?;
-            let (out, _) = front(lens, body, Vec2::ZERO, None, false)?;
-            Some((Framing::Idle(unit), place(lens, body, out)))
+            let (entity, _) = characters.iter().find(|(_, id)| id.0 == unit)?;
+            let body = bodies.get(entity)?;
+            let (out, _) = front(lens, &body, Vec2::ZERO, None, false)?;
+            Some((Framing::Idle(unit), place(lens, &body, out)))
         }),
     };
     match aimed {
@@ -209,7 +250,7 @@ fn aim(
     talk: &moly_features::talk::ActiveTalk,
     window: Option<&moly_features::talk_window::TalkWindowState>,
     now: f32,
-    bodies: &Query<&GlobalTransform>,
+    bodies: &Bodies,
     fixtures: &FixtureBounds,
     player: Option<Vec2>,
     current: Option<Framing>,
@@ -222,7 +263,7 @@ fn aim(
         .or_else(|| talk.voice_speaker())
         .and_then(|unit| participants.iter().find(|(who, _)| *who == unit))
         .or_else(|| participants.first())?;
-    let body = bodies.get(entity).ok()?;
+    let body = &bodies.get(entity)?;
     let feet = body.translation();
     let mut listeners = Vec2::ZERO;
     let mut count = 0.0;
@@ -230,7 +271,7 @@ fn aim(
         if *who == unit {
             continue;
         }
-        if let Ok(at) = bodies.get(*other) {
+        if let Some(at) = bodies.get(*other) {
             listeners += at.translation().xz();
             count += 1.0;
         }
@@ -244,7 +285,7 @@ fn aim(
     if lens.wide && (group_line || reacting) {
         let members: Vec<Vec3> = participants
             .iter()
-            .filter_map(|(_, member)| bodies.get(*member).ok().map(GlobalTransform::translation))
+            .filter_map(|(_, member)| bodies.get(*member).map(|at| at.translation()))
             .collect();
         if let Some(wide) = place_wide(lens, &members, out) {
             return Some((Framing::Wide, wide));
@@ -261,7 +302,7 @@ fn aim(
     let others: Vec<Vec3> = participants
         .iter()
         .filter(|(who, _)| *who != unit)
-        .filter_map(|(_, other)| bodies.get(*other).ok().map(GlobalTransform::translation))
+        .filter_map(|(_, other)| bodies.get(*other).map(|at| at.translation()))
         .collect();
     let out = unblocked(lens, feet, out, &others);
     Some((Framing::Speaker { unit, front: addressed }, place(lens, body, out)))
@@ -502,7 +543,7 @@ pub fn clear_view(
     talk: Option<Res<moly_features::talk::ActiveTalk>>,
     hold: Res<CameraHold>,
     time: Res<Time>,
-    bodies: Query<&GlobalTransform>,
+    bodies: Bodies,
     fixtures: Res<FixtureBounds>,
     mut fixture_handles: Query<&mut MeshMaterial3d<FixtureMaterial>>,
     mut site_handles: Query<&mut MeshMaterial3d<SiteMaterial>>,
@@ -516,7 +557,7 @@ pub fn clear_view(
         (true, Some(_), Some(talk)) => talk
             .participants()
             .iter()
-            .filter_map(|(_, body)| bodies.get(*body).ok().map(GlobalTransform::translation))
+            .filter_map(|(_, body)| bodies.get(*body).map(|at| at.translation()))
             .flat_map(|feet| BODY_HEIGHTS.map(|height| feet + Vec3::Y * height))
             .collect(),
         _ => Vec::new(),
