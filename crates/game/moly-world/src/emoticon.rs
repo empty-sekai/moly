@@ -3229,13 +3229,10 @@ fn advance_emitter(
         };
         p.size.x = p.size_x * kx;
         p.size.y = p.size_y * ky;
-        // 绘制速度（Stretch 读）：状态速度 + 叠加速度，换到世界系。
-        let drawn = Vec3::from(p.core.velocity) + anim;
-        p.velocity = if params.world_space {
-            drawn
-        } else {
-            node_world.transform_vector3(drawn)
-        };
+        // Drawn velocity: state plus animated velocity, kept in the simulation
+        // space. The draw turns it into world for the Stretch body and reads it
+        // as is for the Velocity basis.
+        p.velocity = Vec3::from(p.core.velocity) + anim;
         p.age_percent = p.core.age_percent;
         // 颜色：colorOverLifetime 每帧整组覆写。
         if let Some(col) = &params.color_over_lifetime {
