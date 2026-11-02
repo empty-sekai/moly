@@ -1900,6 +1900,7 @@ pub fn place_ui(
     time: Res<Time>,
     mut fade: Local<GoHomeFade>,
     screen: ActionButtonScreen,
+    clean: Res<crate::clean_view::CleanView>,
     mut roots: Query<(&mut Visibility, &mut Transform), (With<ActionButtonRoot>, Without<Sprite>)>,
     mut parts: Query<
         (&mut Transform, &mut Sprite, Option<&ActionButtonIcon>),
@@ -1915,11 +1916,13 @@ pub fn place_ui(
     for (mut visibility, mut transform) in &mut roots {
         // TimelineFixtureProcess hides the action buttons view until the
         // timeline's finish shows it again. They are part of the home
-        // screen, which is not shown while another screen is current.
+        // screen, which is not shown while another screen is current, and
+        // of the HUD the clean view hides.
         visibility.set_if_neq(if head.is_some()
             && rects.is_some()
             && state.timeline.is_none()
             && state.home_mounted
+            && !clean.switches().hud()
         {
             Visibility::Visible
         } else {

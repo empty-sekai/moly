@@ -187,6 +187,7 @@ pub fn app(
     audio::install(&mut app);
     input_claims::install(&mut app);
     ui_layout::install(&mut app);
+    moly_features::clean_view::install(&mut app);
     app.add_plugins(site::SitePlugin(site));
     talk_window::install(&mut app);
     schedule::install(&mut app);

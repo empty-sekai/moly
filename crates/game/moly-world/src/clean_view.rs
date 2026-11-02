@@ -4,7 +4,8 @@
 //! `display.hide_player` (`MOLY_HIDE_HUD`, `MOLY_HIDE_PLAYER`).
 //!
 //! - `hide_hud` hides every UI view but the talk window, so only the scene,
-//!   the in-world balloons and a conversation remain.
+//!   the in-world balloons and a conversation remain. The field's action
+//!   button reads the switch itself (its view places it every frame).
 //! - `hide_player` hides the player's own body: the field camera stands where
 //!   the player stands, so a first-person shot would have the body (and its
 //!   hair) fill the frame.
