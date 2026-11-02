@@ -2703,6 +2703,10 @@ fn build_swap_plan(
             tally.refused.push(reason);
             continue;
         }
+        // Drawn with the character program (see `fixture_character_parts`).
+        if shader == moly_law::shading::character::SHADER_NAME {
+            continue;
+        }
         if shader == SHADOWMESH_SHADER {
             tally.shadow_mesh_names.push(name.clone());
             shadow_mesh.push(handle.clone());
@@ -2886,6 +2890,12 @@ impl Plugin for FixtureMaterialPlugin {
         crate::gpu_image_release::prepare_after_images::<FixtureMaterial>(app);
         app.add_plugins(MaterialPlugin::<FixtureMaterial>::default())
             .add_plugins(surfaces::FixtureSurfacePlugin)
+            .add_systems(
+                Update,
+                crate::fixture_character_parts::swap
+                    .in_set(FixtureMaterialSet)
+                    .before(switch_materials),
+            )
             .add_systems(Update, switch_materials.in_set(FixtureMaterialSet)
                 .after(crate::render_inputs::FixtureLayoutSet).after(crate::fixture_colors::prepare)
                 .run_if(crate::fixture_colors::ready));

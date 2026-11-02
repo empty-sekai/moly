@@ -40,6 +40,7 @@ pub use moly_core::weather_transition;
 pub mod billboard;
 pub mod character_material;
 pub mod fixture_timeline_particles;
+pub mod fixture_character_parts;
 pub mod fixture_colors;
 pub mod fixture_emission;
 pub mod fixture_material;

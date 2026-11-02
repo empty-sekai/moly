@@ -868,27 +868,8 @@ fn build_material(
                 .collect(),
         )
     });
-    let params = CharacterParams {
-        shader_usage: resolved.character_shader_usage as f32,
-        // 眉标量缺席时槽写零：变体已按纹理槽关掉，死支路不消费。
-        eyebrow_clip: resolved.eyebrow.map_or(0.0, |e| e.clip),
-        eyebrow_alpha: resolved.eyebrow.map_or(0.0, |e| e.alpha),
-        use_dither: resolved.use_dither,
-        brightness: resolved.brightness,
-        eyebrow_stencil: resolved.eyebrow_stencil,
-        override_shading_parameter: resolved.override_shading_parameter,
-        local_body_shading_intensity: resolved.local_body_shading_intensity,
-        local_body_shading_edge_threshold: resolved.local_body_shading_edge_threshold,
-        local_body_shading_edge_smoothness: resolved.local_body_shading_edge_smoothness,
-        dither_alpha: resolved.dither_alpha,
-        main_tex_st: resolved.main_tex_st.unwrap_or([1.0, 1.0, 0.0, 0.0]),
-        head_position: [0.0; 4],
-    };
-    let params_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
-        label: Some("character_material_params"),
-        contents: &params.byte_array(),
-        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-    });
+    let params = character_params(&resolved, [0.0; 4]);
+    let params_buffer = params_buffer(render_device, &params);
     Ok(CharacterMaterial {
         key: CharacterKey {
             // The eyebrow variant is gated on a keyword variant plus a
@@ -914,6 +895,100 @@ fn build_material(
         body_mask_tex: resolved.body_mask_tex.map(load),
         eyebrow_tex,
         eye_textures,
+    })
+}
+
+/// The parameter block of a resolved character material, with the head
+/// reference point it starts from.
+fn character_params(resolved: &law::CharacterMaterial, head_position: [f32; 4]) -> CharacterParams {
+    CharacterParams {
+        shader_usage: resolved.character_shader_usage as f32,
+        // 眉标量缺席时槽写零：变体已按纹理槽关掉，死支路不消费。
+        eyebrow_clip: resolved.eyebrow.map_or(0.0, |e| e.clip),
+        eyebrow_alpha: resolved.eyebrow.map_or(0.0, |e| e.alpha),
+        use_dither: resolved.use_dither,
+        brightness: resolved.brightness,
+        eyebrow_stencil: resolved.eyebrow_stencil,
+        override_shading_parameter: resolved.override_shading_parameter,
+        local_body_shading_intensity: resolved.local_body_shading_intensity,
+        local_body_shading_edge_threshold: resolved.local_body_shading_edge_threshold,
+        local_body_shading_edge_smoothness: resolved.local_body_shading_edge_smoothness,
+        dither_alpha: resolved.dither_alpha,
+        main_tex_st: resolved.main_tex_st.unwrap_or([1.0, 1.0, 0.0, 0.0]),
+        head_position,
+    }
+}
+
+fn params_buffer(render_device: &RenderDevice, params: &CharacterParams) -> Buffer {
+    render_device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("character_material_params"),
+        contents: &params.byte_array(),
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+    })
+}
+
+/// A fixture part drawn with the character program (a footbath's soaking
+/// legs): the material from the fixture's own property table and the
+/// textures its glTF material retains, by property name.
+///
+/// The part belongs to the fixture, not to a character: the head reference
+/// point is the material's own `_MysekaiCharacterHeadPosition` (read only
+/// where the body mask's red channel selects the sphere regime), and the
+/// part has no eye pattern or eyebrow pass. A part with an eyebrow mask is
+/// refused.
+pub fn fixture_part(
+    slot: &MaterialSlot,
+    textures: &BTreeMap<String, Handle<Image>>,
+    render_device: &RenderDevice,
+    fog: bool,
+) -> Result<CharacterMaterial, String> {
+    if slot.shader != law::SHADER_NAME {
+        return Err(format!(
+            "fixture material {}: shader {} is not the character program",
+            slot.name, slot.shader
+        ));
+    }
+    let resolved = law::resolve(slot)?;
+    if resolved.eyebrow.is_some() {
+        return Err(format!(
+            "fixture material {}: an eyebrow mask on a fixture part has no eyebrow pass",
+            slot.name
+        ));
+    }
+    let texture = |property: &str| {
+        textures.get(property).cloned().ok_or_else(|| {
+            format!("fixture material {}: {property} is not retained by the import", slot.name)
+        })
+    };
+    let main_tex = texture("_MainTex")?;
+    let body_mask_tex = match resolved.body_mask_tex {
+        Some(_) => Some(texture("_BodyMaskTex")?),
+        None => None,
+    };
+    let head_position = *slot
+        .colors
+        .get("_MysekaiCharacterHeadPosition")
+        .ok_or_else(|| {
+            format!("fixture material {}: no _MysekaiCharacterHeadPosition", slot.name)
+        })?;
+    let mut params = character_params(&resolved, head_position);
+    // Fixture meshes keep their source UVs (rows counted from the bottom),
+    // while image rows begin at the top: the texture transform folds in
+    // the row flip, as the fixture program does for its own materials.
+    let [scale_u, scale_v, offset_u, offset_v] = params.main_tex_st;
+    params.main_tex_st = [scale_u, -scale_v, offset_u, 1.0 - offset_v];
+    let params_buffer = params_buffer(render_device, &params);
+    Ok(CharacterMaterial {
+        key: CharacterKey { eyebrow: false, fog },
+        params,
+        params_buffer,
+        lip_pattern: None,
+        lip_pattern_revision: 0,
+        eye_pattern: None,
+        main_tex,
+        body_mask_tex,
+        eyebrow_tex: None,
+        eye_textures: None,
     })
 }
 

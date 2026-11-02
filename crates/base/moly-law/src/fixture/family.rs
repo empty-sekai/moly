@@ -2,7 +2,7 @@
 //!
 //! 两件事：
 //! - **族键闭集**：家具侧出现过的 shader 名全集（数据面现算口径，
-//!   999 个家具包的全部材质）。族键 = shader 名精确匹配；全集之外
+//!   1571 个家具模型的全部材质）。族键 = shader 名精确匹配；全集之外
 //!   的名字按未知拒绝，其中跨进来的通用 URP 材质按名字具名拒绝；
 //! - **二维选择表**：`MysekaiMaterialBuilder.GetBasicFixtureShaderAttribute`
 //!   读材质上的 `_FixtureShaderUsage` 与 `_FixtureObjectBlendMode` 两个
@@ -15,19 +15,20 @@
 
 /// 家具侧出现过的 shader 名全集（族键）。数量是数据面现算的材质数，
 /// 作为闭集的锚：多一个名字、少一个名字，这一族都会跟着变。
-pub const FAMILY_SHADER_NAMES: [&str; 12] = [
-    "Mysekai/Fixture/Basic",          // 1001
-    "Mysekai/Fixture/ShadowMesh",     // 604
-    "Mysekai/Fixture/Road",           // 161
-    "Mysekai/Fixture/Rug",            // 15
-    "Mysekai/Object",                 // 22
-    "Mysekai/Site/Tree",              // 9
+pub const FAMILY_SHADER_NAMES: [&str; 13] = [
+    "Mysekai/Fixture/Basic",          // 1762
+    "Mysekai/Fixture/ShadowMesh",     // 579
+    "Mysekai/Fixture/Road",           // 197
+    "Mysekai/Fixture/TransparentBlock", // 94
+    "Mysekai/Fixture/Rug",            // 46
+    "Mysekai/Object",                 // 28
+    "Mysekai/Site/Tree",              // 16
     "Mysekai/Fixture/Fence",          // 7
     "Mysekai/Effect/UberUnlit",       // 6
     "Mysekai/Fixture/Canvas",         // 6
     "Particles/Standard Unlit",       // 4
-    "Mysekai/Fixture/TransparentBlock", // 2
-    "Universal Render Pipeline/Lit",  // 25
+    "Mysekai/Character",              // 1
+    "Universal Render Pipeline/Lit",  // 1
 ];
 
 /// 按名字具名拒绝的通用材质：不在家具族里，但真实出现在家具包的
@@ -93,9 +94,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn family_set_is_closed_at_twelve_names() {
-        // 闭集大小钉在 12：名字增删会让这一臂红。
-        assert_eq!(FAMILY_SHADER_NAMES.len(), 12);
+    fn family_set_is_closed_at_thirteen_names() {
+        // 闭集大小钉在 13：名字增删会让这一臂红。
+        assert_eq!(FAMILY_SHADER_NAMES.len(), 13);
         // 主力三族在集内。
         for name in [
             "Mysekai/Fixture/Basic",
