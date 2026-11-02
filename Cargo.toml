@@ -6,6 +6,7 @@ members = [
     "crates/base/moly-store",
     "crates/base/moly-plugin",
     "crates/base/moly-text",
+    "crates/base/moly-sequence",
     "crates/engine/moly-assets",
     "crates/engine/moly-perf",
     "crates/net/moly-protocol",

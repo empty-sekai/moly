@@ -38,7 +38,7 @@ order = [
 crates = ["moly-config"]
 
 [layers.base]
-crates = ["moly-law", "moly-store", "moly-plugin", "moly-text"]
+crates = ["moly-law", "moly-store", "moly-plugin", "moly-text", "moly-sequence"]
 
 [layers.engine]
 crates = ["moly-assets", "moly-perf"]
@@ -78,6 +78,7 @@ crates = ["moly-app", "moly-stage", "moly-android", "moly-launcher", "moly-serve
 "crates/base/moly-law/Cargo.toml" = "base"
 "crates/base/moly-config/Cargo.toml" = "config"
 "crates/base/moly-store/Cargo.toml" = "base"
+"crates/base/moly-sequence/Cargo.toml" = "base"
 "crates/base/moly-plugin/Cargo.toml" = "base"
 "crates/base/moly-text/Cargo.toml" = "base"
 

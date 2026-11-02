@@ -5747,6 +5747,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "moly-sequence"
+version = "0.0.6"
+dependencies = [
+ "bevy_math",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "moly-server"
 version = "0.0.6"
 dependencies = [
