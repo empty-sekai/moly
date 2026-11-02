@@ -5334,11 +5334,13 @@ name = "moly-audio"
 version = "0.0.6"
 dependencies = [
  "bevy",
+ "cpal",
  "getrandom 0.2.17",
  "image",
  "js-sys",
  "libc",
  "moly-assets",
+ "moly-config",
  "moly-core",
  "moly-law",
  "moly-protocol",

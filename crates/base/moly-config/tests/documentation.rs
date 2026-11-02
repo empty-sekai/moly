@@ -324,7 +324,7 @@ fn the_developer_switches_say_that_their_values_are_strings() {
         section.contains("environment variable"),
         "the `[dev]` section must say that each switch is also set through its environment variable"
     );
-    let flags = ["dev.window", "dev.check_systems"];
+    let flags = ["dev.window", "dev.check_systems", "dev.record_audio"];
     for key in KEYS.iter().filter(|key| key_section(key) == "dev" && !flags.contains(&key.path)) {
         assert!(matches!(key.kind, Kind::Text | Kind::Path), "`{}` must hold a string", label(key));
     }

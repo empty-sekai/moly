@@ -470,8 +470,19 @@ pub fn advance_cue_playbacks(
 /// Clock seed: the low 32 bits of the epoch in nanoseconds (JS milliseconds
 /// on wasm). The middleware seeds from its own clock, so the values differ
 /// from the source's and the distribution is the same.
+///
+/// A native run that records its audio (`dev.record_audio`,
+/// `MOLY_RECORD_AUDIO`) takes a draw of the world seed's audio stream
+/// instead: its picks then repeat with `dev.seed` rather than follow the
+/// wall clock.
 #[cfg(not(target_arch = "wasm32"))]
 fn clock_seed() -> u32 {
+    if crate::audio_capture::recording_audio() {
+        return crate::world_seed::next_u64(
+            crate::world_seed::Stream::Audio,
+            "the audio sequence picks",
+        ) as u32;
+    }
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("系统时钟早于 Unix 纪元")

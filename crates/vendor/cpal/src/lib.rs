@@ -182,6 +182,8 @@ use wasm_bindgen::prelude::*;
 pub use device_description::{
     DeviceDescription, DeviceDescriptionBuilder, DeviceDirection, DeviceType, InterfaceType,
 };
+#[cfg(feature = "custom")]
+pub use default_output::set_default_output_device;
 pub use error::*;
 pub use platform::{
     available_hosts, default_host, host_from_id, Device, Devices, Host, HostId, Stream,
@@ -191,6 +193,8 @@ pub use samples_formats::{FromSample, Sample, SampleFormat, SizedSample, I24, U2
 use std::convert::TryInto;
 use std::time::Duration;
 
+#[cfg(feature = "custom")]
+mod default_output;
 pub mod device_description;
 mod error;
 mod host;

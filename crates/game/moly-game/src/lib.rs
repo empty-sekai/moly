@@ -282,6 +282,10 @@ pub fn app(
                 ),
                 ..default()
             });
+    // `dev.record_audio` swaps the default output device, which the audio
+    // plugin opens while the default plugins are added.
+    #[cfg(not(target_arch = "wasm32"))]
+    moly_audio::audio_capture::install_before_output(&mut app);
     app.add_plugins(plugins);
     // A host that seats no documents leaves the instance a non-game one; the
     // game's host replaces this before the first frame.

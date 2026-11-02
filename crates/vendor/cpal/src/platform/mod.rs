@@ -558,6 +558,10 @@ macro_rules! impl_platform_host {
             }
 
             fn default_output_device(&self) -> Option<Self::Device> {
+                #[cfg(feature = "custom")]
+                if let Some(device) = crate::default_output::default_output_device() {
+                    return Some(device.into());
+                }
                 match self.0 {
                     $(
                         $(#[cfg($feat)])?

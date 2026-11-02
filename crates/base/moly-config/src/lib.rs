@@ -281,6 +281,8 @@ keys! {
         "A showcase carousel of emotes: comma-separated item names from the archive, refused with a panic when a name is not in the archive or the list is empty. Unset: no carousel.";
     DEV_EMOTICON_SHOW_SECS = "dev.emoticon_show_secs", Some("MOLY_EMOTICON_SHOW_SECS"), Text, "developer window",
         "The seconds each showcase emote is shown. Unset or not a number: 6.";
+    DEV_FFMPEG = "dev.ffmpeg", Some("MOLY_FFMPEG"), Path, "developer window",
+        "The ffmpeg program a recording encodes and mixes its video with. Unset: `ffmpeg`, found on `PATH`.";
     DEV_FIXTURE_CLOCK_NOW = "dev.fixture_clock_now", Some("MOLY_FIXTURE_CLOCK_NOW"), Text, "developer window",
         "Pins the fixture clock's local time to `HH:MM` on native builds so clock gimmicks can be verified at a known hour; a malformed value is refused with a panic. Unset: the device's local clock.";
     DEV_FIXTURE_DIRECTION = "dev.fixture_direction", Some("MOLY_FIXTURE_DIRECTION"), Text, "developer window",
@@ -401,6 +403,8 @@ keys! {
         "Prints the first particle whose position, velocity or axis differs from the native row; unset: no debug output.";
     DEV_RANK_CHANGE = "dev.rank_change", Some("MOLY_RANK_CHANGE"), Text, "developer window",
         "`<prev>,<current>`: delivers a rank change before the first site loads; unset: no rank change.";
+    DEV_RECORD_AUDIO = "dev.record_audio", Some("MOLY_RECORD_AUDIO"), Flag, "developer window",
+        "Starts without an audio card: the game's mix is rendered by the frame loop instead and recorded with the frames; read at start. Unset or false: the sound card plays the mix and recordings have no sound.";
     DEV_ROOM_LEVEL = "dev.room_level", Some("MOLY_ROOM_LEVEL"), Text, "developer window",
         "The room level a native start uses; unset: the site's saved level.";
     DEV_SCENE_CONTENT = "dev.scene_content", Some("MOLY_SCENE_CONTENT"), Text, "developer window",

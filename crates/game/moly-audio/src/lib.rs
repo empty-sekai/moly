@@ -35,6 +35,8 @@ pub use moly_core::ui_font;
 pub use moly_core::weather_transition;
 
 pub mod audio;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod audio_capture;
 pub mod audio_inputs;
 pub mod audio_sequence;
 pub mod audio_startup;

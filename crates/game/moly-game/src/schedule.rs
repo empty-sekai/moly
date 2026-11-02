@@ -280,6 +280,9 @@ pub fn install(app: &mut App) {
     #[cfg(not(target_arch = "wasm32"))]
     crate::plugin_host::install(app);
     crate::control::install(app);
+    // Native only: recording writes files and runs ffmpeg.
+    #[cfg(not(target_arch = "wasm32"))]
+    moly_devtools::record::install(app);
     crate::control_panel::install(app);
     crate::player_data::install(app);
     crate::fixture_colors::install(app);

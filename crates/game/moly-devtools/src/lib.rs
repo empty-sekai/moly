@@ -64,6 +64,8 @@ pub use moly_render::source_particle;
 pub use moly_render::source_particle_streams;
 pub use moly_render::source_particle_render;
 pub use moly_audio::audio;
+#[cfg(not(target_arch = "wasm32"))]
+pub use moly_audio::audio_capture;
 pub use moly_audio::audio_inputs;
 pub use moly_audio::audio_sequence;
 pub use moly_audio::audio_startup;
@@ -216,4 +218,6 @@ pub mod npc_harness;
 pub mod plugin_host;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod portraits;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod record;
 pub mod talk_probe;

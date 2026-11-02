@@ -12,3 +12,12 @@ The whole directory is beneath `crates/`, so the existing build-source
 fingerprint includes the dependency and its patch. Cargo uses the root
 `[patch.crates-io]` entry. This is a host transport correction, not a game
 timeline or sound-resource rule.
+
+Local change: with the `custom` feature, `set_default_output_device`
+(`src/default_output.rs`) stores a `CustomDevice` that every host's
+`default_output_device()` (the `impl_platform_host!` wrapper in
+`src/platform/mod.rs`) returns ahead of its own default. `None` restores the
+hosts' defaults. A program uses it to give a library that opens the default
+output (rodio, and through it bevy_audio) a device the program renders
+itself. Without the feature, or with no device set, the hosts behave as
+upstream.

@@ -114,7 +114,7 @@ The developer window translates its display text with these files: the source ca
 
 ### `[dev]`
 
-These are developer and diagnostic switches, read by the developer window, or by the server where the Read by column says so. Each one is also set through its environment variable. Every `[dev]` key except `dev.window` and `dev.check_systems` holds a string that the switch parses itself, so write it quoted (`seed = "42"`, not `seed = 42`); what the string must look like, and what an invalid one does, is in its Description.
+These are developer and diagnostic switches, read by the developer window, or by the server where the Read by column says so. Each one is also set through its environment variable. Every `[dev]` key except `dev.window`, `dev.check_systems` and `dev.record_audio` holds a string that the switch parses itself, so write it quoted (`seed = "42"`, not `seed = 42`); what the string must look like, and what an invalid one does, is in its Description.
 
 | Key | Environment variable | Value | Read by | Description |
 |---|---|---|---|---|
@@ -169,6 +169,7 @@ These are developer and diagnostic switches, read by the developer window, or by
 | `effect_trace` | `MOLY_EFFECT_TRACE` | string | developer window | Traces each effect instance's draws every frame; unset: no trace. |
 | `emoticon_items` | `MOLY_EMOTICON_ITEMS` | string | developer window | A showcase carousel of emotes: comma-separated item names from the archive, refused with a panic when a name is not in the archive or the list is empty. Unset: no carousel. |
 | `emoticon_show_secs` | `MOLY_EMOTICON_SHOW_SECS` | string | developer window | The seconds each showcase emote is shown. Unset or not a number: 6. |
+| `ffmpeg` | `MOLY_FFMPEG` | path | developer window | The ffmpeg program a recording encodes its video with and joins the sound into. Unset: `ffmpeg` on `PATH`. See [Recording](recording.md). |
 | `fixture_clock_now` | `MOLY_FIXTURE_CLOCK_NOW` | string | developer window | Pins the fixture clock's local time to `HH:MM` on native builds so clock gimmicks can be verified at a known hour; a malformed value is refused with a panic. Unset: the device's local clock. |
 | `fixture_direction` | `MOLY_FIXTURE_DIRECTION` | string | developer window | Smoke knob that rewrites the facing of every placed fixture to 0=Front, 1=Left, 2=Back or 3=Right; a value outside 0..3 or not an integer is refused with a panic. Unset or empty: the table's own Front facing is kept. |
 | `fixture_preview` | `MOLY_FIXTURE_PREVIEW` | string | developer window | The developer model preview to add to the placement table, `surface-<n>` or `gimmick-<n>` in developer builds. Unset: no preview. |
@@ -229,6 +230,7 @@ These are developer and diagnostic switches, read by the developer window, or by
 | `player_talk_stack_tap_secs` | `MOLY_PLAYER_TALK_STACK_TAP_SECS` | string | developer window | A window (`<until>` or `<from>:<until>` seconds) in which the stack head's Talk button request is written for the character under it; unset: the probe is off. |
 | `procedural_debug` | `MOLY_PROCEDURAL_DEBUG` | string | developer window | Prints the first particle whose position, velocity or axis differs from the native row; unset: no debug output. |
 | `rank_change` | `MOLY_RANK_CHANGE` | string | developer window | `<prev>,<current>`: delivers a rank change before the first site loads; unset: no rank change. |
+| `record_audio` | `MOLY_RECORD_AUDIO` | true or false | developer window | Starts without an audio card: the game's mix is rendered by the frame loop instead and recorded with the frames; read at start. Unset or false: the sound card plays the mix and recordings have no sound. See [Recording](recording.md). |
 | `room_level` | `MOLY_ROOM_LEVEL` | string | developer window | The room level a native start uses; unset: the site's saved level. |
 | `scene_content` | `MOLY_SCENE_CONTENT` | string | developer window | `compact` or `full`: how much of a site's content is loaded at a native start; unset: compact. |
 | `screenshot_dir` | `MOLY_SCREENSHOT_DIR` | path | developer window | The directory a requested frame capture is written to. Unset: captures go to `screenshots`. |
