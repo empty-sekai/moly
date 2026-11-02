@@ -32,7 +32,7 @@ use moly_law::{
 };
 
 use crate::{
-    character::MotionDriver,
+    character::{BodyOwner, BodyToken, MotionDriver},
     fixture::{FixturePlacements, OccupancyRow},
     fixture_activity_data::{
         ActivityKey, ActivityOrigin, ActivitySpec, ActivityTimeline, FixtureActivityTables, PutType,
@@ -150,10 +150,48 @@ fn source_grid(floor: &FixtureFloorTiles, world: [f32; 3]) -> GridPosition {
     )
 }
 
-/// Separate from Rest's alone_holds: the Rest script may dispose without
-/// clearing the actual furniture timeline's animation lease.
+/// A fixture action's director on the body. Separate from Rest's body hold:
+/// the Rest script may dispose without releasing the furniture timeline's
+/// animation lease. The lease keeps the body's token until it is released.
 #[derive(Component, Clone, Copy)]
-pub struct NpcFixtureAnimationOwner(pub FixtureActivityOwner);
+pub struct NpcFixtureAnimationOwner {
+    pub owner: FixtureActivityOwner,
+    body: BodyToken,
+}
+
+impl NpcFixtureAnimationOwner {
+    /// `owner` takes `actor`'s body for its director.
+    pub(crate) fn take(world: &mut World, actor: Entity, owner: FixtureActivityOwner) -> Option<Self> {
+        let body = world
+            .get_mut::<MotionDriver>(actor)?
+            .take(BodyOwner::FixtureActivity);
+        Some(Self { owner, body })
+    }
+}
+
+/// Removes `owner`'s animation lease from `actor` and returns the body token
+/// it kept, still holding the body: the caller hands it back, or passes it to
+/// [`crate::character::resume_idle_after_fixture`]. None when the lease on
+/// `actor` is not `owner`'s.
+pub(crate) fn take_animation_lease(
+    world: &mut World,
+    actor: Entity,
+    owner: FixtureActivityOwner,
+) -> Option<BodyToken> {
+    let held = *world.get::<NpcFixtureAnimationOwner>(actor)?;
+    if held.owner != owner {
+        return None;
+    }
+    world.entity_mut(actor).remove::<NpcFixtureAnimationOwner>();
+    Some(held.body)
+}
+
+/// Hands `body` back to `actor`'s locomotion if it still holds the body.
+pub(crate) fn hand_back_body(world: &mut World, actor: Entity, body: Option<BodyToken>) {
+    if let (Some(body), Some(mut driver)) = (body, world.get_mut::<MotionDriver>(actor)) {
+        driver.hand_back(body);
+    }
+}
 
 /// The draws one no-talk factory call made on the member generator: one
 /// sort key per no-talk row (the source orders the rows by a fresh Guid
@@ -1588,7 +1626,7 @@ fn tick(
                 if selection.kind == TalkType::NoneTalk {
                     change_action(world, actor, NpcAction::FixtureAction, false)?;
                     session.phase = if crate::npc_objective::events::enrolled(world, actor) {
-                        start_hfsm_approach(world, actor, selection)?
+                        start_hfsm_approach(world, actor, selection, session.owner)?
                     } else {
                         Phase::Preparing
                     };
@@ -1631,7 +1669,9 @@ fn tick(
                     }
                     session.phase = match try_play_tweet(world, actor, &session.selection, frame)? {
                         Some(window) => Phase::TalkWindow(window),
-                        None => start_talk_timeline(world, actor, &session.selection, frame)?,
+                        None => start_talk_timeline(
+                            world, actor, &session.selection, frame, session.owner,
+                        )?,
                     };
                 }
             }
@@ -1644,7 +1684,7 @@ fn tick(
         let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
         session.phase = match try_play_tweet(world, actor, &session.selection, frame)? {
             Some(_) => Phase::TalkWindow(TalkWindow::HfsmTweet { elapsed: 0.0 }),
-            None => start_talk_timeline(world, actor, &session.selection, frame)?,
+            None => start_talk_timeline(world, actor, &session.selection, frame, session.owner)?,
         };
         return Ok(false);
     }
@@ -1704,7 +1744,9 @@ fn tick(
                     "[npc unit={}] frame={frame} tweet wait ended; call=TryRotateBeforeRotation",
                     selection.unit
                 );
-                session.phase = start_talk_timeline(world, actor, &session.selection, frame)?;
+                session.phase = start_talk_timeline(
+                    world, actor, &session.selection, frame, session.owner,
+                )?;
                 return Ok(false);
             }
         }
@@ -1757,9 +1799,9 @@ fn tick(
         let poses = live_poses(world, &session.selection)?;
         crate::npc::navigation::set_enabled(world, actor, false);
         set_pose(world, actor, poses.0)?;
-        world
-            .entity_mut(actor)
-            .insert(NpcFixtureAnimationOwner(session.owner));
+        let lease = NpcFixtureAnimationOwner::take(world, actor, session.owner)
+            .ok_or("selected NPC body is not installed")?;
+        world.entity_mut(actor).insert(lease);
         if let Some(mut driver) = world.get_mut::<MotionDriver>(actor) {
             driver.playing = None;
         }
@@ -1788,7 +1830,7 @@ fn tick(
             .is_none_or(|driver| Some(driver.player) != session.animator)
             || world
                 .get::<NpcFixtureAnimationOwner>(actor)
-                .is_none_or(|held| held.0 != session.owner)
+                .is_none_or(|held| held.owner != session.owner)
         {
             return Err("selected NPC animator generation or lease changed".into());
         }
@@ -1848,14 +1890,11 @@ fn tick(
                     let (_, end) = live_poses(world, &session.selection)?;
                     fixture_activity_timeline::cancel_and_release(world, token);
                     session.token = None;
-                    release_animation_lease(world, session);
+                    let body = release_animation_lease(world, session);
                     crate::npc::navigation::set_enabled(world, actor, true);
                     set_pose(world, actor, end)?;
-                    if !world
-                        .get::<MotionDriver>(actor)
-                        .is_some_and(|driver| driver.alone_holds)
-                    {
-                        crate::character::resume_idle_after_fixture(world, actor)?;
+                    if let Some(body) = body {
+                        crate::character::resume_idle_after_fixture(world, actor, body)?;
                     }
                     session.phase = Phase::TalkHeld;
                     info!(
@@ -1868,7 +1907,8 @@ fn tick(
                     .resource_mut::<FixtureActivityTimelines>()
                     .release(token);
                 session.token = None;
-                release_animation_lease(world, session);
+                let body = release_animation_lease(world, session);
+                hand_back_body(world, actor, body);
                 crate::npc::navigation::set_enabled(world, actor, true);
                 change_action(world, actor, NpcAction::FixtureActionIdle, false)?;
                 let (_, end) = live_poses(world, &session.selection)?;
@@ -1929,6 +1969,7 @@ fn start_talk_timeline(
     actor: Entity,
     selection: &Selection,
     frame: u32,
+    owner: FixtureActivityOwner,
 ) -> Result<Phase, String> {
     change_action(world, actor, NpcAction::FixtureAction, false)?;
     info!(
@@ -1936,7 +1977,7 @@ fn start_talk_timeline(
         selection.unit, selection.timeline.id
     );
     if crate::npc_objective::events::enrolled(world, actor) {
-        return start_hfsm_approach(world, actor, selection);
+        return start_hfsm_approach(world, actor, selection, owner);
     }
     Ok(Phase::Preparing)
 }
@@ -1956,8 +1997,10 @@ fn fixture_look_target(world:&World,actor:Entity,selection:&Selection)->Result<V
         world.get::<GlobalTransform>(selection.target.entity).map(|pose|pose.translation()).ok_or("fixture transform disappeared".into())
     }
 }
-fn start_hfsm_approach(world:&mut World,actor:Entity,selection:&Selection)->Result<Phase,String> {
-    world.entity_mut(actor).remove::<NpcFixtureMotionOwner>();
+fn start_hfsm_approach(world:&mut World,actor:Entity,selection:&Selection,owner:FixtureActivityOwner)->Result<Phase,String> {
+    if world.get::<NpcFixtureMotionOwner>(actor).is_some_and(|held|held.0==owner) {
+        world.entity_mut(actor).remove::<NpcFixtureMotionOwner>();
+    }
     Ok(Phase::HfsmApproach(ActionPointApproach::start_fixture(world, actor, selection.target.entity, selection.locate_index)?))
 }
 
@@ -2356,22 +2399,20 @@ fn change_action(
     Ok(())
 }
 
-fn release_animation_lease(world: &mut World, session: &Session) {
+/// Releases this session's animation lease and returns the body token it
+/// kept (see [`take_animation_lease`]).
+fn release_animation_lease(world: &mut World, session: &Session) -> Option<BodyToken> {
     let actor = session.owner.actor;
     if let Phase::HfsmApproach(approach) = &session.phase {
         approach.cancel(world, actor);
     }
-    if world
-        .get::<NpcFixtureAnimationOwner>(actor)
-        .is_some_and(|held| held.0 == session.owner)
-    {
-        world.entity_mut(actor).remove::<NpcFixtureAnimationOwner>();
-        if let Some(mut driver) = world.get_mut::<MotionDriver>(actor) {
-            if Some(driver.player) == session.animator {
-                driver.playing = None;
-            }
+    let body = take_animation_lease(world, actor, session.owner)?;
+    if let Some(mut driver) = world.get_mut::<MotionDriver>(actor) {
+        if Some(driver.player) == session.animator {
+            driver.playing = None;
         }
     }
+    Some(body)
 }
 
 fn dispose(world: &mut World, session: Session, site_changed: bool, completed: bool) {
@@ -2385,8 +2426,9 @@ fn dispose(world: &mut World, session: Session, site_changed: bool, completed: b
         }
     }
     let owned_timeline = world.get::<NpcFixtureAnimationOwner>(actor)
-        .is_some_and(|held| held.0 == session.owner);
-    release_animation_lease(world, &session);
+        .is_some_and(|held| held.owner == session.owner);
+    let body = release_animation_lease(world, &session);
+    hand_back_body(world, actor, body);
     if owned_timeline { crate::npc::navigation::set_enabled(world, actor, true); }
     let holds_motion = world
         .get::<NpcFixtureMotionOwner>(actor)

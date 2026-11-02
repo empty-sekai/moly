@@ -179,9 +179,11 @@ struct LeadIn {
 /// 段。`playing` 装配时为 `None`——播放器经 commands 插上，装配当帧读
 /// 不到，首段起播交给驱动系统。
 ///
-/// 待机动作演出期间播放器归演出侧（[`Self::alone_holds`]）：位移驱动
-/// 让位不换段，演出播完即交还；图句柄与 `playing`/`idle`/`player` 对
-/// 演出侧开放（它按段名往图里补节点、经同款过渡换段、归位待机）。
+/// While a state other than locomotion plays the animator it holds the
+/// body's [`BodyToken`]: locomotion does not change segments until that
+/// owner hands the token back. The graph handle and `playing`/`idle`/
+/// `player` stay open to those owners (they add nodes by clip name, change
+/// clips through the same transitions and return the body to idle).
 #[derive(Component)]
 pub struct MotionDriver {
     pub player: Entity,
@@ -202,15 +204,147 @@ pub struct MotionDriver {
     lead_in_wait: Option<UniTaskDelay>,
     /// 该成员自己的动画图（图与播放器都是实体局部状态，不共享）。
     pub graph: Handle<AnimationGraph>,
-    /// 待机动作演出占住播放器：true 时本驱动不换段。
-    pub alone_holds: bool,
+    /// The state that plays the animator instead of locomotion, if any.
+    held: Option<BodyToken>,
+    next_generation: u64,
+    /// Clip names already added to this character's graph, by the states that
+    /// play it in place of locomotion.
+    nodes: HashMap<String, AnimationNodeIndex>,
     idle_clip: String,
     walk_clip: String,
     installed_at: f32,
     probed: bool,
 }
 
+/// The states that play an NPC's animator in place of locomotion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BodyOwner {
+    /// An alone action's script (Rest and the idle-action states).
+    Alone,
+    Communication,
+    /// A talk script's motions.
+    Talk,
+    /// A player talk's motions on its NPC participants.
+    PlayerTalk,
+    /// An event's or a photo call's clips.
+    Event,
+    ChangeSite,
+    /// A fixture action's director and the states around it.
+    FixtureActivity,
+    /// A fixture talk's pre-action director.
+    FixtureTalk,
+    /// A cut-scene's director on its cast.
+    CutScene,
+    /// A still pose held for a portrait capture.
+    Portrait,
+}
+
+/// One owner's hold on an NPC body: valid until the owner hands it back or a
+/// later state takes the body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BodyToken {
+    owner: BodyOwner,
+    generation: u64,
+}
+
+impl BodyToken {
+    pub fn owner(self) -> BodyOwner {
+        self.owner
+    }
+}
+
 impl MotionDriver {
+    /// The state entering the body takes its animator. As with the source's
+    /// `ChangeAnimation`, the newest caller wins: the token it replaces goes
+    /// stale and can no longer hand the body back.
+    pub fn take(&mut self, owner: BodyOwner) -> BodyToken {
+        self.next_generation += 1;
+        let token = BodyToken {
+            owner,
+            generation: self.next_generation,
+        };
+        self.held = Some(token);
+        token
+    }
+
+    /// The token in `slot` while it still holds the body, otherwise a new
+    /// one for `owner`, stored back in `slot`. For owners that play several
+    /// clips in a row and keep their token between them.
+    pub fn claim(&mut self, slot: &mut Option<BodyToken>, owner: BodyOwner) -> BodyToken {
+        match *slot {
+            Some(token) if self.holds(token) => token,
+            _ => {
+                let token = self.take(owner);
+                *slot = Some(token);
+                token
+            }
+        }
+    }
+
+    pub fn holds(&self, token: BodyToken) -> bool {
+        self.held == Some(token)
+    }
+
+    /// The owner currently playing the animator instead of locomotion.
+    pub fn held_by(&self) -> Option<BodyOwner> {
+        self.held.map(BodyToken::owner)
+    }
+
+    pub fn locomotion_owns(&self) -> bool {
+        self.held.is_none()
+    }
+
+    /// The owner of `token` lets go. Only the current holder can: a token a
+    /// later state replaced returns false and changes nothing. Nothing is
+    /// replayed here: the owner's clip keeps playing until locomotion's next
+    /// segment change (or the idle the owner plays itself) crossfades from it.
+    pub fn hand_back(&mut self, token: BodyToken) -> bool {
+        if !self.holds(token) {
+            return false;
+        }
+        self.held = None;
+        true
+    }
+
+    /// [`Self::hand_back`] for a token kept in `slot`, which is emptied.
+    pub fn hand_back_slot(&mut self, slot: &mut Option<BodyToken>) -> bool {
+        slot.take().is_some_and(|token| self.hand_back(token))
+    }
+
+    /// The graph node of the shared library's clip `clip_name`, added to this
+    /// character's graph on first use. A clip already in the graph (an
+    /// earlier body of the same graph added it) is reused, not appended.
+    pub fn clip_node(
+        &mut self,
+        graphs: &mut Assets<AnimationGraph>,
+        library: &Gltf,
+        clip_name: &str,
+        unit: u32,
+    ) -> AnimationNodeIndex {
+        if let Some(node) = self.nodes.get(clip_name) {
+            return *node;
+        }
+        let clip = library
+            .named_animations
+            .get(clip_name)
+            .unwrap_or_else(|| panic!("the shared motion library has no clip {clip_name} (unit {unit})"));
+        let graph = graphs
+            .get_mut(&self.graph)
+            .map(|asset| asset.into_inner())
+            .unwrap_or_else(|| panic!("unit {unit}'s animation graph asset is missing"));
+        let existing = graph.graph.node_indices().find(|node| {
+            matches!(&graph.graph[*node].node_type, bevy::animation::graph::AnimationNodeType::Clip(handle) if handle == clip)
+        });
+        let node = existing.unwrap_or_else(|| graph.add_clip(clip.clone(), 1.0, graph.root));
+        self.nodes.insert(clip_name.to_owned(), node);
+        node
+    }
+
+    /// The node of `clip_name` if a state already added it to this graph.
+    pub fn added_clip_node(&self, clip_name: &str) -> Option<AnimationNodeIndex> {
+        self.nodes.get(clip_name).copied()
+    }
+
     fn lead_in(&self, kind: MotionKind) -> Option<LeadIn> {
         match kind {
             MotionKind::IdleS => self.idle_s,
@@ -660,7 +794,9 @@ pub fn wire_when_ready(
                 playing: None,
                 lead_in_wait: None,
                 graph: graph_handle.clone(),
-                alone_holds: false,
+                held: None,
+                next_generation: 0,
+                nodes: HashMap::new(),
                 idle_clip: idle_clip_name.clone(),
                 walk_clip: walk_clip_name.clone(),
                 installed_at: time.elapsed_secs(),
@@ -684,10 +820,20 @@ pub fn wire_when_ready(
 /// Transfer a completed source Director back to ordinary idle before a new
 /// talk clip is admitted. The caller must release the Director first so its
 /// sparse Root tracks cannot survive under a Hips-only shared animation.
-pub fn resume_idle_after_fixture(world: &mut World, actor: Entity) -> Result<(), String> {
-    let driver = world
-        .get::<MotionDriver>(actor)
+///
+/// Only the holder of `token` returns the body: when a later state (a talk
+/// motion) took it meanwhile, that state's clip keeps playing.
+pub fn resume_idle_after_fixture(
+    world: &mut World,
+    actor: Entity,
+    token: BodyToken,
+) -> Result<(), String> {
+    let mut driver = world
+        .get_mut::<MotionDriver>(actor)
         .ok_or("completed fixture actor animator is missing")?;
+    if !driver.hand_back(token) {
+        return Ok(());
+    }
     let (animator, idle) = (driver.player, driver.idle);
     let mut query = world.query::<(&mut AnimationPlayer, &mut AnimationTransitions)>();
     let (mut player, mut transitions) = query
@@ -702,7 +848,7 @@ pub fn resume_idle_after_fixture(world: &mut World, actor: Entity) -> Result<(),
 /// 转身族。相位换族即发一条换段调用：起始段起播，等满段长接循环段，每
 /// 步 0.5 秒过渡（段链语义见模块注释）；相位不换族不发。
 ///
-/// 待机动作演出占住播放器时（`alone_holds`）本系统整名让位：不换段、
+/// 别的状态持有身体（[`MotionDriver::locomotion_owns`] 为假）时本系统整名让位：不换段、
 /// 不做段族衔接——那段期间的播放器归演出侧，它交还时已把 `playing`
 /// 簿记归位（idle），本系统读到「已在播」自然不重触发。
 ///
@@ -716,23 +862,16 @@ pub fn drive(
             &CharacterUnitId,
             &MotionPhase,
             &mut MotionDriver,
-            Option<&crate::talk::fixture_action::TalkFixtureActorLease>,
             Option<&crate::npc_look_at::NpcLookAt>,
-        ),
-        (
-            Without<crate::npc_fixture_activity::NpcFixtureAnimationOwner>,
-            Without<crate::npc::change_site_state::ChangeSiteClip>,
-            // A cut-scene's cast member: its director owns the animator.
-            Without<crate::fixture_activity_state::CutSceneCastLease>,
         ),
     >,
     mut players: Query<&mut AnimationPlayer>,
     mut transitions: Query<&mut AnimationTransitions>,
 ) {
     let dt = clock.delta();
-    for (unit, phase, mut driver, talk_lease, look_at) in &mut npcs {
-        if driver.alone_holds || talk_lease.is_some_and(|lease| !lease.approaching) {
-            continue; // 演出侧占着播放器：位移相位换段让位
+    for (unit, phase, mut driver, look_at) in &mut npcs {
+        if !driver.locomotion_owns() {
+            continue; // another state holds the body: locomotion waits
         }
         // A look-at in flight on a standing character: the presenter's turn
         // clip (started with the tween); its end hands back to the idle clip.

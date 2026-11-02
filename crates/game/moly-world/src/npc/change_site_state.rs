@@ -73,6 +73,7 @@ use moly_law::objective::change_site as law;
 use moly_law::objective::{InterruptMarker, ObjectiveType, TalkType};
 
 use super::residency::{self, Away};
+use crate::character::{BodyOwner, BodyToken};
 use crate::npc::{
     CharacterUnitId, NpcAction, NpcActions, PathSlot, RestLifecycle, RouteStops, WalkState,
 };
@@ -235,10 +236,12 @@ fn advance_brightness(world:&mut World) {
     }
 }
 
-/// Marker: the change-site state plays a clip on this NPC; the locomotion
-/// driver leaves its animation player alone.
+/// Marker: the change-site state plays a clip on this NPC in place of
+/// locomotion, holding the body through `body` until the clip ends.
 #[derive(Component)]
-pub struct ChangeSiteClip;
+pub struct ChangeSiteClip {
+    body: BodyToken,
+}
 
 /// Marker: the objective's walk to the door of the NPC's own site is running
 /// on that site's retained navigation. The locomotion driver steps an NPC
@@ -564,7 +567,15 @@ fn set_stage(world: &mut World, actor: Entity, stage: Stage, frame: u32) {
 
 fn end_run(world: &mut World, actor: Entity) {
     world.resource_mut::<ChangeSiteRuns>().runs.remove(&actor);
-    world.entity_mut(actor).remove::<ChangeSiteClip>();
+    if let Some(clip) = world
+        .get_entity_mut(actor)
+        .ok()
+        .and_then(|mut entity| entity.take::<ChangeSiteClip>())
+    {
+        if let Some(mut driver) = world.get_mut::<crate::character::MotionDriver>(actor) {
+            driver.hand_back(clip.body);
+        }
+    }
     world.entity_mut(actor).remove::<ChangeSiteWalking>();
     world.entity_mut(actor).remove::<ExitMove>();
 }
@@ -1340,18 +1351,13 @@ fn start_clip(world: &mut World, actor: Entity, unit: u32, clip: &str, frame: u3
         Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
     )>::new(world);
     let (library, gltfs, mut graphs, mut drivers, mut players) = params.get_mut(world).expect("system params");
+    let mut body = None;
     let node = (|| {
         let lib = gltfs.get(&library.gltf)?;
         let mut driver = drivers.get_mut(actor).ok()?;
-        let mut nodes = HashMap::new();
-        let node = crate::alone_action_runtime::node_for(
-            &mut nodes,
-            &mut graphs,
-            lib,
-            &driver.graph,
-            clip,
-            unit,
-        );
+        body = Some(driver.take(BodyOwner::ChangeSite));
+        driver.playing = None;
+        let node = driver.clip_node(&mut graphs, lib, clip, unit);
         let (mut player, mut transitions) = players.get_mut(driver.player).ok()?;
         transitions
             .play(&mut player, node, crate::character::SEGMENT_BLEND)
@@ -1361,7 +1367,9 @@ fn start_clip(world: &mut World, actor: Entity, unit: u32, clip: &str, frame: u3
     })();
     match node {
         Some(node) => {
-            world.entity_mut(actor).insert(ChangeSiteClip);
+            if let Some(body) = body {
+                world.entity_mut(actor).insert(ChangeSiteClip { body });
+            }
             info!("[npc-change-site] unit={unit} frame={frame} PlayAnimation({clip}, 1.0)");
             set_stage(world, actor, Stage::EntryClip { node, shown }, frame);
         }
@@ -1390,9 +1398,12 @@ fn clip_finished(world: &mut World, actor: Entity, node: AnimationNodeIndex) -> 
         .is_none_or(|animation| animation.is_finished())
 }
 
-/// The clip is over: back to idle, the locomotion driver takes the player.
+/// The clip is over: the state hands the body back and plays the idle.
 fn end_clip(world: &mut World, actor: Entity, unit: u32) {
-    world.entity_mut(actor).remove::<ChangeSiteClip>();
+    let clip = world
+        .get_entity_mut(actor)
+        .ok()
+        .and_then(|mut entity| entity.take::<ChangeSiteClip>());
     let mut params = SystemState::<(
         Query<&mut crate::character::MotionDriver>,
         Query<&mut AnimationPlayer>,
@@ -1400,6 +1411,9 @@ fn end_clip(world: &mut World, actor: Entity, unit: u32) {
     )>::new(world);
     let (mut drivers, mut players, mut transitions) = params.get_mut(world).expect("system params");
     if let Ok(mut driver) = drivers.get_mut(actor) {
+        if let Some(clip) = clip {
+            driver.hand_back(clip.body);
+        }
         crate::alone_action_runtime::play_idle(&mut driver, &mut players, &mut transitions, unit);
     }
 }

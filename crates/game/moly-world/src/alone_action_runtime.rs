@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use bevy::animation::graph::{AnimationGraph, AnimationNodeIndex};
+use bevy::animation::graph::AnimationGraph;
 use bevy::animation::AnimationPlayer;
 use bevy::asset::{AssetPath, Assets, LoadState};
 use bevy::gltf::Gltf;
@@ -23,7 +23,7 @@ use moly_law::alone_action as law;
 use moly_law::blink::EyePattern;
 use moly_law::facial::LipPattern;
 
-use crate::character::{MotionDriver, MotionKind, MotionLibrary, SEGMENT_BLEND};
+use crate::character::{BodyOwner, BodyToken, MotionDriver, MotionKind, MotionLibrary, SEGMENT_BLEND};
 use crate::character_material::{CharacterMaterial, ToonMaterials};
 use crate::npc::CharacterUnitId;
 
@@ -621,7 +621,8 @@ pub struct AloneRuntime {
     mouth_handle: Handle<CharacterMaterial>,
     eye_pattern: String,
     mouth_pattern: String,
-    nodes: HashMap<String, AnimationNodeIndex>,
+    /// The script's hold on the body while it plays its motion segments.
+    body: Option<BodyToken>,
     steps_fired: usize,
 }
 
@@ -736,7 +737,7 @@ pub fn attach(
             mouth_handle,
             eye_pattern: eye_name.clone(),
             mouth_pattern: mouth_name.clone(),
-            nodes: HashMap::new(),
+            body: None,
             steps_fired: 0,
         });
         info!(
@@ -933,15 +934,16 @@ pub fn advance(
                 rt.seg = SegPlay::Empty;
                 // A newly admitted conversation has not emitted its animation
                 // commands yet; an already active conversation is never touched.
-                driver.alone_holds = false;
+                // The script's hold, if any, is let go with it.
+                driver.hand_back_slot(&mut rt.body);
                 driver.playing = None;
                 info!("[alone] unit={} Rest 退出：脚本结束、收表情件", unit.0);
             }
             rt.rest_epoch = epoch;
             if let (Some(epoch), Some(_)) = (epoch, rt.program.as_ref()) {
                 rt.script = Some(law::ScriptState::new(wall));
+                driver.claim(&mut rt.body, BodyOwner::Alone);
                 play_idle(driver, &mut players, &mut transitions, unit.0);
-                driver.alone_holds = true;
                 info!("[alone] unit={} Rest epoch={epoch}：新脚本启动", unit.0);
             }
         }
@@ -997,14 +999,8 @@ pub fn advance(
                 } => {
                     assert!(!play_end_motion, "待机脚本的自动 End 跟随尚无已支持的编排");
                     let clip = format!("{motion}_{}", phase.map(suffix_letter).unwrap_or("S"));
-                    let node = node_for(
-                        &mut rt.nodes,
-                        &mut graphs,
-                        lib,
-                        &driver.graph,
-                        &clip,
-                        unit.0,
-                    );
+                    driver.claim(&mut rt.body, BodyOwner::Alone);
+                    let node = driver.clip_node(&mut graphs, lib, &clip, unit.0);
                     let mut player = players.get_mut(driver.player).expect("角色播放器未装配");
                     let mut transition = transitions
                         .get_mut(driver.player)
@@ -1025,7 +1021,6 @@ pub fn advance(
                         Some(_) => SegPlay::Once,
                     };
                     driver.playing = None;
-                    driver.alone_holds = true;
                 }
                 law::Step::ShowEmoticon {
                     name,
@@ -1043,25 +1038,19 @@ pub fn advance(
         }
         if let SegPlay::Start { base, speed, blend } = &rt.seg {
             let start = format!("{base}_S");
-            let done = rt.nodes.get(&start).is_some_and(|node| {
+            let done = driver.added_clip_node(&start).is_some_and(|node| {
                 players.get(driver.player).is_ok_and(|player| {
                     player
                         .playing_animations()
-                        .any(|(id, animation)| id == node && animation.is_finished())
+                        .any(|(id, animation)| *id == node && animation.is_finished())
                 })
             });
             if done && !gate.cutscene_active {
                 let name = format!("{base}_L");
                 let speed = *speed;
                 let blend = *blend;
-                let node = node_for(
-                    &mut rt.nodes,
-                    &mut graphs,
-                    lib,
-                    &driver.graph,
-                    &name,
-                    unit.0,
-                );
+                driver.claim(&mut rt.body, BodyOwner::Alone);
+                let node = driver.clip_node(&mut graphs, lib, &name, unit.0);
                 let mut player = players.get_mut(driver.player).expect("角色播放器未装配");
                 let mut transition = transitions
                     .get_mut(driver.player)
@@ -1077,7 +1066,11 @@ pub fn advance(
         // survives TalkHold, and never steals a continuing dialogue's player.
         if talk.is_none()
             && (rt.script.is_some() || epoch.is_some()) {
-                driver.alone_holds = rt.script.is_some();
+                if rt.script.is_some() {
+                    driver.claim(&mut rt.body, BodyOwner::Alone);
+                } else {
+                    driver.hand_back_slot(&mut rt.body);
+                }
             }
     }
 }
@@ -1115,38 +1108,6 @@ pub fn play_idle(
     let animation = transitions.play(player, driver.idle, SEGMENT_BLEND);
     animation.repeat();
     driver.playing = Some(MotionKind::Idle);
-}
-
-/// 取（或首次补进图）一个动作段的节点下标。段名不在库里、图资产不在
-/// 都响亮失败——断线不留静默。对话动作段（直接剪辑名，无段族后缀）
-/// 与待机动作段共用这一条补图路径。
-pub fn node_for(
-    nodes: &mut HashMap<String, AnimationNodeIndex>,
-    graphs: &mut Assets<AnimationGraph>,
-    library: &Gltf,
-    graph_handle: &Handle<AnimationGraph>,
-    clip_name: &str,
-    unit: u32,
-) -> AnimationNodeIndex {
-    if let Some(node) = nodes.get(clip_name) {
-        return *node;
-    }
-    let clip = library
-        .named_animations
-        .get(clip_name)
-        .unwrap_or_else(|| panic!("共享动作库没有段 {clip_name}（unit {unit} 的待机步要点播它）"));
-    let graph = graphs
-        .get_mut(graph_handle)
-        .map(|asset| asset.into_inner())
-        .unwrap_or_else(|| panic!("unit {unit} 的动画图资产不在（装配时已建）"));
-    // Talk sessions have short-lived name maps but share the character's
-    // graph. Reopening the same conversation must not append its clips again.
-    let existing = graph.graph.node_indices().find(|node| {
-        matches!(&graph.graph[*node].node_type, bevy::animation::graph::AnimationNodeType::Clip(handle) if handle == clip)
-    });
-    let node = existing.unwrap_or_else(|| graph.add_clip(clip.clone(), 1.0, graph.root));
-    nodes.insert(clip_name.to_owned(), node);
-    node
 }
 
 /// 周期状态行（每 5 秒）：选取/命中/掷点累计、在播场景与时钟、当前脸、

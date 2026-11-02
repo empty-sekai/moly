@@ -33,10 +33,10 @@ use moly_law::talk::{
 };
 
 use crate::alone_action_runtime::{
-    apply_mouth_pattern, node_for, play_idle, FacialTables,
+    apply_mouth_pattern, play_idle, FacialTables,
 };
 use crate::audio::{VoiceLine, VoiceSpeaker, VoiceWho};
-use crate::character::{MotionDriver, MotionLibrary, SEGMENT_BLEND};
+use crate::character::{BodyOwner, BodyToken, MotionDriver, MotionLibrary, SEGMENT_BLEND};
 use crate::character_material::{CharacterMaterial, ToonMaterials};
 use crate::delayed_faces::{DelayedFaces, FaceCommand};
 use crate::emoticon::EmoticonArchive;
@@ -1541,7 +1541,9 @@ impl PlayerTalkSession {
 pub struct PlayerTalkRuntime {
     eye_handle: Handle<CharacterMaterial>,
     mouth_handle: Handle<CharacterMaterial>,
-    nodes: HashMap<String, AnimationNodeIndex>,
+    /// The talk's hold on the NPC's body while its motions play (None: it
+    /// holds nothing).
+    body: Option<BodyToken>,
     /// The segment a talk motion is in (None: the movement driver has the
     /// animator).
     segment: Option<TalkSegment>,
@@ -2343,7 +2345,7 @@ fn open_general(
         .insert(PlayerTalkRuntime {
             eye_handle: eye,
             mouth_handle: mouth,
-            nodes: HashMap::new(),
+            body: None,
             segment: None,
             original: None,
         })
@@ -2813,6 +2815,7 @@ pub fn advance_session(
             &mut window,
             &window_roots,
             &mut npcs,
+            &mut runtimes,
             &mut players,
             &mut transitions,
             &mut motion,
@@ -3080,6 +3083,7 @@ pub fn advance_session(
             &mut window,
             &window_roots,
             &mut npcs,
+            &mut runtimes,
             &mut players,
             &mut transitions,
             &mut motion,
@@ -3796,14 +3800,8 @@ fn begin_talk_animation(
         if let Some(previous) = runtime.original.clone() {
             let end_clip = format!("{previous}_E");
             if lib.named_animations.contains_key(end_clip.as_str()) {
-                let node = node_for(
-                    &mut runtime.nodes,
-                    graphs,
-                    lib,
-                    &driver.graph,
-                    &end_clip,
-                    unit,
-                );
+                driver.claim(&mut runtime.body, BodyOwner::PlayerTalk);
+                let node = driver.clip_node(graphs, lib, &end_clip, unit);
                 transitions
                     .play(
                         player,
@@ -3812,7 +3810,6 @@ fn begin_talk_animation(
                     )
                     .set_speed(1.0);
                 driver.playing = None;
-                driver.alone_holds = true;
                 info!(
                     "[player-talk] source={} step={} unit={unit}: end segment {} of the previous motion at speed 1, then {}",
                     command.source_talk,
@@ -3863,7 +3860,8 @@ fn start_talk_motion(
         );
         return;
     }
-    let node = node_for(&mut runtime.nodes, graphs, lib, &driver.graph, &clip, unit);
+    driver.claim(&mut runtime.body, BodyOwner::PlayerTalk);
+    let node = driver.clip_node(graphs, lib, &clip, unit);
     transitions
         .play(
             player,
@@ -3872,7 +3870,6 @@ fn start_talk_motion(
         )
         .set_speed(command.speed);
     driver.playing = None;
-    driver.alone_holds = true;
     runtime.original = Some(command.motion.clone());
     info!(
         "[player-talk] source={} step={} unit={unit} motion={}: start segment (speed {:.2}, blend {:.2}s)",
@@ -3956,7 +3953,8 @@ fn advance_talk_segments(
         }) => {
             let clip = format!("{motion}_L");
             if lib.named_animations.contains_key(clip.as_str()) {
-                let node = node_for(&mut runtime.nodes, graphs, lib, &driver.graph, &clip, unit);
+                driver.claim(&mut runtime.body, BodyOwner::PlayerTalk);
+                let node = driver.clip_node(graphs, lib, &clip, unit);
                 transition
                     .play(
                         &mut player,
@@ -3972,7 +3970,7 @@ fn advance_talk_segments(
                     ascii_or(&clip)
                 );
             } else {
-                driver.alone_holds = false;
+                driver.hand_back_slot(&mut runtime.body);
                 driver.playing = None;
                 info!(
                     "[player-talk] talk {} unit={unit}: start segment done, no loop segment {}: the animator goes back to the movement driver",
@@ -4001,6 +3999,7 @@ fn finish_session(
         ),
         Without<PlayerControlled>,
     >,
+    runtimes: &mut Query<&mut PlayerTalkRuntime>,
     players: &mut Query<&mut AnimationPlayer>,
     transitions: &mut Query<&mut AnimationTransitions>,
     motion: &mut PlayerTalkMotion,
@@ -4039,7 +4038,9 @@ fn finish_session(
     if let Ok((mut phase, _, mut driver)) = npcs.get_mut(session.npc).map(|(p, w, d, _)| (p, w, d))
     {
         *phase = MotionPhase::Dwelling { remaining: None };
-        driver.alone_holds = false;
+        if let Ok(mut runtime) = runtimes.get_mut(session.npc) {
+            driver.hand_back_slot(&mut runtime.body);
+        }
         driver.playing = None;
         play_idle(&mut driver, players, transitions, session.unit);
     }

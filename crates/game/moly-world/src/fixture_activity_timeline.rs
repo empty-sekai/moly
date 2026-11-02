@@ -8,6 +8,7 @@
 
 mod clock;
 mod effects;
+pub mod layer;
 mod loop_particles;
 mod source;
 
@@ -2032,7 +2033,8 @@ fn baked(state: &CoverageState) -> bool {
 /// every member before it asks for this check, so the lease is the proof of
 /// membership. A talk owner binds the cast of the current conversation: the
 /// source track names the exact unit and the entity is an admitted
-/// participant.
+/// participant. A one-character talk plays its pre-action after the talk has
+/// closed, as that character's own fixture action: it binds only its owner.
 fn validate_track_actor(
     world: &World,
     request: &StartTimeline,
@@ -2080,6 +2082,12 @@ fn validate_track_actor(
         .iter()
         .find(|track| &track.identity == identity)
         .ok_or_else(|| invalid("actor track is outside the selected source director"))?;
+    let in_talk = world
+        .get_resource::<crate::talk::ActiveTalk>()
+        .is_some_and(|talk| talk.participants().iter().any(|(_, entity)| *entity == actor));
+    if !in_talk && actor == request.owner.activity.actor {
+        return Ok(());
+    }
     let common_single = request
         .definition
         .tracks
@@ -2356,16 +2364,9 @@ fn initialize(
                     cache.insert(cache_key, node);
                     node
                 });
+                // The body's own animation keeps playing under the Director's
+                // output; `layer` lays the timeline's clips over it.
                 if claimed.insert(binding.animator) {
-                    world
-                        .get_mut::<AnimationPlayer>(binding.animator)
-                        .expect("validated animator")
-                        .stop_all();
-                    if let Some(mut transitions) =
-                        world.get_mut::<AnimationTransitions>(binding.animator)
-                    {
-                        *transitions = AnimationTransitions::new();
-                    }
                     world
                         .entity_mut(binding.animator)
                         .insert(TimelinePlaybackOwner(token));

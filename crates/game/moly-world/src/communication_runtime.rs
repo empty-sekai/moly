@@ -2,10 +2,10 @@
 //! presentation while a shared NPC communication state is active.
 
 use std::{collections::{HashMap, HashSet}, time::Duration};
-use bevy::{animation::{graph::{AnimationGraph, AnimationNodeIndex}, transition::AnimationTransitions, AnimationPlayer}, asset::LoadState, gltf::Gltf, prelude::*};
+use bevy::{animation::{graph::AnimationGraph, transition::AnimationTransitions, AnimationPlayer}, asset::LoadState, gltf::Gltf, prelude::*};
 use moly_assets::json::JsonAsset;
 use moly_law::alone_action::{self as law, Step};
-use crate::{alone_action_runtime::{self as shared, FacialTables, Lcg}, character::{MotionDriver, MotionLibrary}, character_material::{CharacterMaterial, ToonMaterials}, npc::CharacterUnitId};
+use crate::{alone_action_runtime::{self as shared, FacialTables, Lcg}, character::{BodyOwner, BodyToken, MotionDriver, MotionLibrary}, character_material::{CharacterMaterial, ToonMaterials}, npc::CharacterUnitId};
 
 #[derive(Component, Clone)]
 pub struct CommunicationPlayback { pub epoch: u64, pub participants: Vec<u32> }
@@ -26,8 +26,9 @@ struct Running {
     steps: Vec<Step>,
     cursor: usize,
     wait: Option<(f32, f32)>,
-    nodes: HashMap<String, AnimationNodeIndex>,
     start: Option<(String, f32, f32)>,
+    /// The loop's hold on the body while it plays the actor's animator.
+    body: Option<BodyToken>,
 }
 
 #[derive(Resource, Default)]
@@ -131,17 +132,17 @@ fn advance(
     for (entity, unit, playback, talk, toon, mut driver) in &mut actors {
         let playback = playback.filter(|_| talk.is_none());
         let Some(playback) = playback else {
-            if runtime.0.remove(&entity).is_some() {
-                emotes.hide(entity); driver.alone_holds = false;
+            if let Some(mut running) = runtime.0.remove(&entity) {
+                emotes.hide(entity); driver.hand_back_slot(&mut running.body);
                 if talk.is_none() { shared::play_idle(&mut driver, &mut players, &mut transitions, unit.0); }
             }
             continue;
         };
         let Some(program) = programs.0.get(&unit.0) else { continue; };
         retained.insert(entity);
-        let rt = runtime.0.entry(entity).or_insert_with(|| Running { epoch: playback.epoch, rng: Lcg::seeded(unit.0), steps: Vec::new(), cursor: 0, wait: None, nodes: HashMap::new(), start: None });
+        let rt = runtime.0.entry(entity).or_insert_with(|| Running { epoch: playback.epoch, rng: Lcg::seeded(unit.0), steps: Vec::new(), cursor: 0, wait: None, start: None, body: None });
         if rt.epoch != playback.epoch { rt.epoch = playback.epoch; rt.steps.clear(); rt.cursor = 0; rt.wait = None; rt.start = None; }
-        driver.alone_holds = true;
+        driver.claim(&mut rt.body, BodyOwner::Communication);
         let events = next_events(rt, program, &playback.participants, clock.delta());
         if gate.cutscene_active { continue; }
         for step in events {
@@ -151,7 +152,7 @@ fn advance(
                 Step::ChangeAnimation { motion, phase, speed, blend, play_end_motion, .. } => {
                     assert!(!play_end_motion, "communication end-segment chaining needs an explicit authored sequence");
                     let clip = format!("{motion}_{}", phase.map(shared::suffix_letter).unwrap_or("S"));
-                    let node = shared::node_for(&mut rt.nodes, &mut graphs, lib, &driver.graph, &clip, unit.0);
+                    let node = driver.clip_node(&mut graphs, lib, &clip, unit.0);
                     let mut player = players.get_mut(driver.player).expect("communication actor player is installed");
                     let mut transition = transitions.get_mut(driver.player).expect("communication actor transitions are installed");
                     let speed = law::effective_speed(speed);
@@ -165,9 +166,9 @@ fn advance(
             }
         }
         if let Some((motion, speed, blend)) = rt.start.clone() {
-            let done = rt.nodes.get(&format!("{motion}_S")).is_some_and(|node| players.get(driver.player).is_ok_and(|player| player.playing_animations().any(|(id, state)| id == node && state.is_finished())));
+            let done = driver.added_clip_node(&format!("{motion}_S")).is_some_and(|node| players.get(driver.player).is_ok_and(|player| player.playing_animations().any(|(id, state)| *id == node && state.is_finished())));
             if done {
-                let node = shared::node_for(&mut rt.nodes, &mut graphs, lib, &driver.graph, &format!("{motion}_L"), unit.0);
+                let node = driver.clip_node(&mut graphs, lib, &format!("{motion}_L"), unit.0);
                 let mut player = players.get_mut(driver.player).unwrap(); let mut transition = transitions.get_mut(driver.player).unwrap();
                 transition.play(&mut player, node, Duration::from_secs_f32(blend)).set_speed(speed).repeat(); rt.start = None;
             }

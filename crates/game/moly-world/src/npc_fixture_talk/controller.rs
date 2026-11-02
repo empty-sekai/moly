@@ -55,7 +55,7 @@ use super::{
     GroupStart, Roster,
 };
 use crate::{
-    character::MotionDriver,
+    character::{BodyToken, MotionDriver},
     fixture_activity_data::{timeline_asset, FixtureActivityTables, PrepareError},
     fixture_activity_provider::{FixtureActivityProvider, SourceFixtureViewLocalY},
     fixture_activity_state::{
@@ -68,7 +68,8 @@ use crate::{
     fixture_attach::AttachPoints,
     npc::{MotionPhase, NpcAction, NpcActions, PathSlot, RouteStops},
     npc_fixture_activity::{
-        prepare_exit, set_pose, LocalMove, NpcFixtureAnimationOwner, NpcFixtureMotionOwner,
+        hand_back_body, prepare_exit, set_pose, take_animation_lease, LocalMove,
+        NpcFixtureAnimationOwner, NpcFixtureMotionOwner,
     },
     npc_objective::{ObjectiveMind, TalkSlot},
     npc_talk_lottery::LocateRow,
@@ -427,19 +428,27 @@ pub(super) fn step(
                 Some(TimelineStatus::Completed) => {
                     timeline::cancel_and_release(world, token);
                     controller.phase = Phase::TalkHeld;
-                    release_animation(world, controller);
+                    let bodies = release_animation(world, controller);
                     if joined {
-                        for (unit, actor) in controller.characters.clone() {
+                        let characters = controller.characters.clone();
+                        for (index, (unit, actor)) in characters.into_iter().enumerate() {
                             if let Some(pose) = locator_pose(world, controller, unit, true) {
                                 let _ = set_pose(world, actor, pose);
                             }
-                            let _ = crate::character::resume_idle_after_fixture(world, actor);
+                            if let Some(Some(body)) = bodies.get(index) {
+                                let _ = crate::character::resume_idle_after_fixture(
+                                    world, actor, *body,
+                                );
+                            }
                         }
                         controller.log(
                             frame,
                             "the Director ended under a player talk; held until the talk ends",
                         );
                         return false;
+                    }
+                    for ((_, actor), body) in controller.characters.clone().into_iter().zip(bodies) {
+                        hand_back_body(world, actor, body);
                     }
                     controller.log(frame, "the Director ended");
                     begin_exit(world, controller, frame, false)
@@ -759,10 +768,12 @@ fn move_and_play(
         request: Some(request),
     };
     for (unit, actor) in controller.characters.clone() {
-        world.entity_mut(actor).insert((
-            NpcFixtureMotionOwner(controller.owner),
-            NpcFixtureAnimationOwner(controller.owner),
-        ));
+        world
+            .entity_mut(actor)
+            .insert(NpcFixtureMotionOwner(controller.owner));
+        if let Some(lease) = NpcFixtureAnimationOwner::take(world, actor, controller.owner) {
+            world.entity_mut(actor).insert(lease);
+        }
         if let Some(mut route) = world.get_mut::<RouteStops>(actor) {
             route.hold_for_fixture();
         }
@@ -854,20 +865,21 @@ fn begin_exit(world: &mut World, controller: &mut Controller, frame: u32, from_l
     false
 }
 
-fn release_animation(world: &mut World, controller: &Controller) {
+/// Drops every member's animation lease and returns the body tokens they
+/// kept, in `characters` order (None where the lease was not this
+/// controller's). The tokens still hold the bodies.
+fn release_animation(world: &mut World, controller: &Controller) -> Vec<Option<BodyToken>> {
+    let mut bodies = Vec::with_capacity(controller.characters.len());
     for (_, actor) in &controller.characters {
-        if world
-            .get::<NpcFixtureAnimationOwner>(*actor)
-            .is_some_and(|held| held.0 == controller.owner)
-        {
-            world
-                .entity_mut(*actor)
-                .remove::<NpcFixtureAnimationOwner>();
+        let body = take_animation_lease(world, *actor, controller.owner);
+        if body.is_some() {
             if let Some(mut driver) = world.get_mut::<MotionDriver>(*actor) {
                 driver.playing = None;
             }
         }
+        bodies.push(body);
     }
+    bodies
 }
 
 /// The token, the leases and the slots; no state change.
@@ -876,8 +888,9 @@ fn release(world: &mut World, controller: &mut Controller) {
         timeline::cancel_and_release(world, token);
     }
     controller.phase = Phase::Released;
-    release_animation(world, controller);
-    for (_, actor) in &controller.characters {
+    let bodies = release_animation(world, controller);
+    for ((_, actor), body) in controller.characters.iter().zip(bodies) {
+        hand_back_body(world, *actor, body);
         if world
             .get::<NpcFixtureMotionOwner>(*actor)
             .is_some_and(|held| held.0 == controller.owner)

@@ -13,6 +13,7 @@ use crate::field_modes::{GameStateType, HeldGameState};
 use crate::fixture_activity_state::{FixtureActivityOwner, FixtureActivityReservations, FixtureTarget};
 use crate::fixture_activity_timeline::{self as timeline, FixtureActivityTimelines, StartTimeline, TimelineStatus, TimelineToken};
 use crate::npc::{CharacterUnitId, NpcAction, NpcActions, RestLifecycle};
+use crate::character::{BodyOwner, BodyToken, MotionDriver};
 use super::{AiTalkData, BodyWait, ObjectiveMind, TalkSlot};
 use super::controller::{self, NpcHfsmActor, NpcHfsmFlags, NpcHfsmScopeResource};
 
@@ -362,7 +363,9 @@ pub fn begin_immediate_timeline(world: &mut World, entity: Entity, request: Star
     data.target_fixture = Some(fixture);
     if let Some(mut slot) = world.get_mut::<TalkSlot>(entity) { slot.set_current(data); slot.interrupt = None; }
     action(world, entity, NpcAction::FixtureAction);
-    world.entity_mut(entity).insert(crate::npc_fixture_activity::NpcFixtureAnimationOwner(owner));
+    if let Some(lease) = crate::npc_fixture_activity::NpcFixtureAnimationOwner::take(world, entity, owner) {
+        world.entity_mut(entity).insert(lease);
+    }
     let token = world.resource_mut::<FixtureActivityTimelines>().request_start(request);
     if let Some(mut lower) = world.get_mut::<EventLower>(entity) {
         lower.token = Some(token); lower.owner = Some(owner);
@@ -384,8 +387,10 @@ pub fn exit(world: &mut World, entity: Entity) {
     if let Some(token) = lower.token { timeline::cancel_and_release(world, token); }
     if let Some(owner) = lower.owner {
         if let Some(mut reservations) = world.get_resource_mut::<FixtureActivityReservations>() { reservations.release_owner(owner); }
-        world.entity_mut(entity).remove::<crate::npc_fixture_activity::NpcFixtureAnimationOwner>();
+        let body = crate::npc_fixture_activity::take_animation_lease(world, entity, owner);
+        crate::npc_fixture_activity::hand_back_body(world, entity, body);
     }
+    release_event_body(world, entity);
     if matches!(lower.state, LowerState::AfterEditReaction | LowerState::HighPriorityFixtureReaction | LowerState::PhotoShot | LowerState::ImmediatelyTimeline) {
         world.write_message(crate::npc_state::TweetHudEvent::Retire { npc: entity });
         world.entity_mut(entity).remove::<crate::npc_look_at::NpcLookAt>();
@@ -448,7 +453,8 @@ fn photo_face(world: &mut World, entity: Entity, row: &PhotoRow) {
 fn stop_photo_clip(world: &mut World, entity: Entity) {
     cancel_animation(world, entity);
     let Some((player, idle)) = world.get::<crate::character::MotionDriver>(entity).map(|d|(d.player,d.idle)) else { return; };
-    if let Some(mut driver) = world.get_mut::<crate::character::MotionDriver>(entity) { driver.alone_holds = false; driver.playing = None; }
+    release_event_body(world, entity);
+    if let Some(mut driver) = world.get_mut::<MotionDriver>(entity) { driver.playing = None; }
     let mut query = world.query::<(&mut AnimationPlayer, &mut AnimationTransitions)>();
     if let Ok((mut player, mut transitions)) = query.get_mut(world, player) {
         transitions.play(&mut player, idle, std::time::Duration::from_secs_f32(0.5)).repeat();
@@ -474,7 +480,8 @@ fn play_animation_clip(world: &mut World, entity: Entity, name: &str, blend: f32
     let playing = transitions.play(&mut animation, node, std::time::Duration::from_secs_f32(blend.max(0.0)));
     playing.set_speed(1.0);
     if repeat { playing.repeat(); }
-    if let Some(mut driver) = world.get_mut::<crate::character::MotionDriver>(entity) { driver.alone_holds = true; driver.playing = None; }
+    hold_event_body(world, entity);
+    if let Some(mut driver) = world.get_mut::<MotionDriver>(entity) { driver.playing = None; }
     Some((node, duration))
 }
 
@@ -649,8 +656,26 @@ pub(crate) fn cancel_animation(world:&mut World,entity:Entity) {
                 if *outcome==AnimationOutcome::Pending {*outcome=AnimationOutcome::Cancelled;}
             }
         }
-        if let Some(mut driver)=world.get_mut::<crate::character::MotionDriver>(entity) {driver.alone_holds=false;}
+        release_event_body(world, entity);
     }
+}
+
+/// The body token an event's clips hold on the actor.
+#[derive(Component)]
+struct EventBody(BodyToken);
+
+/// An event clip takes (or keeps) the actor's body.
+fn hold_event_body(world: &mut World, entity: Entity) {
+    let mut slot = world.get::<EventBody>(entity).map(|held| held.0);
+    let Some(mut driver) = world.get_mut::<MotionDriver>(entity) else { return; };
+    let token = driver.claim(&mut slot, BodyOwner::Event);
+    world.entity_mut(entity).insert(EventBody(token));
+}
+
+/// The event's clips let go of the actor's body, if they still hold it.
+fn release_event_body(world: &mut World, entity: Entity) {
+    let Some(EventBody(token)) = world.get_entity_mut(entity).ok().and_then(|mut actor| actor.take::<EventBody>()) else { return; };
+    if let Some(mut driver) = world.get_mut::<MotionDriver>(entity) { driver.hand_back(token); }
 }
 fn advance_animation(world: &mut World, entity: Entity, dt: f32) -> Result<(), String> {
     let Some(mut animation) = world.get_entity_mut(entity).ok().and_then(|mut e| e.take::<EventAnimation>()) else {
@@ -709,9 +734,7 @@ fn advance_animation(world: &mut World, entity: Entity, dt: f32) -> Result<(), S
         }
     }
     if result.is_err() {
-        if let Some(mut driver) = world.get_mut::<crate::character::MotionDriver>(entity) {
-            driver.alone_holds = false;
-        }
+        release_event_body(world, entity);
     } else {
         world.entity_mut(entity).insert(animation);
     }

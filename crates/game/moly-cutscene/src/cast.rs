@@ -60,6 +60,7 @@ use moly_assets::json::JsonAsset;
 use moly_assets::scene_state::{RefreshSourceActivity, SourceNodeActivity};
 use serde_json::Value;
 
+use moly_features::character::{BodyOwner, BodyToken, MotionDriver};
 use moly_features::fixture_activity_provider::FixtureActivityProvider;
 use moly_features::fixture_activity_state::FixtureActivityIdentity;
 use moly_features::fixture_activity_timeline::{
@@ -76,6 +77,8 @@ struct Member {
     taken_over: bool,
     /// The member's visibility before the cut-scene.
     prior_visibility: Visibility,
+    /// The member's hold on its body for the Director.
+    body: Option<BodyToken>,
 }
 
 /// What the view record says beyond the presenter's lists.
@@ -552,6 +555,7 @@ pub(super) fn prepare(
                     taken_over: true,
                     // NPCAvatarPresenter.Show runs before the director.
                     prior_visibility: Visibility::Inherited,
+                    body: None,
                 });
                 continue;
             }
@@ -590,6 +594,7 @@ pub(super) fn prepare(
                 entity,
                 taken_over,
                 prior_visibility,
+                body: None,
             });
         }
     }
@@ -612,7 +617,10 @@ pub(super) fn prepare(
     }
     // The leases: the director holds each bound object.
     let lease = CutSceneCastLease(request.owner.activity);
-    for member in &cast.members {
+    for member in &mut cast.members {
+        member.body = world
+            .get_mut::<MotionDriver>(member.entity)
+            .map(|mut driver| driver.take(BodyOwner::CutScene));
         world.entity_mut(member.entity).insert(lease);
     }
     let mut refused: Vec<(SourceAssetId, String)> = Vec::new();
@@ -1169,7 +1177,7 @@ fn set_player_visible(world: &mut World, visible: bool) {
 /// `EndAsync`: `RestoreStates` and `ChangeParentCharacters` back, before the
 /// view is disposed.
 pub(super) fn restore_cast_states(world: &mut World, cast: &mut Cast) {
-    for member in &cast.members {
+    for member in &mut cast.members {
         if world.get_entity(member.entity).is_err() {
             continue;
         }
@@ -1179,7 +1187,14 @@ pub(super) fn restore_cast_states(world: &mut World, cast: &mut Cast) {
                 .entity_mut(member.entity)
                 .remove::<CutSceneCastLease>();
             moly_features::npc::gate_entries::restore_state(world, member.entity);
-            let idle = moly_features::character::resume_idle_after_fixture(world, member.entity);
+            // The Director lets go with the idle; a body a later state took
+            // keeps that state's clip.
+            let idle = match member.body.take() {
+                Some(body) => {
+                    moly_features::character::resume_idle_after_fixture(world, member.entity, body)
+                }
+                None => Err("the member had no body to hold".to_string()),
+            };
             info!(
                 "[cutscene-cast] RestoreStates: unit {}: ChangeState(Idle); its idle motion resumes: {idle:?}",
                 member.unit
@@ -1236,11 +1251,14 @@ pub(super) fn after_dispose(world: &mut World, cast: &mut Cast, definition: &Tim
             world.entity_mut(gate).remove::<CutSceneCastLease>();
         }
     }
-    for member in &cast.members {
+    for member in &mut cast.members {
         if world.get_entity(member.entity).is_ok() && !member.taken_over {
             world
                 .entity_mut(member.entity)
                 .remove::<CutSceneCastLease>();
+            if let Some(mut driver) = world.get_mut::<MotionDriver>(member.entity) {
+                driver.hand_back_slot(&mut member.body);
+            }
         }
     }
     // The caller's `onEndFadeOutCallback`.
@@ -1279,13 +1297,16 @@ pub(super) fn after_dispose(world: &mut World, cast: &mut Cast, definition: &Tim
 
 /// The load was refused: the cast is released as `EndAsync` would.
 pub(super) fn release_refused(world: &mut World, cast: &mut Cast) {
-    for member in &cast.members {
+    for member in &mut cast.members {
         if world.get_entity(member.entity).is_err() {
             continue;
         }
         world
             .entity_mut(member.entity)
             .remove::<CutSceneCastLease>();
+        if let Some(mut driver) = world.get_mut::<MotionDriver>(member.entity) {
+            driver.hand_back_slot(&mut member.body);
+        }
         world.entity_mut(member.entity).remove::<ChildOf>();
         if !member.taken_over {
             world.despawn(member.entity);

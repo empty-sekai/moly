@@ -8,7 +8,6 @@
 //! NPC Current/Previous and action restoration belong to their shared lifecycle;
 //! finishing this window is not an AI-content reset.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use bevy::animation::graph::{AnimationGraph, AnimationNodeIndex};
@@ -24,9 +23,9 @@ use moly_law::talk::{
     PairRow, StepOp, StreamState, TweetRef,
 };
 
-use crate::alone_action_runtime::{node_for, play_idle, FacialTables, EYE_CELL, MOUTH_CELL};
+use crate::alone_action_runtime::{play_idle, FacialTables, EYE_CELL, MOUTH_CELL};
 use crate::audio::{VoiceLine, VoiceSpeaker, VoiceWho};
-use crate::character::{MotionDriver, MotionLibrary, SEGMENT_BLEND};
+use crate::character::{BodyOwner, BodyToken, MotionDriver, MotionLibrary, SEGMENT_BLEND};
 use crate::character_material::CharacterMaterial;
 use crate::delayed_faces::{DelayedFaces, FaceCommand};
 use crate::emoticon::EmoticonArchive;
@@ -854,7 +853,8 @@ pub struct TalkRuntime {
     unit: u32,
     eye_handle: Handle<CharacterMaterial>,
     mouth_handle: Handle<CharacterMaterial>,
-    nodes: HashMap<String, AnimationNodeIndex>,
+    /// 对话动作占着播放器期间的持身体凭据（None＝没占）。
+    body: Option<BodyToken>,
     /// 对话起播的动作在哪一段（None＝播放器归位移驱动）。
     segment: Option<TalkSegment>,
     /// 视图的 `_currentOriginalAnimationName`：最近一次交叉淡入的剪辑的
@@ -1016,7 +1016,7 @@ pub fn start_selected(
                 unit: actor.unit,
                 eye_handle: actor.eye.clone(),
                 mouth_handle: actor.mouth.clone(),
-                nodes: HashMap::new(),
+                body: None,
                 segment: None,
                 original: None,
             })
@@ -1601,6 +1601,7 @@ pub fn advance_talk(
             &mut window,
             &window_roots,
             &mut npcs,
+            &mut talk_runtimes,
             &mut playback.players,
             &mut playback.transitions,
             &mut prev,
@@ -1630,6 +1631,7 @@ pub fn advance_talk(
                 &mut window,
                 &window_roots,
                 &mut npcs,
+                &mut talk_runtimes,
                 &mut playback.players,
                 &mut playback.transitions,
                 &mut prev,
@@ -2973,14 +2975,8 @@ fn begin_animation(
             let end_clip = format!("{previous}_E");
             if lib.named_animations.contains_key(end_clip.as_str()) {
                 let unit = runtime.unit;
-                let node = node_for(
-                    &mut runtime.nodes,
-                    graphs,
-                    lib,
-                    &driver.graph,
-                    &end_clip,
-                    unit,
-                );
+                driver.claim(&mut runtime.body, BodyOwner::Talk);
+                let node = driver.clip_node(graphs, lib, &end_clip, unit);
                 transitions
                     .play(
                         player,
@@ -2989,7 +2985,6 @@ fn begin_animation(
                     )
                     .set_speed(1.0);
                 driver.playing = None;
-                driver.alone_holds = true;
                 info!(
                     "[talk] source={} step={} unit={} 先播上一个动作的收尾段 {}（速度 1）再起 {}",
                     command.source_talk,
@@ -3031,7 +3026,8 @@ fn start_motion(
         return;
     }
     let unit = runtime.unit;
-    let node = node_for(&mut runtime.nodes, graphs, lib, &driver.graph, &clip, unit);
+    driver.claim(&mut runtime.body, BodyOwner::Talk);
+    let node = driver.clip_node(graphs, lib, &clip, unit);
     transitions
         .play(
             player,
@@ -3041,7 +3037,6 @@ fn start_motion(
         .set_speed(command.speed);
     // 播放器归演出侧（位移驱动让位同款约定）；playing 的位移簿记清空。
     driver.playing = None;
-    driver.alone_holds = true;
     runtime.original = Some(command.motion.clone());
     info!(
         "[talk] source={} step={} unit={} motion={}：起播 _S（速度 {:.2}，混合 {:.2}s）",
@@ -3121,8 +3116,8 @@ fn advance_talk_segments(
             }) => {
                 let clip = format!("{motion}_L");
                 if lib.named_animations.contains_key(clip.as_str()) {
-                    let node =
-                        node_for(&mut runtime.nodes, graphs, lib, &driver.graph, &clip, unit);
+                    driver.claim(&mut runtime.body, BodyOwner::Talk);
+                    let node = driver.clip_node(graphs, lib, &clip, unit);
                     transitions
                         .play(&mut player, node, Duration::from_secs_f32(blend.max(0.0)))
                         .set_speed(speed)
@@ -3134,7 +3129,7 @@ fn advance_talk_segments(
                         ascii_or(&clip)
                     );
                 } else {
-                    driver.alone_holds = false;
+                    driver.hand_back_slot(&mut runtime.body);
                     driver.playing = None;
                     info!(
                         "[talk] 段 {} unit={unit} 起始段播完，库里无循环段 {}：播放器交还位移驱动",
@@ -3162,6 +3157,7 @@ fn finish_talk(
         &mut MotionDriver,
         &Transform,
     )>,
+    talk_runtimes: &mut Query<&mut TalkRuntime>,
     players: &mut Query<&mut AnimationPlayer>,
     transitions: &mut Query<&mut AnimationTransitions>,
     prev: &mut ResMut<TalkLedger>,
@@ -3205,7 +3201,9 @@ fn finish_talk(
         }
         if let Ok((mut phase, _, mut driver)) = npcs.get_mut(entity).map(|(p, w, d, _)| (p, w, d)) {
             *phase = MotionPhase::Dwelling { remaining: None };
-            driver.alone_holds = false;
+            if let Ok(mut runtime) = talk_runtimes.get_mut(entity) {
+                driver.hand_back_slot(&mut runtime.body);
+            }
             driver.playing = None;
             play_idle(&mut driver, players, transitions, unit);
         }

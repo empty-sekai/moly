@@ -204,6 +204,7 @@ pub fn install(app: &mut App) {
             .before(crate::player_fixture_action::refresh_availability)
             .before(crate::player_fixture_action::receive_requests),
     );
+    crate::fixture_activity_timeline::layer::install(app);
     app.init_resource::<crate::fixture_activity_state::FixtureActivityReservations>()
         .init_resource::<crate::fixture_activity_timeline::FixtureActivityTimelines>()
         .init_resource::<crate::player_fixture_action::PlayerFixtureRuntime>()

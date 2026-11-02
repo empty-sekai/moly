@@ -799,7 +799,7 @@ pub fn discover_late_animation(
 }
 
 /// 取（或首次补进图）一个家具动画剪辑的节点下标（角色侧共享动作库的
-/// `node_for` 同一条路径：图节点按剪辑名缓存）。
+/// `MotionDriver::clip_node` 同一条路径：图节点按剪辑名缓存）。
 pub fn fixture_node_for(
     animation: &mut FixtureAnimation,
     graphs: &mut Assets<AnimationGraph>,

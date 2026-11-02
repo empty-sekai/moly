@@ -11,7 +11,7 @@ use bevy::{
 use moly_assets::json::JsonAsset;
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::{Arc, Mutex}, time::Instant};
-use crate::{character::{CharacterPack, CharacterShell, MotionDriver}, character_material::ToonMaterials, npc::CharacterUnitId};
+use crate::{character::{BodyOwner, CharacterPack, CharacterShell, MotionDriver}, character_material::ToonMaterials, npc::CharacterUnitId};
 
 const SIZE: u32 = 512;
 const PHOTO_LAYER: usize = 30;
@@ -157,7 +157,9 @@ fn advance_inner(world: &mut World, job: &mut PortraitJob) -> Result<(), String>
         let Some(mut animations) = world.get_mut::<AnimationPlayer>(player) else { return Ok(()); };
         animations.stop_all();
         animations.play(idle).repeat().seek_to(0.5).pause();
-        world.get_mut::<MotionDriver>(actor).unwrap().alone_holds = true;
+        // The paused pose keeps the body until the actor is despawned with the
+        // temporary units; nothing here hands it back to locomotion.
+        world.get_mut::<MotionDriver>(actor).unwrap().take(BodyOwner::Portrait);
         job.frozen = true;
         return Ok(());
     }

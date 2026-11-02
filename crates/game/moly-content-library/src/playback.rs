@@ -241,7 +241,10 @@ pub fn observe_start(
     mut fixtures: MessageWriter<PlayerFixtureRequest>,
     gimmicks: Res<moly_features::fixture_gimmick::Gimmicks>,
     activity: Option<Res<PreviewRecord>>,
+    fixture_talk: Option<Res<moly_features::talk::fixture_action::FixtureTalkAction>>,
 ) {
+    // A one-character fixture talk walks on to its pre-action after the talk.
+    let after_talk = fixture_talk.as_ref().is_some_and(|action| action.after_talk());
     let effect_running = state
         .active
         .as_ref()
@@ -251,6 +254,7 @@ pub fn observe_start(
         || pair_session.is_some()
         || runtime.active()
         || effect_running
+        || after_talk
         || activity.as_ref().is_some_and(|record| record.active());
     if state.stopping {
         if !busy && state.cleanup_frames == 0 {
@@ -301,7 +305,8 @@ pub fn observe_start(
             // while its window is closed and the authored ending still runs.
             .is_some_and(|session| {
                 session.talk_id() == id && (active.started || session.body_ready())
-            }),
+            })
+            || active.started && after_talk,
         EntryKey::Fixture(_) => {
             effect_running
                 || active.choice.target.as_ref().is_some_and(|chosen| {

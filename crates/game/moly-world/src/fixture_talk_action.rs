@@ -4,11 +4,17 @@
 //! furniture. No timeline row is redrawn on retry; no actor gets a copied clock.
 //! Automatic NPC conversations already have an activity owner and do not enter
 //! this path. Body/voice admission waits for the source talk-enabled loop gate.
+//!
+//! A conversation with one character follows the single-character fixture
+//! order instead (`SingleFixtureActionLowerState`): the character notices the
+//! fixture and talks first, and only after the talk ends walks to its action
+//! point and plays the pre-action to its end. That run outlives the talk; it
+//! ends at its own completion or at the next talk cancel request.
 
 use super::{ActiveTalk, TalkHold};
 use crate::player_talk::TalkCancelRequest;
 use crate::{
-    character::MotionDriver,
+    character::{BodyOwner, BodyToken, MotionDriver},
     fixture_activity_data::{FixtureActivityTables, FixtureTalkActionInput, FixtureTalkActionPlan},
     fixture_activity_provider::{FixtureActivityProvider, SourceFixtureViewLocalY},
     fixture_activity_state::{FixtureActivityIdentity, FixtureActivityOwner},
@@ -21,12 +27,17 @@ use crate::{
     npc_fixture_activity::NpcFixtureAnimationOwner,
     npc_objective::MemberRng,
 };
-use bevy::{animation::graph::AnimationGraph, prelude::*};
+use bevy::{
+    animation::graph::AnimationGraph,
+    ecs::message::{MessageCursor, Messages},
+    prelude::*,
+};
 use moly_law::talk::UniformDraw;
 
 #[derive(Component, Clone, Copy)]
 pub struct TalkFixtureActorLease {
     owner: Entity,
+    /// False once the pre-action owns the member's animation.
     pub approaching: bool,
 }
 
@@ -35,6 +46,9 @@ struct PriorActor {
     entity: Entity,
     transform: Transform,
     walk: moly_law::path::WalkState,
+    /// The member's hold on its body for the pre-action; dropped once a
+    /// talk motion takes the body.
+    body: Option<BodyToken>,
 }
 
 struct Session {
@@ -53,14 +67,27 @@ struct Session {
     pending: String,
     failed: Option<String>,
     ready: bool,
+    /// The talk ended and the pre-action runs on its own.
+    talked: bool,
+    /// The pre-action completed and its cast stands at EndLoc.
+    settled: bool,
+    /// A talk cancel request arrived: the run ends with its talk.
+    cancelled: bool,
 }
 
 #[derive(Resource, Default)]
 pub struct FixtureTalkAction {
     session: Option<Session>,
+    /// A single-character pre-action still running after its talk.
+    after_talk: Option<Session>,
 }
 
 impl FixtureTalkAction {
+    /// Whether a pre-action is still running after its talk ended.
+    pub fn after_talk(&self) -> bool {
+        self.after_talk.is_some()
+    }
+
     pub fn diagnostics(
         &self,
         timelines: Option<&FixtureActivityTimelines>,
@@ -91,36 +118,92 @@ impl UniformDraw for CastDraw {
     }
 }
 
+/// One character: the source talks before the pre-action (the notice tweet
+/// and its talk come before the approach to the action point).
+fn talks_first(session: &Session) -> bool {
+    session.plan.as_ref().is_some_and(|plan| plan.cast.len() == 1)
+}
+
+/// The talk owning `session` ended. A talk-first session that was admitted
+/// goes on to its pre-action; any other is torn down.
+fn end_talk(world: &mut World, state: &mut FixtureTalkAction, mut session: Session) {
+    if talks_first(&session)
+        && session.ready
+        && !session.talked
+        && !session.cancelled
+        && session.failed.is_none()
+    {
+        if let Some(mut old) = state.after_talk.take() {
+            teardown(world, &mut old);
+        }
+        session.talked = true;
+        session.elapsed = 0.;
+        session.pending = "source pre-action after the talk".into();
+        state.after_talk = Some(session);
+    } else {
+        teardown(world, &mut session);
+    }
+}
+
 fn teardown(world: &mut World, session: &mut Session) {
     // Preparation may have acquired particle/clip leases before a later
     // source or navigation failure. Drop this request immediately; diagnostics
     // and a queued cancellation message must not keep those leases alive.
     // Shared effect instances remain owned by any other live request.
     session.draft.take();
+    // The talk can end on the frame its Director completes, before `drive`
+    // has seen the completion. A completed Director still ends the source
+    // way: the actors stand at EndLoc, not where they were before the talk.
+    let completed = session.settled || session.token.is_some_and(|token| {
+        world
+            .get_resource::<FixtureActivityTimelines>()
+            .and_then(|all| all.status(token))
+            .is_some_and(|status| matches!(status, TimelineStatus::Completed))
+    });
+    if completed && !session.settled {
+        if let Err(reason) = complete_pre_action(world, session) {
+            warn!(
+                "[fixture-talk-action] talk={} completion at teardown failed: {}",
+                session.talk, reason
+            );
+        }
+    }
     if let Some(token) = session.token.take() {
         timeline::cancel_and_release(world, token);
     }
-    for prior in session.prior.drain(..) {
+    for mut prior in session.prior.drain(..) {
         if world
             .get::<TalkFixtureActorLease>(prior.entity)
             .map(|lease| lease.owner)
             != Some(session.owner)
         {
+            // The member left this talk: its hold leaves with it.
+            if let Some(mut driver) = world.get_mut::<MotionDriver>(prior.entity) {
+                driver.hand_back_slot(&mut prior.body);
+            }
             continue;
         }
-        if let Some(mut transform) = world.get_mut::<Transform>(prior.entity) {
-            *transform = prior.transform;
-        }
-        if let Some(mut walk) = world.get_mut::<WalkState>(prior.entity) {
-            walk.0 = prior.walk;
+        if !completed {
+            if let Some(mut transform) = world.get_mut::<Transform>(prior.entity) {
+                *transform = prior.transform;
+            }
+            if let Some(mut walk) = world.get_mut::<WalkState>(prior.entity) {
+                walk.0 = prior.walk;
+            }
         }
         if let Some(mut driver) = world.get_mut::<MotionDriver>(prior.entity) {
+            driver.hand_back_slot(&mut prior.body);
             driver.playing = None;
         }
         crate::npc::cancel_external_approach(world, prior.entity);
         world
             .entity_mut(prior.entity)
             .remove::<TalkFixtureActorLease>();
+        // A run after its talk ends its own hold; a live talk's hold ends
+        // with the talk.
+        if session.talked {
+            world.entity_mut(prior.entity).remove::<TalkHold>();
+        }
     }
 }
 
@@ -136,8 +219,8 @@ pub fn cancel_owner(world: &mut World, owner: Option<Entity>) {
         .as_ref()
         .is_some_and(|session| session.owner == owner)
     {
-        if let Some(mut session) = state.session.take() {
-            teardown(world, &mut session);
+        if let Some(session) = state.session.take() {
+            end_talk(world, &mut state, session);
         }
     }
     world.insert_resource(state);
@@ -173,19 +256,29 @@ fn complete_pre_action(world: &mut World, session: &mut Session) -> Result<(), S
         timeline::cancel_and_release(world, token);
     }
     let plan = session.plan.as_ref().ok_or("completed pre-action has no source plan")?;
-    for member in &plan.cast {
-        if world.get::<TalkFixtureActorLease>(member.actor).map(|lease| lease.owner)
-            != Some(session.owner)
-        {
+    // Each member's hold ends before its pose settles. An idle is played only
+    // where the hold is still the newest one; a talk motion that took a
+    // member's body also holds it, so that clip keeps playing until the
+    // holder lets go.
+    for (member, prior) in plan.cast.iter().zip(session.prior.iter_mut()) {
+        let Some(lease) = world.get::<TalkFixtureActorLease>(member.actor) else {
+            return Err("completed pre-action actor lease changed".into());
+        };
+        if lease.owner != session.owner {
             return Err("completed pre-action actor lease changed".into());
         }
+        let held = prior.body.filter(|body| {
+            world
+                .get::<MotionDriver>(member.actor)
+                .is_some_and(|driver| driver.holds(*body))
+        });
+        prior.body = None;
         settle_completed_actor(world, member.actor, member.locate.end.unwrap_or(member.locate.start))?;
-        // A talk-enabled loop may already have admitted its own body clip.
-        // Releasing the Director must not replace that newer animation.
-        if !session.ready || !world.get::<MotionDriver>(member.actor).is_some_and(|driver| driver.alone_holds) {
-            crate::character::resume_idle_after_fixture(world, member.actor)?;
+        if let Some(body) = held {
+            crate::character::resume_idle_after_fixture(world, member.actor, body)?;
         }
     }
+    session.settled = true;
     body_ready(world, session);
     Ok(())
 }
@@ -212,6 +305,11 @@ fn fail(world: &mut World, session: &mut Session, reason: String) {
         "[fixture-talk-action] talk={} failed: {}",
         session.talk, reason
     );
+    if session.talked {
+        session.failed = Some(reason);
+        teardown(world, session);
+        return;
+    }
     if let Some(mut ledger) = world.get_resource_mut::<crate::player_talk::PlayerTalkLedger>() {
         ledger.last_outcome = Some(crate::player_talk::PlayerTalkOutcome::Rejected {
             requested: Some(crate::npc_objective::TalkContent {
@@ -224,7 +322,9 @@ fn fail(world: &mut World, session: &mut Session, reason: String) {
     }
     session.failed = Some(reason);
     teardown(world, session);
-    world.write_message(TalkCancelRequest);
+    if !session.talked {
+        world.write_message(TalkCancelRequest);
+    }
 }
 
 fn prepare(world: &mut World, session: &mut Session) -> Result<(), (bool, String)> {
@@ -270,7 +370,11 @@ fn prepare(world: &mut World, session: &mut Session) -> Result<(), (bool, String
         world.entity_mut(session.main).insert(rng.0);
         session.plan_resolved = true;
     }
-    let Some(plan) = session.plan.as_ref() else {
+    let Some(plan) = session
+        .plan
+        .as_ref()
+        .filter(|_| session.talked || !talks_first(session))
+    else {
         body_ready(world, session);
         return Ok(());
     };
@@ -377,7 +481,10 @@ fn prepare(world: &mut World, session: &mut Session) -> Result<(), (bool, String
                 entity: member.actor,
                 transform,
                 walk,
+                body: None,
             });
+            // A run after its talk holds the actor the same way; the talk's
+            // own hold already ended with the talk.
             world.entity_mut(member.actor).insert((
                 TalkFixtureActorLease {
                     owner: session.owner,
@@ -411,7 +518,7 @@ fn prepare(world: &mut World, session: &mut Session) -> Result<(), (bool, String
             None => return Err((true, "cast walking to source action points".into())),
         }
     }
-    for member in &plan.cast {
+    for (member, prior) in plan.cast.iter().zip(session.prior.iter_mut()) {
         // The movement owner reached the exact source position. Only transfer
         // the authored final orientation and animation ownership here.
         world.get_mut::<WalkState>(member.actor).unwrap().0.forward =
@@ -421,6 +528,9 @@ fn prepare(world: &mut World, session: &mut Session) -> Result<(), (bool, String
             .get_mut::<TalkFixtureActorLease>(member.actor)
             .unwrap()
             .approaching = false;
+        if let Some(mut driver) = world.get_mut::<MotionDriver>(member.actor) {
+            driver.claim(&mut prior.body, BodyOwner::FixtureTalk);
+        }
     }
     world.init_resource::<FixtureActivityTimelines>();
     // Loading and navigation do not consume the authored Director's time.
@@ -453,7 +563,7 @@ fn waits_for_completion(definition: &timeline::TimelineDefinition) -> bool {
     has_loop_gate
 }
 
-pub fn drive(world: &mut World) {
+pub fn drive(world: &mut World, mut cancels: Local<MessageCursor<TalkCancelRequest>>) {
     let wanted = world
         .get_resource::<ActiveTalk>()
         .filter(|talk| talk.preparing)
@@ -473,16 +583,32 @@ pub fn drive(world: &mut World) {
     let active_owner = world
         .get_resource::<ActiveTalk>()
         .map(|talk| talk.effect_owner);
+    let cancelled = world
+        .get_resource::<Messages<TalkCancelRequest>>()
+        .is_some_and(|messages| cancels.read(messages).count() > 0);
     let mut state = world
         .remove_resource::<FixtureTalkAction>()
         .unwrap_or_default();
+    // A cancel request or the next talk ends a pre-action left running after
+    // its talk.
+    if cancelled || wanted.is_some() {
+        if let Some(mut after) = state.after_talk.take() {
+            teardown(world, &mut after);
+        }
+    }
+    // The talk may end on a later frame than the request was read.
+    if cancelled {
+        if let Some(session) = state.session.as_mut() {
+            session.cancelled = true;
+        }
+    }
     if state
         .session
         .as_ref()
         .is_some_and(|session| Some(session.owner) != active_owner)
     {
-        if let Some(mut old) = state.session.take() {
-            teardown(world, &mut old);
+        if let Some(old) = state.session.take() {
+            end_talk(world, &mut state, old);
         }
     }
     if state.session.is_none() {
@@ -503,68 +629,95 @@ pub fn drive(world: &mut World) {
                 pending: "source pre-action preparation".into(),
                 failed: None,
                 ready: false,
+                talked: false,
+                settled: false,
+                cancelled: false,
             });
         }
     }
     if let Some(session) = state.session.as_mut() {
-        session.elapsed += world.get_resource::<Time>().map_or(0., Time::delta_secs);
-        if session.failed.is_none() {
-            if let Some(token) = session.token {
-                let status = world
-                    .get_resource::<FixtureActivityTimelines>()
-                    .and_then(|all| all.status(token))
-                    .cloned();
-                match status {
-                    Some(TimelineStatus::Playing {
-                        loop_started,
-                        enable_talk,
-                        ..
-                    }) if loop_started && enable_talk => body_ready(world, session),
-                    Some(TimelineStatus::Playing { .. }) => {
-                        let no_loop = session.plan.as_ref().is_some_and(|_| {
-                            // A source timeline without a loop may admit at its first
-                            // successfully sampled frame, not before asset preflight.
-                            world
-                                .get_resource::<FixtureActivityTimelines>()
-                                .is_some_and(|all| all.has_no_loop(token))
-                        });
-                        if no_loop {
-                            body_ready(world, session);
-                        }
-                    }
-                    Some(TimelineStatus::Completed) => {
-                        if let Err(reason) = complete_pre_action(world, session) {
-                            fail(world, session, reason);
-                        }
-                    }
-                    Some(TimelineStatus::Failed(error)) => fail(world, session, error.to_string()),
-                    Some(TimelineStatus::Cancelled) | None => {
-                        fail(world, session, "source pre-action cancelled".into())
-                    }
-                    _ => {}
-                }
-            } else if !session.plan_resolved || session.plan.is_some() && !session.ready {
-                if let Err((retryable, reason)) = prepare(world, session) {
-                    if retryable {
-                        session.pending = reason;
-                    } else {
-                        fail(world, session, reason);
-                    }
-                }
-            }
-            if !session.ready && session.failed.is_none() && session.elapsed > session.timeout {
-                fail(
-                    world,
-                    session,
-                    format!(
-                        "source pre-action preparation timed out: {}",
-                        session.pending
-                    ),
-                );
+        advance(world, session);
+    }
+    if let Some(after) = state.after_talk.as_mut() {
+        advance(world, after);
+        // A failure has already torn the run down; a completed run releases
+        // its cast where the pre-action left it.
+        if after.failed.is_some() || after.settled {
+            let mut after = state.after_talk.take().unwrap();
+            if after.failed.is_none() {
+                teardown(world, &mut after);
             }
         }
     }
     world.insert_resource(state);
+}
+
+/// A run after its talk that has not started its pre-action yet.
+fn waits_to_start(session: &Session) -> bool {
+    session.talked && session.token.is_none() && !session.settled
+}
+
+/// Advances one session by a frame.
+fn advance(world: &mut World, session: &mut Session) {
+    session.elapsed += world.get_resource::<Time>().map_or(0., Time::delta_secs);
+    if session.failed.is_none() {
+        if let Some(token) = session.token {
+            let status = world
+                .get_resource::<FixtureActivityTimelines>()
+                .and_then(|all| all.status(token))
+                .cloned();
+            match status {
+                Some(TimelineStatus::Playing {
+                    loop_started,
+                    enable_talk,
+                    ..
+                }) if loop_started && enable_talk => body_ready(world, session),
+                Some(TimelineStatus::Playing { .. }) => {
+                    let no_loop = session.plan.as_ref().is_some_and(|_| {
+                        // A source timeline without a loop may admit at its first
+                        // successfully sampled frame, not before asset preflight.
+                        world
+                            .get_resource::<FixtureActivityTimelines>()
+                            .is_some_and(|all| all.has_no_loop(token))
+                    });
+                    if no_loop {
+                        body_ready(world, session);
+                    }
+                }
+                Some(TimelineStatus::Completed) => {
+                    if let Err(reason) = complete_pre_action(world, session) {
+                        fail(world, session, reason);
+                    }
+                }
+                Some(TimelineStatus::Failed(error)) => fail(world, session, error.to_string()),
+                Some(TimelineStatus::Cancelled) | None => {
+                    fail(world, session, "source pre-action cancelled".into())
+                }
+                _ => {}
+            }
+        } else if !session.plan_resolved || session.plan.is_some() && (!session.ready || waits_to_start(session)) {
+            if let Err((retryable, reason)) = prepare(world, session) {
+                if retryable {
+                    session.pending = reason;
+                } else {
+                    fail(world, session, reason);
+                }
+            }
+        }
+        if (!session.ready || waits_to_start(session))
+            && session.failed.is_none()
+            && session.elapsed > session.timeout
+        {
+            fail(
+                world,
+                session,
+                format!(
+                    "source pre-action preparation timed out: {}",
+                    session.pending
+                ),
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -599,6 +752,7 @@ mod tests {
             }),
             token: None, prior: Vec::new(), elapsed: 0.0, timeout: 120.0,
             pending: "prepared first effect; second failed".into(), failed: None, ready: false,
+            talked: false, settled: false, cancelled: false,
         };
         assert!(weak.upgrade().is_some());
         fail(world, &mut session, "source preflight failed".into());
