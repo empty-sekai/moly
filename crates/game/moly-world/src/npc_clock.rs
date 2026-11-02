@@ -1,6 +1,12 @@
 //! The frame delta time the NPC timers read: the engine's frame clock
-//! (`moly_law::frame_time`) run on this host's real clock with the project's
+//! (`moly_law::frame_time`) run on this host's device clock with the project's
 //! extracted time settings (`time-manager.json`).
+//!
+//! The device clock is the host's real time, advanced at the virtual clock's
+//! effective speed: at speed 1 it is the real clock; a paused or scaled
+//! virtual clock (the developer time controls) pauses or scales the NPC timers
+//! with the animation players, which read the virtual clock. The engine's
+//! maximum timestep applies to the device delta as it does on a device.
 //!
 //! Every NPC accumulator reads [`NpcClock::delta`]: the agent step, the Rest
 //! delay, the objective waits, the state clocks and the presenter clock, and
@@ -30,6 +36,8 @@ use moly_law::frame_time::{FrameClock, TimeSettings};
 pub struct NpcClock {
     engine: Option<FrameClock>,
     settings: Option<Handle<JsonAsset>>,
+    /// Seconds of the device clock since the host started.
+    device: Option<f64>,
 }
 
 impl NpcClock {
@@ -79,16 +87,24 @@ fn parse_settings(text: &str) -> TimeSettings {
 /// First, after the host clocks update: one engine-clock frame.
 pub fn advance(
     real: Res<Time<Real>>,
+    host: Res<Time<Virtual>>,
     server: Res<AssetServer>,
     jsons: Res<Assets<JsonAsset>>,
     mut clock: ResMut<NpcClock>,
 ) {
-    let Some(now) = real
-        .last_update()
-        .map(|instant| instant.duration_since(real.startup()).as_secs_f64())
-    else {
-        return;
+    let now = match clock.device {
+        Some(device) => device + real.delta_secs_f64() * host.effective_speed_f64(),
+        None => {
+            let Some(started) = real
+                .last_update()
+                .map(|instant| instant.duration_since(real.startup()).as_secs_f64())
+            else {
+                return;
+            };
+            started
+        }
     };
+    clock.device = Some(now);
     if let Some(engine) = clock.engine.as_mut() {
         engine.update(now);
         return;
