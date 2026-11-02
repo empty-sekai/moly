@@ -11,6 +11,7 @@ moly-audio = { path = "../moly-audio" }
 moly-ui = { path = "../moly-ui" }
 moly-world = { path = "../moly-world" }
 moly-features = { path = "../moly-features" }
+moly-act = { path = "../moly-act" }
 moly-convert = { path = "../moly-convert" }
 moly-mission = { path = "../moly-mission" }
 moly-photo = { path = "../moly-photo" }

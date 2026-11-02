@@ -271,6 +271,10 @@ pub fn install(app: &mut App) {
             .before(audio::advance_se),
     );
     crate::game_settings::install(app);
+    // The actions every client shares, and the hub's registry they are
+    // registered with, before the runner that asks for them.
+    moly_features::act::install(app);
+    moly_act::install(app);
     crate::director::install(app);
     // Native only: the browser engine runs no Luau plugins.
     #[cfg(not(target_arch = "wasm32"))]

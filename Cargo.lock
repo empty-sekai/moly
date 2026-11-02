@@ -5260,6 +5260,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "moly-act"
+version = "0.0.6"
+dependencies = [
+ "bevy",
+ "moly-config",
+ "moly-features",
+ "moly-law",
+ "moly-link",
+ "moly-protocol",
+ "serde_json",
+]
+
+[[package]]
 name = "moly-android"
 version = "0.0.6"
 dependencies = [
@@ -5457,6 +5470,7 @@ dependencies = [
  "image",
  "js-sys",
  "libc",
+ "moly-act",
  "moly-assets",
  "moly-audio",
  "moly-config",
@@ -5555,6 +5569,7 @@ dependencies = [
  "image",
  "js-sys",
  "libc",
+ "moly-act",
  "moly-assets",
  "moly-audio",
  "moly-config",
@@ -5799,6 +5814,7 @@ version = "0.0.6"
 dependencies = [
  "bevy",
  "console_error_panic_hook",
+ "moly-act",
  "moly-assets",
  "moly-audio",
  "moly-config",

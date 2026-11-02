@@ -201,6 +201,8 @@ pub use moly_features::sitemap;
 pub use moly_features::sitemap_phenomena;
 pub use moly_features::stamina_recover_dialog;
 pub use moly_features::weather_dialog;
+/// The general actions a script drives the game with.
+pub use moly_act as act;
 
 pub mod control;
 pub mod control_panel;

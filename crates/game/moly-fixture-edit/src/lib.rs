@@ -43,6 +43,10 @@ pub mod field_build;
 pub mod floor_camera;
 mod game_state;
 mod input;
+pub mod layout_actions;
+/// The editor's own commands, read from the objects `moly.layout.command`
+/// takes.
+pub mod layout_command;
 pub mod layout_director;
 mod layout_rules;
 mod owned;
@@ -2435,8 +2439,10 @@ impl Plugin for FixtureEditPlugin {
         moly_features::fixture_put_limit::install(app);
         road::install(app);
         layout_director::install(app);
+        layout_actions::install(app);
         app.init_resource::<EditSession>()
             .init_resource::<field_build::FieldBuilds>()
+            .insert_resource(field_build::builder())
             .init_resource::<EditSessionActive>()
             .init_resource::<EditView>()
             .init_resource::<PendingCommands>()

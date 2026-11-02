@@ -8,7 +8,6 @@
 //! after it arrives. `moly.methods` lists the moly methods with what each
 //! takes.
 
-pub mod layout;
 mod observe;
 /// The observation the `moly.observe` method answers, for the plugin host.
 pub(crate) use observe::observe;
@@ -21,7 +20,12 @@ use std::sync::OnceLock;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
 use bevy_remote::{error_codes, BrpError, BrpMessage, BrpResult, BrpSender, RemoteMethods, RemotePlugin};
+use moly_features::camera_hold::{CameraHold, HeldPose};
+use moly_features::lease::{Holder, Leases, Rank};
 use serde_json::{json, Map, Value};
+
+/// The holder the control surface's own camera takes its lease as.
+const CONTROL: &str = "control";
 
 /// The moly methods: name, what it does, and its params as JSON Schema.
 const METHODS: &[(&str, &str, &str)] = &[
@@ -217,29 +221,10 @@ pub fn install(app: &mut App) {
     app.add_plugins(remote)
         .init_resource::<Captures>()
         .init_resource::<PluginsAnswer>()
-        .init_resource::<crate::camera::FreeCameraPose>()
-        .init_resource::<crate::director::lens_clear::FixtureBounds>()
         .init_resource::<TimeStep>()
         .add_systems(Startup, share_sender)
         .add_systems(First, crate::bus::stamp)
-        .add_systems(Last, (crate::bus::watch, end_step, publish_report))
-        .add_systems(Last, (crate::camera::apply_free_camera, free_camera_global).chain())
-        // The talk camera rewrites the camera transform in PostUpdate every
-        // frame, after transform propagation; the pose is stated again
-        // after it, on the transform and the global transform both, so the
-        // rendered view is the free one while a conversation plays.
-        .add_systems(
-            PostUpdate,
-            (
-                crate::director::lens_clear::measure_fixtures,
-                crate::director::talk_lens::follow_speaker,
-                crate::director::lens_clear::clear_view,
-                crate::camera::apply_free_camera,
-                free_camera_global,
-            )
-                .chain()
-                .after(crate::talk_camera::advance),
-        );
+        .add_systems(Last, (crate::bus::watch, end_step, publish_report));
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(port) = native_port() {
         info!("[control] listening on 127.0.0.1:{port}");
@@ -607,12 +592,12 @@ fn library_catalog(In(_): In<Option<Value>>) -> BrpResult {
 }
 
 fn layout_view(In(_): In<Option<Value>>, world: &mut World) -> BrpResult {
-    Ok(layout::view(world))
+    Ok(moly_fixture_edit::layout_command::view(world))
 }
 
 fn layout_command(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let params = object(params, "moly.layout.command")?;
-    let command = layout::command(&params).map_err(refuse)?;
+    let command = moly_fixture_edit::layout_command::command(&params).map_err(refuse)?;
     let queued = format!("{command:?}");
     world.write_message(command);
     Ok(json!({ "queued": queued }))
@@ -620,9 +605,9 @@ fn layout_command(In(params): In<Option<Value>>, world: &mut World) -> BrpResult
 
 fn layout_apply(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let params = object(params, "moly.layout.apply")?;
-    let request = layout::apply_request(&params).map_err(refuse)?;
-    let outcome = crate::fixture_edit::apply_request(world, &request).map_err(refuse)?;
-    Ok(layout::apply_outcome(&outcome))
+    let request = moly_fixture_edit::layout_command::apply_request(&params).map_err(refuse)?;
+    let outcome = moly_fixture_edit::apply_request(world, &request).map_err(refuse)?;
+    Ok(moly_fixture_edit::layout_command::apply_outcome(&outcome))
 }
 
 fn director_schema(In(_): In<Option<Value>>) -> BrpResult {
@@ -735,22 +720,10 @@ fn vec3_param(value: Option<&Value>, method: &str, name: &str) -> Result<Vec3, B
     Ok(Vec3::from(out))
 }
 
-fn free_camera_global(
-    pose: Res<crate::camera::FreeCameraPose>,
-    mut camera: Query<(&Transform, &mut GlobalTransform), With<Camera3d>>,
-) {
-    if pose.0.is_none() {
-        return;
-    }
-    if let Ok((transform, mut global)) = camera.single_mut() {
-        *global = GlobalTransform::from(*transform);
-    }
-}
-
-fn camera_free(
-    In(params): In<Option<Value>>,
-    mut pose: ResMut<crate::camera::FreeCameraPose>,
-) -> BrpResult {
+/// `moly.camera.free`: the field camera held at a world pose for the control
+/// surface, refused by name while another holder of the same or a higher
+/// rank has the camera.
+fn camera_free(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let params = object(params, "moly.camera.free")?;
     let eye = vec3_param(params.get("position"), "moly.camera.free", "position")?;
     let target = vec3_param(params.get("target"), "moly.camera.free", "target")?;
@@ -765,12 +738,17 @@ fn camera_free(
             .filter(|fov| (5.0..=120.0).contains(fov))
             .ok_or_else(|| refuse("moly.camera.free: fov must be a number in 5..=120"))? as f32,
     };
-    *pose = crate::camera::FreeCameraPose(Some(crate::camera::FreeCameraPoseValue {
+    // The hold is emptied out of the world around the lease, which it takes
+    // from the same world.
+    let mut hold = world.remove_resource::<CameraHold>().unwrap_or_default();
+    let taken = hold.take(&mut world.resource_mut::<Leases>(), &Holder::new(CONTROL, Rank::Director), HeldPose {
         eye,
         target,
         up,
         fov_degrees: fov,
-    }));
+    });
+    world.insert_resource(hold);
+    taken.map_err(|refusal| refuse(format!("moly.camera.free: {refusal}")))?;
     Ok(json!({
         "free": true,
         "position": [eye.x, eye.y, eye.z],
@@ -780,11 +758,12 @@ fn camera_free(
     }))
 }
 
-fn camera_reset(
-    In(_): In<Option<Value>>,
-    mut pose: ResMut<crate::camera::FreeCameraPose>,
-) -> BrpResult {
-    *pose = crate::camera::FreeCameraPose(None);
+/// `moly.camera.reset`: the control surface lets the camera go, and the
+/// player-following field camera takes over on the next frame.
+fn camera_reset(In(_): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let mut hold = world.remove_resource::<CameraHold>().unwrap_or_default();
+    hold.release(&mut world.resource_mut::<Leases>(), CONTROL);
+    world.insert_resource(hold);
     Ok(json!({"free": false}))
 }
 

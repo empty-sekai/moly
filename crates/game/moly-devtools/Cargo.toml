@@ -13,6 +13,7 @@ moly-ui = { path = "../moly-ui" }
 moly-world = { path = "../moly-world" }
 moly-features = { path = "../moly-features" }
 moly-fixture-edit = { path = "../moly-fixture-edit" }
+moly-act = { path = "../moly-act" }
 moly-delivery = { path = "../moly-delivery" }
 moly-harvest = { path = "../moly-harvest" }
 moly-content-library = { path = "../moly-content-library" }

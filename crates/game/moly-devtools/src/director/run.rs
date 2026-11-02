@@ -2,22 +2,22 @@
 //! steps in order; `parallel` runs child tracks side by side and `repeat`
 //! runs a block again. A step that ends on the frame it starts (a log, a
 //! take, an assert) lets the next one start on the same frame.
+//!
+//! A flow step is the runner's own (`Kind`). An action step is an action of
+//! the hub's registry ([`Node::Act`]): the runner takes the hand for the
+//! step's track, starts every spec the step stands for in turn and polls the
+//! run until it ends, fails, times out, or another holder takes a lease from
+//! it. The runner keeps what is the script's own: the log, the hand, the
+//! characters its tracks took and the fixture activities they started.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 
-use bevy::input::touch::TouchPhase;
 use bevy::prelude::*;
-use moly_law::action_button::{ButtonType, TargetId, ACTION_BUTTON_INPUT_INTERVAL};
-use moly_link::ServerLink;
-use moly_protocol::{AdminCall, Call, CallKind};
-use serde_json::{json, Value};
+use moly_features::act::{hand, ActionRun, ActionSpec, ActCtx, ActPoll, Card, Cond, Leaving, Taken};
+use moly_features::lease::{Channel, Holder, Leases, Rank};
 
-use crate::userdata::{Answered, AnsweredLog};
-
-use super::cond::{self, flat};
-use super::hand::{self, Hand};
-use super::script::{BuildPlace, GatherRef, Join, Node, Step, Target, TargetKind};
+use super::script::{Join, Node, Step};
 
 /// The ticket offset the steps asked for outside a script advance with:
 /// their own ticket, that high in the range, so the director's run (ticket
@@ -27,19 +27,20 @@ pub const ACTED_TICKET: u64 = 1 << 32;
 /// Steps one track may start on one frame.
 const STEPS_PER_FRAME: usize = 64;
 /// Records the log keeps.
-const RECORDS: usize = 256;
-/// A corner is passed when the player is this close (metres).
-const CORNER_REACHED: f32 = 0.15;
-/// A walk that has not come this much closer (metres) in [`STALL_SECS`] plans
-/// its path again.
-const STALL_PROGRESS: f32 = 0.05;
-const STALL_SECS: f32 = 2.0;
-/// A goal that moved this far (metres) is planned again.
-const GOAL_MOVED: f32 = 0.25;
+pub const RECORDS: usize = 256;
+
+/// The name the director's own run takes its leases under.
+pub const DIRECTOR: &str = "director";
+
+/// What a script's hand step is refused with when another plugin's step
+/// holds the hand, and what another plugin's hand step is refused with while
+/// a director script holds it.
+pub const HAND_HELD: &str = "the hand is held by another plugin's step";
+pub const DIRECTOR_HOLDS: &str = "a director script holds the hand";
 
 /// One line of the run's log.
 #[derive(Clone, Debug, serde::Serialize)]
-pub struct Record {
+pub struct Line {
     pub t: f32,
     pub step: String,
     pub event: &'static str,
@@ -47,38 +48,60 @@ pub struct Record {
 }
 
 /// What a frame's poll of a step says.
-enum Poll {
-    Running(String),
-    Done(String),
-    Failed(String),
+pub type Poll = ActPoll;
+
+/// The flow part of a step, or the action the registry runs for it.
+pub enum Kind {
+    Wait { until: f32 },
+    WaitUntil(Cond),
+    Parallel { tracks: Vec<Track>, join: Join },
+    /// An action of the registry.
+    Act(ActStep),
+}
+
+/// The actions of one step.
+pub struct ActStep {
+    /// The specs the step stands for, in the order they run.
+    specs: Arc<[Arc<dyn ActionSpec>]>,
+    /// The index of the next spec to start.
+    next: usize,
+    /// The spec running now, and the run.
+    run: Option<Box<dyn ActionRun>>,
+    /// The holder the step's actions take their leases under.
+    holder: String,
+    /// The ticket of the spec running now: its characters and activities.
+    step_ticket: u64,
+    /// The card of the spec running now, kept with it when it ends.
+    card: Card,
+    /// Every card the step's specs laid, for the steps after it and the run's
+    /// end.
+    laid: Vec<Leaving>,
 }
 
 /// State shared by every track of a run.
-#[derive(Default)]
 pub struct Shared {
-    /// The joystick finger: the director's hand.
-    hand: Hand,
-    /// The ticket of the run that owns the hand: the director's script, or a
-    /// step asked for outside a script as [`ACTED_TICKET`] plus its number.
-    hand_ticket: Option<u64>,
-    /// The step whose walk holds the joystick finger.
-    hand_owner: Option<(u64, String)>,
-    /// Characters taken, with the ticket of the run that took them; a run
-    /// releases its own when it ends.
-    taken: Vec<(u64, u32, Entity)>,
-    pub log: VecDeque<Record>,
+    pub log: VecDeque<Line>,
     pub now: f32,
     /// Bumped on every record, so the snapshot is republished only on change.
     pub revision: u64,
-    /// Fixture activities started by this run, by ticket.
-    activities: Vec<(u64, u64)>,
     /// The last steps that ended (at most [`RECORDS`]) with their tickets, for
     /// a step asked for outside a script to report its result.
-    results: VecDeque<(u64, Record)>,
+    results: VecDeque<(u64, Line)>,
+}
+
+impl Default for Shared {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Shared {
-    fn record(&mut self, step: &str, event: &'static str, note: String) {
+    /// A run with nothing in it yet.
+    pub fn new() -> Self {
+        Self { log: VecDeque::new(), now: 0.0, revision: 0, results: VecDeque::new() }
+    }
+
+    pub fn record(&mut self, step: &str, event: &'static str, note: String) {
         let line = format!("[director] {step}: {event}{}{note}", if note.is_empty() { "" } else { ": " });
         match event {
             "failed" => warn!("{line}"),
@@ -87,119 +110,8 @@ impl Shared {
         if self.log.len() == RECORDS {
             self.log.pop_front();
         }
-        self.log.push_back(Record { t: self.now, step: step.to_owned(), event, note });
+        self.log.push_back(Line { t: self.now, step: step.to_owned(), event, note });
         self.revision += 1;
-    }
-
-    /// Lifts the joystick finger when the step at `path` of `ticket`'s run
-    /// holds it; `path` empty lifts it whatever step holds it.
-    fn release_hand_of(&mut self, world: &mut World, ticket: u64, path: &str) {
-        let owns = self.hand_owner.as_ref().is_some_and(|(owner, owner_path)| *owner == ticket && owner_path == path);
-        if owns {
-            self.hand.release(world);
-            self.hand_owner = None;
-        }
-    }
-
-    /// Takes the hand for `ticket`. The caller refuses a step when another
-    /// run holds it.
-    pub fn take_hand(&mut self, ticket: u64) {
-        self.hand_ticket = Some(ticket);
-    }
-
-    /// Whether another run than `ticket` holds the hand.
-    pub fn hand_held_by_other(&self, ticket: u64) -> bool {
-        self.hand_ticket.is_some_and(|holder| holder != ticket)
-    }
-
-    /// Lets the hand go: the joystick finger is lifted when `ticket`'s run
-    /// was the one leaning on it.
-    pub fn release_hand(&mut self, world: &mut World, ticket: u64) {
-        if self.release_hand_of_step(world, ticket) && self.hand_ticket == Some(ticket) {
-            self.hand_ticket = None;
-            self.hand_owner = None;
-        }
-    }
-
-    /// Lifts the joystick finger when `ticket`'s run has it down. Answers
-    /// whether the finger was lifted.
-    fn release_hand_of_step(&mut self, world: &mut World, ticket: u64) -> bool {
-        if !self.hand.pressing(ticket) {
-            return false;
-        }
-        self.hand.release(world);
-        self.hand_owner = None;
-        true
-    }
-
-    /// What the director's script took, by unit.
-    pub fn owned(&self) -> impl Iterator<Item = (u32, Entity)> + '_ {
-        self.taken.iter().filter(|(ticket, ..)| *ticket == 0).map(|(_, unit, entity)| (*unit, *entity))
-    }
-
-    /// Ends the director's script: it lets the hand go and releases the
-    /// characters it took.
-    pub fn release_all(&mut self, world: &mut World) {
-        self.hand.release(world);
-        self.hand_ticket = None;
-        self.hand_owner = None;
-        self.release_taken(world, 0);
-    }
-
-    /// Ends the run with `ticket`: it lets the hand go, lifting the joystick
-    /// finger when it was the one leaning on it, and releases the characters
-    /// it took.
-    pub fn release(&mut self, world: &mut World, ticket: u64) {
-        self.hand.release(world);
-        if self.hand_ticket == Some(ticket) {
-            self.hand_ticket = None;
-            self.hand_owner = None;
-        }
-        self.release_taken(world, ticket);
-    }
-
-    fn release_taken(&mut self, world: &mut World, ticket: u64) {
-        let (mine, theirs): (Vec<(u64, u32, Entity)>, Vec<(u64, u32, Entity)>) =
-            std::mem::take(&mut self.taken).into_iter().partition(|(owner, ..)| *owner == ticket);
-        self.taken = theirs;
-        self.activities.retain(|(owner, _)| *owner != ticket);
-        for (.., entity) in mine {
-            super::npc::release(world, entity);
-        }
-    }
-
-    /// Takes the character `unit` for `ticket`'s run.
-    fn take_npc(&mut self, world: &mut World, ticket: u64, unit: u32) -> Result<Entity, String> {
-        let entity = super::npc::take(world, unit)?;
-        if !self.taken.iter().any(|(.., taken)| *taken == entity) {
-            self.taken.push((ticket, unit, entity));
-        }
-        Ok(entity)
-    }
-
-    /// The character `unit` `ticket`'s run took.
-    fn taken(&self, ticket: u64, unit: u32) -> Option<Entity> {
-        self.taken.iter().find(|(owner, taken, _)| *owner == ticket && *taken == unit).map(|(.., entity)| *entity)
-    }
-
-    /// Gives the character `unit` back to its AI.
-    fn untake(&mut self, world: &mut World, unit: u32) -> bool {
-        let Some(index) = self.taken.iter().position(|(_, taken, _)| *taken == unit) else {
-            return false;
-        };
-        let (.., entity) = self.taken.remove(index);
-        super::npc::release(world, entity);
-        true
-    }
-
-    /// The ticket for a fixture activity `ticket`'s run starts: a plugin's
-    /// steps number their own from the high half, so the director's and a
-    /// plugin's do not meet.
-    fn activity_ticket(&mut self, ticket: u64) -> u64 {
-        let next = self.activities.iter().filter(|(owner, _)| *owner == ticket).count() as u64 + 1;
-        let activity = if ticket == 0 { next } else { ACTED_TICKET | next };
-        self.activities.push((ticket, activity));
-        crate::npc_fixture_activity::preview::DIRECTOR_TICKET | activity
     }
 
     /// Notes a step of `ticket`'s run that ended, with its event and note, for
@@ -208,7 +120,7 @@ impl Shared {
         if self.results.len() == RECORDS {
             self.results.pop_front();
         }
-        self.results.push_back((ticket, Record { t: self.now, step: String::new(), event, note }));
+        self.results.push_back((ticket, Line { t: self.now, step: String::new(), event, note }));
         self.revision += 1;
     }
 
@@ -226,6 +138,17 @@ impl Shared {
             .map(|(_, record)| record.note.as_str())
             .collect::<Vec<&str>>()
     }
+
+    /// What a step that ended leaves the steps after it: a character it
+    /// handed back to its AI is its AI's own from now on, and a later step
+    /// that plays with it takes it again.
+    pub fn keep(&mut self, world: &mut World, cards: &[Leaving]) {
+        for leaving in cards {
+            if let Leaving::Talk(entity) = leaving {
+                Taken::hand_back(world, *entity);
+            }
+        }
+    }
 }
 
 struct Frame {
@@ -241,178 +164,15 @@ struct Active {
     path: String,
     deadline: Option<f32>,
     kind: Kind,
-    /// The server exchange the step's effect goes through, once it is sent.
-    server: Option<ServerWait>,
     /// The last running note, for the timeout's report.
     note: String,
 }
 
-/// Waits for the server's answer to the step's own request.
-#[derive(Clone, Copy)]
-struct ServerWait {
-    call: CallKind,
-    /// The answer log's length when the step started: only a later answer is
-    /// this step's.
-    since: usize,
-    /// The request has been seen in flight, and, when the feature exposes
-    /// it, the sequence number it is waiting for.
-    seq: Option<u32>,
-    seen: bool,
-}
-
-impl ServerWait {
-    fn new(world: &World, call: CallKind) -> Self {
-        Self {
-            call,
-            since: world.resource::<crate::userdata::AnsweredLog>().len(),
-            seq: None,
-            seen: false,
-        }
-    }
-}
-
-/// The call the feature that owns `call` is waiting for, when it exposes one.
-fn feature_pending(world: &World, call: CallKind) -> Option<crate::userdata::ServerPending> {
-    match call {
-        CallKind::Craft => world
-            .get_resource::<crate::home_action::craft::CraftScreen>()
-            .and_then(|screen| screen.server_pending())
-            .copied(),
-        CallKind::HousingLayout => world
-            .get_resource::<crate::fixture_edit::EditSession>()
-            .and_then(|session| session.server_pending())
-            .copied(),
-        CallKind::BirthdayPartyDelivery => world
-            .get_resource::<crate::delivery::flow::DeliveryFlow>()
-            .and_then(|flow| flow.server_pending())
-            .copied(),
-        _ => None,
-    }
-}
-
-enum Kind {
-    Wait { until: f32 },
-    WaitUntil(super::script::Cond),
-    Walk(Walk),
-    Interact(Interact),
-    Gather(Gather),
-    Craft(CraftStep),
-    LayoutPlace(LayoutPlace),
-    Deliver(Deliver),
-    DialogAnswer(DialogAnswer),
-    Stick { stick: Vec2, until: f32 },
-    NpcWalk { entity: Entity, unit: u32, goal: Vec3, within: f32 },
-    NpcFace { entity: Entity, unit: u32, towards: Vec3, secs: f32, started: bool },
-    Emote { lease: crate::emoticon::timeline::EmoteLease, until: f32 },
-    /// An emoticon at a world point, shown on an anchor of the step's own;
-    /// the anchor is kept hidden until it is placed.
-    PointEmote { anchor: Entity, lease: crate::emoticon::timeline::EmoteLease, until: f32 },
-    NpcUse { ticket: u64 },
-    Tweet { entity: Entity, until: f32 },
-    /// A talk requested of a character, until its decision builds it.
-    NpcTalk { entity: Entity },
-    /// `down` is false until the finger has touched down at `from`.
-    CameraDrag { from: Vec2, by: Vec2, start: f32, secs: f32, down: bool },
-    CameraZoom { left: f32, per_sec: f32, until: f32 },
-    Parallel { tracks: Vec<Track>, join: Join },
-    /// `moved` once the move has been seen in progress.
-    SiteSwitch { site: String, moved: bool },
-    /// A layout step, until the layout it saved has loaded.
-    Layout { step: crate::layout_director::LayoutStep },
-    /// One `server.edit`, until the server answers the call numbered `seq`.
-    ServerEdit { seq: u32 },
-    /// A companion's body, from the spawn command until it is shown;
-    /// `polls` counts the frames since the command was written.
-    CompanionSpawn { unit: u32, at: Vec3, written: bool, polls: u8 },
-    /// A companion's walk, from its command until its status reaches the
-    /// number the command gets (`seq`).
-    CompanionWalk { unit: u32, to: Vec3, within: f32, seq: u64, written: bool },
-    /// A companion's turn, from its command until its status reaches the
-    /// number the command gets (`seq`).
-    CompanionFace { unit: u32, to: Vec3, secs: f32, seq: u64, written: bool },
-    /// A companion's motion, from its command until its status reaches the
-    /// number the command gets (`seq`).
-    CompanionMotion { unit: u32, motion: String, seq: u64, written: bool },
-    /// A companion's use of the placed fixture `uid`, from its command until
-    /// its status reaches the number the command gets (`seq`).
-    CompanionUse { unit: u32, uid: String, activity: Option<i32>, variant: Option<u32>, seq: u64, written: bool },
-    /// A companion's gather: its command, written on the first frame.
-    CompanionGather { unit: u32, command: Option<crate::companion::CompanionCommand>, note: String, seq: u64 },
-    /// A tweet balloon over a companion, until `until`.
-    CompanionBalloon { unit: u32, entity: Entity, until: f32 },
-    CompanionDespawn { unit: u32, written: bool },
-    /// A companion's build: the fixture's put and save, its reload, then the
-    /// companion's build command.
-    CompanionBuild { unit: u32, fixture: i32, texture: Option<u32>, place: BuildPlace, swings: u32, phase: BuildStep },
-}
-
-/// Where a `companion.build` step stands.
-pub(crate) enum BuildStep {
-    /// The fixture is not put yet.
-    Put,
-    /// The layout with the fixture is saving and reloading.
-    Saving { ticket: u64, uid: String },
-    /// The companion's build command, by its number, of the fixture `uid`.
-    Building { seq: u64, uid: String },
-}
-
-impl Kind {
-    /// Undoes what a step leaves running when it ends early (stopped, failed
-    /// or timed out).
-    fn stop(&self, world: &mut World) {
-        match self {
-            // A command never written is never sent: the companion is left as
-            // it stood.
-            Kind::CompanionSpawn { written: false, .. }
-            | Kind::CompanionWalk { written: false, .. }
-            | Kind::CompanionFace { written: false, .. }
-            | Kind::CompanionMotion { written: false, .. }
-            | Kind::CompanionUse { written: false, .. }
-            // A gather plays on: its swings are the companion's.
-            | Kind::CompanionGather { .. }
-            | Kind::CompanionDespawn { written: false, .. } => {}
-            // A motion whose command was written plays on: its body is the
-            // companion's.
-            Kind::CompanionMotion { .. } => {}
-            // A use whose command was written ends on the companion's own
-            // terms: its action is the companion's.
-            Kind::CompanionUse { .. } => {}
-            Kind::CompanionBalloon { entity, .. } => super::npc::hide_tweet(world, *entity),
-            Kind::NpcWalk { entity, .. } => crate::npc::stop_for_external_activity(world, *entity),
-            Kind::Emote { lease, .. } => crate::emoticon::timeline::hide(world, *lease, true),
-            // The emote goes at once and its anchor with it.
-            Kind::PointEmote { anchor, lease, .. } => {
-                crate::emoticon::timeline::hide(world, *lease, true);
-                deactivate(world, *anchor);
-            }
-            Kind::NpcUse { ticket } => super::npc::end_activity(world, *ticket, true),
-            Kind::Tweet { entity, .. } => super::npc::hide_tweet(world, *entity),
-            Kind::NpcTalk { entity } => super::npc::drop_talk(world, *entity),
-            // A press left holding the button is released.
-            Kind::Deliver(_) => {
-                world.write_message(crate::delivery::DeliveryRequest::End);
-            }
-            // A selection left in the editor is cancelled: the editor's own
-            // cancel restores the pose the fixture was selected at.
-            Kind::LayoutPlace(_) => {
-                world.write_message(crate::fixture_edit::EditCommand::Cancel);
-            }
-            Kind::CameraDrag { from, by, down: true, .. } => {
-                let _ = hand::drag_touch(world, TouchPhase::Ended, *from + *by);
-            }
-            // A fixture saved for a build no companion was asked to make is
-            // drawn solid.
-            Kind::CompanionBuild { phase: BuildStep::Saving { uid, .. }, .. } => {
-                world.resource_mut::<crate::companion::FixtureGhosts>().clear(uid);
-            }
-            _ => {}
-        }
-    }
-}
-/// A sequence of steps.
+/// A sequence of steps, run as the ticket `ticket`.
 pub struct Track {
     frames: Vec<Frame>,
     active: Option<Active>,
+    ticket: u64,
 }
 
 /// How a track stands after a frame.
@@ -423,9 +183,24 @@ pub enum TrackState {
     Failed(String),
 }
 
+/// The ticket of `base`'s `index`th part, parallel track or step: a run's
+/// parallel tracks and the parts of its steps each keep their characters and
+/// activities apart.
+fn sub_ticket(base: u64, index: u64) -> u64 {
+    (base << 8) | index
+}
+
 impl Track {
-    pub fn new(block: Arc<[Step]>, path: String) -> Self {
-        Self { frames: vec![Frame { block, next: 0, repeats_left: 0, path }], active: None }
+    /// A track of `block` that runs as the ticket `ticket`: the script's own
+    /// run is `0`, a plugin's step its offset ticket, and a parallel track or
+    /// a step's part one of its own ([`sub_ticket`]).
+    pub fn new(block: Arc<[Step]>, path: String, ticket: u64) -> Self {
+        Self { frames: vec![Frame { block, next: 0, repeats_left: 0, path }], active: None, ticket }
+    }
+
+    /// The ticket the track's characters and activities belong to.
+    pub fn ticket(&self) -> u64 {
+        self.ticket
     }
 
     /// The steps the track was built with.
@@ -447,28 +222,29 @@ impl Track {
 
     /// Ends the running step without finishing it (a stop, or another track
     /// of a `join: any` block finished first).
-    pub fn abort(&mut self, world: &mut World, shared: &mut Shared, ticket: u64) {
+    pub fn abort(&mut self, world: &mut World, shared: &mut Shared, tickets: &mut BTreeSet<u64>) {
         if let Some(mut active) = self.active.take() {
             if let Kind::Parallel { tracks, .. } = &mut active.kind {
                 for track in tracks {
-                    track.abort(world, shared, ticket);
+                    track.abort(world, shared, tickets);
                 }
             }
-            active.kind.stop(world);
-            shared.release_hand_of(world, ticket, &active.path);
+            stop(world, shared, tickets, &active.path, &mut active.kind);
             shared.record(&active.path, "stopped", String::new());
         }
         self.frames.clear();
     }
 
-    /// Runs the track's steps for this frame as the run with `ticket`.
-    pub fn tick(&mut self, world: &mut World, shared: &mut Shared, ticket: u64) -> TrackState {
+    /// Runs the track's steps for this frame, noting in `tickets` the tickets
+    /// of the parts it starts.
+    pub fn tick(&mut self, world: &mut World, shared: &mut Shared, tickets: &mut BTreeSet<u64>) -> TrackState {
+        let ticket = self.ticket;
         for _ in 0..STEPS_PER_FRAME {
             if self.active.is_none() {
                 let Some((step, path)) = self.next_step() else {
                     return TrackState::Done;
                 };
-                match start(world, shared, ticket, step, path) {
+                match start(world, shared, ticket, step, path, tickets) {
                     Started::Ended(path, Ok(note)) => {
                         shared.record(&path, "done", note.clone());
                         shared.note_ended(ticket, "done", note);
@@ -492,11 +268,7 @@ impl Track {
                     active.step.timeout.unwrap_or_default(),
                     active.note
                 )),
-                _ => poll(world, shared, active, ticket),
-            };
-            let poll = match poll {
-                Poll::Done(note) => wait_server(world, active, note),
-                other => other,
+                _ => poll(world, shared, ticket, active, tickets),
             };
             match poll {
                 Poll::Running(note) => {
@@ -505,12 +277,7 @@ impl Track {
                 }
                 Poll::Done(note) => {
                     let mut active = self.active.take().expect("polled above");
-                    shared.release_hand_of(world, ticket, &active.path);
-                    if let Kind::Parallel { tracks, .. } = &mut active.kind {
-                        for track in tracks {
-                            track.abort(world, shared, ticket);
-                        }
-                    }
+                    release_step(world, ticket, &active.path, &mut active.kind);
                     shared.record(&active.path, "done", note.clone());
                     shared.note_ended(ticket, "done", note);
                 }
@@ -518,11 +285,10 @@ impl Track {
                     let mut active = self.active.take().expect("polled above");
                     if let Kind::Parallel { tracks, .. } = &mut active.kind {
                         for track in tracks {
-                            track.abort(world, shared, ticket);
+                            track.abort(world, shared, tickets);
                         }
                     }
-                    active.kind.stop(world);
-                    shared.release_hand_of(world, ticket, &active.path);
+                    stop(world, shared, tickets, &active.path, &mut active.kind);
                     shared.record(&active.path, "failed", note.clone());
                     shared.note_ended(ticket, "failed", note.clone());
                     if !active.step.optional {
@@ -565,585 +331,111 @@ enum Started {
     Running(Active),
 }
 
-fn start(world: &mut World, shared: &mut Shared, ticket: u64, step: Step, path: String) -> Started {
+/// The name a step's actions take their leases under: the script's run and
+/// the step, or the plugin's step.
+fn holder_name(ticket: u64, path: &str) -> String {
+    if ticket & ACTED_TICKET == 0 {
+        format!("{DIRECTOR}:{path}")
+    } else {
+        format!("plugin:{}:{path}", ticket & !ACTED_TICKET)
+    }
+}
+
+/// Takes the hand for the step `path` of the run `ticket`, refused with the
+/// word the hand refuses with: a script's step names the plugin that holds
+/// the hand or the director's own, and a plugin's step names the director's
+/// script or another plugin's step.
+pub fn take_hand(world: &mut World, ticket: u64, path: &str) -> Result<(), String> {
+    let holder = Holder::new(holder_name(ticket, path), Rank::Director);
+    let mut leases = world.resource_mut::<Leases>();
+    if leases.holder(&Channel::Hand) == Some(&holder) {
+        return Ok(());
+    }
+    let script = ticket & ACTED_TICKET == 0;
+    if let Some(sitting) = leases.holder(&Channel::Hand).filter(|sitting| sitting.rank >= Rank::Director) {
+        if script {
+            return Err(if sitting.id.starts_with("plugin:") { HAND_HELD.to_owned() } else { DIRECTOR_HOLDS.to_owned() });
+        }
+        // A plugin's step names the holder: the director's script, or the
+        // plugin whose step holds the hand.
+        let other = sitting.id.strip_prefix("plugin:").and_then(|rest| rest.split(':').next()).unwrap_or_default();
+        return Err(if other.is_empty() { HAND_HELD.to_owned() } else { format!("{HAND_HELD} ({other})") });
+    }
+    match leases.take(Channel::Hand, &holder) {
+        Ok(()) => Ok(()),
+        Err(_) => Err(HAND_HELD.to_owned()),
+    }
+}
+
+fn start(
+    world: &mut World,
+    shared: &mut Shared,
+    ticket: u64,
+    step: Step,
+    path: String,
+    tickets: &mut BTreeSet<u64>,
+) -> Started {
     shared.record(&path, "start", String::new());
-    let ended = |path: String, result: Result<String, String>, optional: bool| {
-        Started::Ended(path, result.map_err(|note| (optional, note)))
-    };
     let optional = step.optional;
     let kind = match &step.node {
         Node::Wait { secs } => Kind::Wait { until: shared.now + secs },
         Node::WaitUntil { until } => Kind::WaitUntil(until.clone()),
         Node::Assert { that } => {
-            let (holds, note) = cond::eval(world, that);
-            return ended(path, if holds { Ok(note) } else { Err(format!("does not hold: {note}")) }, optional);
+            let (holds, note) = moly_features::act::eval(world, that);
+            let result = if holds { Ok(note) } else { Err(format!("does not hold: {note}")) };
+            return Started::Ended(path, result.map_err(|note| (optional, note)));
         }
-        Node::Log { text } => return ended(path, Ok(text.clone()), optional),
-        Node::Where { of } => {
-            let mut notes = vec![match cond::player(world) {
-                Ok(at) => format!("player ({:.2}, {:.2}, {:.2})", at.x, at.y, at.z),
-                Err(error) => error,
-            }];
-            for target in of {
-                notes.push(match cond::resolve(world, target) {
-                    Ok(at) => format!("{:?} ({:.2}, {:.2}, {:.2})", target.what, at.x, at.y, at.z),
-                    Err(error) => format!("{:?}: {error}", target.what),
-                });
-            }
-            return ended(path, Ok(notes.join("; ")), optional);
-        }
+        Node::Log { text } => return Started::Ended(path, Ok(text.clone())),
+        Node::Where { of } => return Started::Ended(path, Ok(where_notes(world, of))),
+        Node::Repeat { .. } => unreachable!("repeat blocks are entered by next_step"),
         Node::Capture => {
-            world.write_message(crate::frame_capture::CaptureFrame);
-            return ended(path, Ok("frame capture requested".into()), optional);
+            world.write_message(moly_features::frame_capture::CaptureFrame);
+            return Started::Ended(path, Ok("frame capture requested".into()));
         }
-        Node::Release => {
-            shared.release_hand(world, ticket);
-            return ended(path, Ok(String::new()), optional);
-        }
-        Node::Wear { unit } => {
-            use crate::player_avatar::oc::{CharacterChoice, OcRequest};
-            let (request, note) = match unit {
-                Some(unit) => (OcRequest::Character(CharacterChoice::Unit(*unit)), format!("character body {unit} requested")),
-                None => (OcRequest::Avatar, "avatar body requested".to_owned()),
-            };
-            world.write_message(request);
-            return ended(path, Ok(note), optional);
-        }
-        Node::Tap { at, fraction } => {
-            let position = if *fraction {
-                match hand::window_size(world) {
-                    Some(size) => Vec2::new(at[0], at[1]) * size,
-                    None => return ended(path, Err("no primary window".into()), optional),
-                }
-            } else {
-                Vec2::new(at[0], at[1])
-            };
-            let result = hand::tap(world, position)
-                .map(|()| format!("tapped ({:.0}, {:.0})", position.x, position.y))
-                .map_err(str::to_owned);
-            return ended(path, result, optional);
-        }
-        Node::UiTap { view, path: node } => {
-            let result = hand::ui_point(world, view, node).and_then(|position| {
-                hand::tap(world, position)
-                    .map(|()| format!("tapped {view} {node} at ({:.0}, {:.0})", position.x, position.y))
-                    .map_err(str::to_owned)
-            });
-            return ended(path, result, optional);
-        }
-        Node::NpcTake { unit } => {
-            let result = shared.take_npc(world, ticket, *unit).map(|_| format!("character {unit} taken"));
-            return ended(path, result, optional);
-        }
-        Node::NpcRelease { unit } => {
-            if !shared.untake(world, *unit) {
-                return ended(path, Err(format!("character {unit} is not taken by this script")), optional);
-            }
-            return ended(path, Ok(format!("character {unit} released")), optional);
-        }
-        Node::Weather { phenomenon } => {
-            world.write_message(crate::server_panel::PhenomenaScheduleEdit::Set(*phenomenon));
-            return ended(path, Ok(format!("phenomenon {phenomenon} requested")), optional);
-        }
-        Node::ServerEdit { command } => {
-            let command_json = Value::Object(command.clone()).to_string();
-            let Some(seq) = world
-                .get_resource_mut::<ServerLink>()
-                .map(|mut link| link.call(Call::Admin(AdminCall::Edit { command_json })))
-            else {
-                return ended(
-                    path,
-                    Err("the game has no server link".to_owned()),
-                    optional,
-                );
-            };
-            Kind::ServerEdit { seq }
-        }
-        Node::SiteSwitch { site } => {
-            world.insert_resource(crate::site::SiteChangeRequest(site.clone()));
-            Kind::SiteSwitch { site: site.clone(), moved: false }
-        }
-        Node::WalkTo { to, within } => Kind::Walk(Walk::new(to.clone(), *within)),
-        Node::Gather { what, collect } => Kind::Gather(Gather::new(what.clone(), *collect)),
-        Node::Craft { blueprint } => Kind::Craft(CraftStep::new(*blueprint)),
-        Node::LayoutPlace { fixture, texture, center, rotate, decide, save } => {
-            Kind::LayoutPlace(LayoutPlace::new(*fixture, *texture, *center, *rotate, *decide, *save))
-        }
-        Node::Deliver { party, hold } => match Deliver::press(world, *party, *hold, shared.now) {
-            Ok(deliver) => Kind::Deliver(deliver),
-            Err(error) => return ended(path, Err(error), optional),
-        },
-        Node::DialogAnswer { ok } => Kind::DialogAnswer(DialogAnswer { ok: *ok, tapped: None, pressed: None }),
-        Node::NpcPlayTalk { unit, talk, fixture } => {
-            let result = super::npc::play_talk(world, *unit, *talk, fixture.as_ref())
-                .map(|_| format!("talk {talk} asked to play on character {unit}"));
-            return ended(path, result, optional);
-        }
-        Node::NpcWarp { unit, to } => {
-            let result = match super::cond::npc(world, *unit) {
-                Ok(entity) => {
-                    // A warped character stands where it was put: its AI makes no
-                    // decision until released.
-                    let _ = super::npc::take(world, *unit);
-                    crate::npc::stop_for_external_activity(world, entity);
-                    crate::npc::force_set_position(world, entity, *to);
-                    Ok(format!("character {unit} warped to {to:?}"))
-                }
-                Err(reason) => Err(reason),
-            };
-            return ended(path, result, optional);
-        }
-        Node::PlayerWarp { to } => {
-            let mut query = world.query_filtered::<&mut Transform, With<crate::player::PlayerControlled>>();
-            let result = match query.iter_mut(world).next() {
-                Some(mut transform) => {
-                    transform.translation = Vec3::from(*to);
-                    Ok(format!("the player warped to {to:?}"))
-                }
-                None => Err("the player is not on the site".to_owned()),
-            };
-            return ended(path, result, optional);
-        }
-        Node::CameraFree { position, target, fov } => {
-            let pose = crate::camera::FreeCameraPose(Some(crate::camera::FreeCameraPoseValue {
-                eye: Vec3::from(*position),
-                target: Vec3::from(*target),
-                up: Vec3::Y,
-                fov_degrees: *fov,
-            }));
-            world.insert_resource(pose);
-            return ended(path, Ok("the free camera holds the pose".to_owned()), optional);
-        }
-        Node::TalkLens { distance, height, target, fov, swing, unit, wide, wide_hold, glide, push, clear } => {
-            world.insert_resource(super::talk_lens::TalkLens {
-                distance: *distance,
-                height: *height,
-                target: *target,
-                fov: *fov,
-                swing: *swing,
-                idle_unit: *unit,
-                wide: *wide,
-                wide_hold: *wide_hold,
-                glide: *glide,
-                clear: *clear,
-                push: *push,
-            });
-            return ended(path, Ok("the talk lens follows the speaker".to_owned()), optional);
-        }
-        Node::TalkLensOff => {
-            world.remove_resource::<super::talk_lens::TalkLens>();
-            return ended(path, Ok("the talk lens is off".to_owned()), optional);
-        }
-        Node::BackKey => {
-            let result = hand::back_key(world).map(|()| "the back key pressed".to_owned()).map_err(str::to_owned);
-            return ended(path, result, optional);
-        }
-        Node::Stick { stick, secs } => Kind::Stick { stick: Vec2::from(*stick), until: shared.now + secs },
-        Node::Interact { target, button, stop } => Kind::Interact(Interact {
-            walk: Walk::contact(target.clone(), *stop),
-            button: *button,
-            lifted_at: None,
-            last_change: f32::NEG_INFINITY,
-        }),
-        Node::NpcWalkTo { unit, to, within, rests } => {
-            let Some(entity) = shared.taken(ticket, *unit) else {
-                return ended(path, Err(format!("character {unit} is not taken by this script (npc.take first)")), optional);
-            };
-            let goal = match cond::resolve(world, to) {
-                Ok(goal) => goal,
-                Err(error) => return ended(path, Err(error), optional),
-            };
-            if let Err(error) = super::npc::walk(world, entity, Vec2::new(goal.x, goal.z), *rests) {
-                return ended(path, Err(error), optional);
-            }
-            Kind::NpcWalk { entity, unit: *unit, goal, within: *within }
-        }
-        Node::NpcFace { unit, to, secs } => {
-            let Some(entity) = shared.taken(ticket, *unit) else {
-                return ended(path, Err(format!("character {unit} is not taken by this script (npc.take first)")), optional);
-            };
-            let towards = match cond::resolve(world, to) {
-                Ok(towards) => towards,
-                Err(error) => return ended(path, Err(error), optional),
-            };
-            Kind::NpcFace { entity, unit: *unit, towards, secs: *secs, started: false }
-        }
-        Node::NpcEmote { unit, name, secs, use_root } => {
-            let entity = match cond::npc(world, *unit) {
-                Ok(entity) => entity,
-                Err(error) => return ended(path, Err(error), optional),
-            };
-            match crate::emoticon::timeline::show(world, entity, name, *use_root) {
-                Ok(lease) => Kind::Emote { lease, until: shared.now + secs },
-                Err(error) => return ended(path, Err(error), optional),
-            }
-        }
-        Node::NpcUse { unit, fixture, activity, variant, rests } => {
-            let Some(entity) = shared.taken(ticket, *unit) else {
-                return ended(path, Err(format!("character {unit} is not taken by this script (npc.take first)")), optional);
-            };
-            let activity_ticket = shared.activity_ticket(ticket);
-            match super::npc::begin_activity(world, entity, fixture, *activity, *variant, *rests, activity_ticket) {
-                Ok(note) => shared.record(&path, "begun", note),
-                Err(error) => return ended(path, Err(error), optional),
-            }
-            Kind::NpcUse { ticket: activity_ticket }
-        }
-        Node::NpcTalk { unit, talk } => {
-            let entity = match super::npc::open_talk(world, *unit, *talk) {
-                Ok(entity) => entity,
-                Err(error) => return ended(path, Err(error), optional),
-            };
-            // The character is its AI's again; the AI plays the talk.
-            shared.taken.retain(|(.., taken)| *taken != entity);
-            Kind::NpcTalk { entity }
-        }
-        Node::NpcTweet { unit, tweet, secs } => {
-            let Some(entity) = shared.taken(ticket, *unit) else {
-                return ended(path, Err(format!("character {unit} is not taken by this script (npc.take first)")), optional);
-            };
-            match super::npc::show_tweet(world, entity, *tweet) {
-                Ok(note) => shared.record(&path, "shown", note),
-                Err(error) => return ended(path, Err(error), optional),
-            }
-            Kind::Tweet { entity, until: shared.now + secs }
-        }
-        Node::CompanionSpawn { unit, at } => {
-            if let Err(reason) = companion_absent(world, *unit) {
-                return ended(path, Err(reason), optional);
-            }
-            Kind::CompanionSpawn { unit: *unit, at: Vec3::from(*at), written: false, polls: 0 }
-        }
-        Node::CompanionWalkTo { unit, to, within } => {
-            let Some(seq) = companion_seq(world, *unit) else {
-                return ended(path, Err(format!("no companion of unit {unit} is spawned")), optional);
-            };
-            // The command takes the next number.
-            Kind::CompanionWalk { unit: *unit, to: Vec3::from(*to), within: *within, seq: seq + 1, written: false }
-        }
-        Node::CompanionFace { unit, to, secs } => {
-            let Some(seq) = companion_seq(world, *unit) else {
-                return ended(path, Err(format!("no companion of unit {unit} is spawned")), optional);
-            };
-            // `player` is where the player stands as the step starts.
-            let to = match to {
-                crate::director::script::FaceTo::Point(point) => Vec3::from(*point),
-                crate::director::script::FaceTo::Player => match cond::player(world) {
-                    Ok(at) => at,
-                    Err(error) => return ended(path, Err(error), optional),
-                },
-            };
-            // The command takes the next number.
-            Kind::CompanionFace { unit: *unit, to, secs: *secs, seq: seq + 1, written: false }
-        }
-        Node::CompanionEmote { unit, name, secs, use_root } => {
-            let entity = match companion_entity(world, *unit) {
-                Some(entity) => entity,
-                None => return ended(path, Err(format!("no companion of unit {unit} is spawned")), optional),
-            };
-            // The emote rides the body the companion wears, whose bones its
-            // own motion moves; an undressed companion carries it itself.
-            let actor = worn_body(world, entity).unwrap_or(entity);
-            match crate::emoticon::timeline::show(world, actor, name, *use_root) {
-                Ok(lease) => Kind::Emote { lease, until: shared.now + secs },
-                Err(error) => return ended(path, Err(error), optional),
-            }
-        }
-        Node::CompanionMotion { unit, motion } => {
-            let Some(seq) = companion_seq(world, *unit) else {
-                return ended(path, Err(format!("no companion of unit {unit} is spawned")), optional);
-            };
-            // The command takes the next number.
-            Kind::CompanionMotion { unit: *unit, motion: motion.clone(), seq: seq + 1, written: false }
-        }
-        Node::CompanionUse { unit, target, activity, variant } => {
-            let Some(seq) = companion_seq(world, *unit) else {
-                return ended(path, Err(format!("no companion of unit {unit} is spawned")), optional);
-            };
-            let uid = match use_target(world, *unit, target) {
-                Ok(uid) => uid,
-                Err(error) => return ended(path, Err(error), optional),
-            };
-            // The command takes the next number.
-            Kind::CompanionUse { unit: *unit, uid, activity: *activity, variant: *variant, seq: seq + 1, written: false }
-        }
-        Node::CompanionGather { unit, what } => {
-            let Some(seq) = companion_seq(world, *unit) else {
-                return ended(path, Err(format!("no companion of unit {unit} is spawned")), optional);
-            };
-            let Some(from) = companion_place(world, *unit).map(|place| place.translation) else {
-                return ended(path, Err(format!("companion {unit} has no place yet")), optional);
-            };
-            match crate::harvest::companion_gather::prepare(world, *unit, from, what) {
-                // The command takes the next number.
-                Ok((command, note)) => Kind::CompanionGather { unit: *unit, command: Some(command), note, seq: seq + 1 },
-                Err(error) => return ended(path, Err(error), optional),
-            }
-        }
-        Node::CompanionExpression { unit, eye, mouth, reset } => {
-            let Some(entity) = companion_entity(world, *unit) else {
-                return ended(path, Err(format!("no companion of unit {unit} is spawned")), optional);
-            };
-            let applied = if *reset {
-                crate::companion::expression::reset(world, entity)
-            } else {
-                crate::companion::expression::set(world, entity, eye.as_deref(), mouth.as_deref())
-            };
-            let note = match applied {
-                Ok(()) if *reset => format!("companion {unit}: the default face"),
-                Ok(()) => "companion face set".to_owned(),
-                Err(error) => return ended(path, Err(error), optional),
-            };
-            return ended(path, Ok(note), optional);
-        }
-        Node::CompanionBalloon { unit, text, tweet, secs } => {
-            let Some(entity) = companion_entity(world, *unit) else {
-                return ended(path, Err(format!("no companion of unit {unit} is spawned")), optional);
-            };
-            let text = match (text, tweet) {
-                (Some(text), _) => text.clone(),
-                (None, Some(tweet)) => match world
-                    .get_resource::<crate::npc_tweet::TweetTables>()
-                    .ok_or_else(|| "the tweet master is not loaded".to_owned())
-                    .and_then(|tables| {
-                        tables
-                            .tweet(*tweet)
-                            .map(|row| row.text.clone())
-                            .ok_or_else(|| format!("the tweet master has no row {tweet}"))
-                    }) {
-                    Ok(text) => text,
-                    Err(error) => return ended(path, Err(error), optional),
-                },
-                (None, None) => return ended(path, Err("a balloon has no text".into()), optional),
-            };
-            super::npc::show_balloon(world, entity, text, tweet.unwrap_or(0));
-            Kind::CompanionBalloon { unit: *unit, entity, until: shared.now + secs }
-        }
-        Node::EffectPlay { name, at, secs } => {
-            // The anchor stands for the point; the emoticon is shown on it,
-            // and the anchor is hidden until it is placed with its draws.
-            let anchor = world
-                .spawn((
-                    Transform::from_translation(Vec3::from(*at)),
-                    Visibility::Hidden,
-                    crate::effect_show::PointAnchor,
-                    Name::new(format!("effect {name}")),
-                ))
-                .id();
-            match crate::emoticon::timeline::show(world, anchor, name, false) {
-                Ok(lease) => Kind::PointEmote { anchor, lease, until: shared.now + secs },
-                Err(error) => {
-                    world.despawn(anchor);
-                    return ended(path, Err(error), optional);
-                }
-            }
-        }
-        Node::CompanionDespawn { unit } => {
-            if companion_seq(world, *unit).is_none() {
-                return ended(path, Err(format!("no companion of unit {unit} is spawned")), optional);
-            }
-            Kind::CompanionDespawn { unit: *unit, written: false }
-        }
-        Node::CompanionBuild { unit, fixture, texture, place, swings } => {
-            if companion_seq(world, *unit).is_none() {
-                return ended(path, Err(format!("no companion of unit {unit} is spawned")), optional);
-            }
-            Kind::CompanionBuild {
-                unit: *unit,
-                fixture: *fixture,
-                texture: *texture,
-                place: *place,
-                swings: *swings,
-                phase: BuildStep::Put,
-            }
-        }
-        Node::CameraDrag { by, secs, from } => {
-            let Some(size) = hand::window_size(world) else {
-                return ended(path, Err("no primary window".into()), optional);
-            };
-            Kind::CameraDrag {
-                from: Vec2::from(*from) * size,
-                by: Vec2::from(*by),
-                start: shared.now,
-                secs: *secs,
-                down: false,
-            }
-        }
-        Node::CameraZoom { by, secs } => Kind::CameraZoom {
-            left: *by,
-            per_sec: if *secs > 0.0 { by / secs } else { f32::INFINITY },
-            until: shared.now + secs,
-        },
-        Node::LayoutFree { on } => {
-            // The switch decides itself; the note names the mode it left.
-            return match crate::layout_director::open(world, &crate::layout_director::LayoutStep::SetFree { on: *on }) {
-                Ok(note) => ended(path, Ok(note), optional),
-                Err(error) => ended(path, Err(error), optional),
-            };
-        }
-        Node::LayoutClear { keep } => {
-            let step = crate::layout_director::LayoutStep::Clear { keep: keep.clone() };
-            match plan_edit(world, &step) {
-                Ok(Ok(_)) => Kind::Layout { step },
-                Ok(Err(error)) | Err(error) => return ended(path, Err(error), optional),
-            }
-        }
-        Node::LayoutPut { fixture, texture, at, y, face } => {
-            let step = crate::layout_director::puts(&[crate::layout_director::PutItem {
-                fixture: *fixture,
-                texture: *texture,
-                at: *at,
-                y: *y,
-                face: *face,
-            }]);
-            match plan_edit(world, &step) {
-                Ok(Ok(_)) => Kind::Layout { step },
-                Ok(Err(error)) | Err(error) => return ended(path, Err(error), optional),
-            }
-        }
-        Node::LayoutPutMany { items } => {
-            let step = crate::layout_director::puts(items);
-            match plan_edit(world, &step) {
-                Ok(Ok(_)) => Kind::Layout { step },
-                Ok(Err(error)) | Err(error) => return ended(path, Err(error), optional),
-            }
-        }
-        Node::ViewSet { hud, player } => {
-            let Some(mut clean) = world.get_resource_mut::<crate::clean_view::CleanView>() else {
-                return ended(path, Err("the clean view is not installed".into()), optional);
-            };
-            clean.set(*hud, *player);
-            let note = clean.note();
-            return ended(path, Ok(note), optional);
-        }
-        Node::LayoutRemove { uid, at } => {
-            let rows = world
-                .get_resource::<crate::fixture::FixturePlacements>()
-                .map_or_else(Vec::new, crate::fixture::FixturePlacements::editor_rows);
-            let removed = match uid {
-                Some(uid) => rows.iter().position(|row| row.uid == *uid),
-                None => at.and_then(|cell| {
-                    rows.iter().position(|row| {
-                        row.footprint()
-                            .is_ok_and(|(min, max)| {
-                                (min.x..=max.x).contains(&cell[0]) && (min.z..=max.z).contains(&cell[1])
-                            })
-                    })
-                }),
-            };
-            let Some(index) = removed else {
-                let named = match (uid, at) {
-                    (Some(uid), _) => format!("uid {uid}"),
-                    (None, Some(cell)) => format!("the cell ({}, {})", cell[0], cell[1]),
-                    (None, None) => "the site has no fixture to remove".to_owned(),
-                };
-                return ended(path, Err(format!("no fixture of the site is {named}")), optional);
-            };
-            let step = crate::layout_director::LayoutStep::Edit {
-                ops: vec![moly_layout::LayoutOp::Remove {
-                    piece: moly_layout::Piece(index as u32 + 1),
-                }],
-            };
-            match plan_edit(world, &step) {
-                Ok(Ok(_)) => Kind::Layout { step },
-                Ok(Err(error)) | Err(error) => return ended(path, Err(error), optional),
-            }
-        }
-        Node::Parallel { tracks, join } => Kind::Parallel {
-            tracks: tracks
+        Node::Parallel { tracks, join } => {
+            let inner: Vec<Track> = tracks
                 .iter()
                 .enumerate()
-                .map(|(index, block)| Track::new(block.clone(), format!("{path}[{}]", index + 1)))
-                .collect(),
-            join: *join,
-        },
-        Node::Repeat { .. } => unreachable!("repeat blocks are entered by next_step"),
-    };
-    let server = match &step.node {
-        Node::Gather { .. } => Some(ServerWait::new(world, CallKind::Harvest)),
-        Node::Craft { .. } => Some(ServerWait::new(world, CallKind::Craft)),
-        Node::LayoutPlace { save, .. } if *save => {
-            Some(ServerWait::new(world, CallKind::HousingLayout))
+                .map(|(index, block)| {
+                    let sub = sub_ticket(ticket, index as u64 + 1);
+                    tickets.insert(sub);
+                    Track::new(block.clone(), format!("{path}[{}]", index + 1), sub)
+                })
+                .collect();
+            Kind::Parallel { tracks: inner, join: *join }
         }
-        Node::Deliver { .. } => Some(ServerWait::new(world, CallKind::BirthdayPartyDelivery)),
-        _ => None,
+        Node::Act(specs) => {
+            if specs.is_empty() {
+                return Started::Ended(path, Ok(String::new()));
+            }
+            tickets.insert(sub_ticket(ticket, 1));
+            match act_step(world, ticket, &path, specs.clone()) {
+                Ok(act) => Kind::Act(act),
+                Err(note) => return Started::Ended(path, Err((optional, note))),
+            }
+        }
     };
     let deadline = step.timeout.map(|timeout| shared.now + timeout);
-    Started::Running(Active { step, path, deadline, kind, server, note: String::new() })
+    Started::Running(Active { step, path, deadline, kind, note: String::new() })
 }
 
-fn wait_server(world: &World, active: &mut Active, note: String) -> Poll {
-    let Some(mut wait) = active.server else {
-        return Poll::Done(note);
-    };
-    // The feature's own pending call first: its sequence number is the one the
-    // answer will carry and it clears once the feature has read the answer.
-    if let Some(pending) = feature_pending(world, wait.call) {
-        if let Some(seq) = pending.seq {
-            wait.seq = Some(seq);
-            wait.seen = true;
-            active.server = Some(wait);
-            return Poll::Running(format!(
-                "{note} · waiting for the server ({}, seq {seq})",
-                wait.call.name()
-            ));
-        }
+/// The steps a registry action starts as, and the holder of its leases.
+fn act_step(world: &mut World, ticket: u64, path: &str, specs: Arc<[Arc<dyn ActionSpec>]>) -> Result<ActStep, String> {
+    if specs.iter().any(|spec| spec.hand()) {
+        take_hand(world, ticket, path)?;
     }
-    if wait.seq.is_none() {
-        // A feature without its own pending accessor (the harvest call): the
-        // link names the request in flight.
-        if world
-            .resource::<ServerLink>()
-            .waiting()
-            .any(|(_, kind)| *kind == wait.call)
-        {
-            wait.seen = true;
-            active.server = Some(wait);
-            return Poll::Running(format!(
-                "{note} · waiting for the server ({})",
-                wait.call.name()
-            ));
-        }
-    }
-    let log = world.resource::<AnsweredLog>();
-    if !wait.seen {
-        // Not seen in flight: either the request went out and was answered
-        // while the step itself was still running, or none was sent.
-        return Poll::Done(match log.newest_since(wait.call, wait.since) {
-            Some(answer) => format!("{note} · {}", describe_answer(answer)),
-            None => note,
-        });
-    }
-    let answer = wait
-        .seq
-        .and_then(|seq| log.get(seq))
-        .or_else(|| log.newest_since(wait.call, wait.since));
-    match answer {
-        Some(answer) => {
-            let text = describe_answer(answer);
-            active.server = None;
-            Poll::Done(format!("{note} · {text}"))
-        }
-        None => Poll::Running(format!(
-            "{note} · waiting for the server's answer ({})",
-            wait.call.name()
-        )),
-    }
+    Ok(ActStep {
+        specs,
+        next: 0,
+        run: None,
+        holder: holder_name(ticket, path),
+        step_ticket: sub_ticket(ticket, 1),
+        card: Card::new(),
+        laid: Vec::new(),
+    })
 }
 
-/// A step's server answer as the run log reports it.
-fn describe_answer(answer: &Answered) -> String {
-    let call = answer.call.name();
-    match &answer.outcome {
-        Ok(_) => format!("{{seq: {}, call: {call}, ok}}", answer.seq),
-        Err(refusal) => format!(
-            "{{seq: {}, call: {call}, refusal: {}}}",
-            answer.seq, refusal.code
-        ),
-    }
-}
-
-fn poll(world: &mut World, shared: &mut Shared, active: &mut Active, ticket: u64) -> Poll {
+fn poll(world: &mut World, shared: &mut Shared, ticket: u64, active: &mut Active, tickets: &mut BTreeSet<u64>) -> Poll {
     let path = active.path.clone();
     match &mut active.kind {
         Kind::Wait { until } => {
@@ -1154,2020 +446,136 @@ fn poll(world: &mut World, shared: &mut Shared, active: &mut Active, ticket: u64
             }
         }
         Kind::WaitUntil(until) => {
-            let (holds, note) = cond::eval(world, until);
-            if holds { Poll::Done(note) } else { Poll::Running(note) }
-        }
-        Kind::Walk(walk) => walk.poll(world, shared, &path, ticket),
-        Kind::Stick { stick, until } => {
-            if shared.now >= *until {
-                shared.release_hand_of(world, ticket, &path);
-                return Poll::Done(String::new());
-            }
-            if let Some((_, owner)) = shared.hand_owner.as_ref().filter(|(owner, _)| *owner != ticket) {
-                return Poll::Failed(format!("the joystick finger is walking for {owner}"));
-            }
-            shared.hand_owner = Some((ticket, path.clone()));
-            shared.take_hand(ticket);
-            match shared.hand.lean(world, ticket, *stick) {
-                Ok(()) => Poll::Running(format!("{:.1} s left", *until - shared.now)),
-                Err(error) => Poll::Running(error.to_owned()),
-            }
-        }
-        Kind::Interact(interact) => interact.poll(world, shared, &path, ticket),
-        Kind::Gather(gather) => gather.poll(world, shared, &path, ticket),
-        Kind::Craft(craft) => craft.poll(world, shared),
-        Kind::LayoutPlace(place) => place.poll(world, shared),
-        Kind::Deliver(deliver) => deliver.poll(world, shared),
-        Kind::ServerEdit { seq } => {
-            let answered = world.resource::<AnsweredLog>().get(*seq).cloned();
-            if let Some(answer) = answered {
-                return match &answer.outcome {
-                    Ok(_) => Poll::Done(describe_answer(&answer)),
-                    Err(refusal) => Poll::Failed(format!(
-                        "{}: {}",
-                        describe_answer(&answer),
-                        refusal.reason
-                    )),
-                };
-            }
-            if world
-                .resource::<ServerLink>()
-                .waiting()
-                .any(|(waiting, _)| waiting == seq)
-            {
-                Poll::Running(format!("waiting for the server's answer (seq {seq})"))
+            let (holds, note) = moly_features::act::eval(world, until);
+            if holds {
+                Poll::Done(note)
             } else {
-                Poll::Failed(format!("the server edit (seq {seq}) has no answer"))
-            }
-        }
-        Kind::DialogAnswer(answer) => answer.poll(world, shared),
-        Kind::NpcWalk { entity, unit, goal, within } => {
-            let at = world.get::<GlobalTransform>(*entity).map(GlobalTransform::translation);
-            let Some(at) = at else {
-                return Poll::Failed(format!("character {unit} is gone"));
-            };
-            let distance = flat(at, *goal);
-            match super::npc::walk_outcome(world, *entity) {
-                Some(true) => Poll::Done(format!("arrived at {distance:.2} m")),
-                _ if distance <= *within => {
-                    // Close enough: the character stops where it is.
-                    crate::npc::stop_for_external_activity(world, *entity);
-                    Poll::Done(format!("within {distance:.2} m; stopped there"))
-                }
-                Some(false) => Poll::Failed(format!("stopped short at {distance:.2} m")),
-                None => Poll::Running(format!("{distance:.2} m to go")),
-            }
-        }
-        Kind::NpcFace { entity, unit, towards, secs, started } => {
-            if world.get_entity(*entity).is_err() {
-                return Poll::Failed(format!("character {unit} is gone"));
-            }
-            if !*started {
-                // The turn starts once the character stands.
-                if !super::npc::standing(world, *entity) {
-                    return Poll::Running(format!("waiting for character {unit} to stand"));
-                }
-                if let Err(error) = super::npc::face(world, *entity, *towards, *secs) {
-                    return Poll::Failed(error);
-                }
-                *started = true;
-                return Poll::Running(format!("character {unit} turning"));
-            }
-            if super::npc::facing(world, *entity) {
-                Poll::Running(format!("character {unit} turning"))
-            } else {
-                Poll::Done(String::new())
-            }
-        }
-        Kind::Emote { lease, until } => {
-            if shared.now >= *until {
-                crate::emoticon::timeline::hide(world, *lease, false);
-                Poll::Done(String::new())
-            } else {
-                Poll::Running(format!("{:.1} s left", *until - shared.now))
-            }
-        }
-        Kind::PointEmote { anchor, lease, until } => {
-            if shared.now >= *until {
-                let at = world.get::<Transform>(*anchor).map_or(Vec3::ZERO, |transform| transform.translation);
-                crate::emoticon::timeline::hide(world, *lease, false);
-                // The anchor goes once the emote's last draws have: a child
-                // is not removed with its parent.
-                let anchor = *anchor;
-                world
-                    .commands()
-                    .queue(move |world: &mut World| deactivate(world, anchor));
-                Poll::Done(format!("shown at ({:.2}, {:.2}, {:.2})", at.x, at.y, at.z))
-            } else {
-                Poll::Running(format!("{:.1} s left", *until - shared.now))
-            }
-        }
-        Kind::NpcUse { ticket } => {
-            use crate::npc_fixture_activity::preview::PreviewPhase;
-            let ticket = *ticket;
-            let poll = match super::npc::activity_phase(world, ticket) {
-                None => Poll::Failed("the activity's record is gone".into()),
-                Some((PreviewPhase::Completed, _)) => Poll::Done("the activity completed".into()),
-                Some((PreviewPhase::Cancelled, _)) => Poll::Failed("the activity was cancelled".into()),
-                Some((PreviewPhase::Failed, error)) => {
-                    Poll::Failed(error.unwrap_or_else(|| "the activity failed".into()))
-                }
-                Some((phase, note)) => {
-                    return Poll::Running(match note {
-                        Some(note) => format!("{phase:?}: {note}"),
-                        None => format!("{phase:?}"),
-                    });
-                }
-            };
-            super::npc::end_activity(world, ticket, false);
-            poll
-        }
-        Kind::NpcTalk { entity } => match super::npc::talk_outcome(world, *entity) {
-            Some(Ok(note)) => Poll::Done(note),
-            Some(Err(reason)) => Poll::Failed(reason),
-            None => Poll::Running("waiting for the character's next decision".into()),
-        },
-        Kind::Tweet { entity, until } => {
-            if shared.now >= *until {
-                super::npc::hide_tweet(world, *entity);
-                Poll::Done(String::new())
-            } else {
-                Poll::Running(format!("{:.1} s left", *until - shared.now))
-            }
-        }
-        Kind::CompanionFace { unit, to, secs, seq, written } => {
-            if !*written {
-                *written = true;
-                world.write_message(crate::companion::CompanionCommand::Face { unit: *unit, to: *to, secs: *secs });
-                return Poll::Running(format!("companion {unit} turns to ({:.2}, {:.2}, {:.2})", to.x, to.y, to.z));
-            }
-            match companion_state(world, *unit) {
-                Some(state) => companion_turned(state, *seq, *unit),
-                // Gone after the command: the turn cannot end.
-                None => Poll::Failed(format!("companion {unit} was removed while turning")),
-            }
-        }
-        Kind::CompanionMotion { unit, motion, seq, written } => {
-            if !*written {
-                *written = true;
-                world.write_message(crate::companion::CompanionCommand::Motion { unit: *unit, motion: motion.clone() });
-                return Poll::Running(format!("companion {unit} plays {motion}"));
-            }
-            match companion_state(world, *unit) {
-                Some(state) => companion_moved(state, *seq, *unit, motion),
-                None => Poll::Failed(format!("companion {unit} was removed while playing {motion}")),
-            }
-        }
-        Kind::CompanionUse { unit, uid, activity, variant, seq, written } => {
-            if !*written {
-                *written = true;
-                world.write_message(crate::companion::CompanionCommand::Use {
-                    unit: *unit,
-                    uid: uid.clone(),
-                    activity: *activity,
-                    variant: *variant,
-                });
-                return Poll::Running(format!("companion {unit} uses fixture {uid}"));
-            }
-            match companion_state(world, *unit) {
-                Some(state) => companion_used(state, *seq, *unit, uid),
-                None => Poll::Failed(format!("companion {unit} was removed while using fixture {uid}")),
-            }
-        }
-        Kind::CompanionGather { unit, command, note, seq } => {
-            if let Some(command) = command.take() {
-                world.write_message(command);
-                return Poll::Running(format!("companion {unit} gathers {note}"));
-            }
-            match companion_state(world, *unit) {
-                Some(state) => companion_gathered(state, *seq, *unit, note),
-                None => Poll::Failed(format!("companion {unit} was removed while gathering")),
-            }
-        }
-        Kind::CompanionBalloon { unit, entity, until } => {
-            if shared.now >= *until {
-                super::npc::hide_tweet(world, *entity);
-                Poll::Done(String::new())
-            } else {
-                Poll::Running(format!("companion {unit} balloon: {:.1} s left", *until - shared.now))
-            }
-        }
-        Kind::CompanionSpawn { unit, at, written, polls } => {
-            if !*written {
-                *written = true;
-                world.write_message(crate::companion::CompanionCommand::Spawn { unit: *unit, at: *at });
-                return Poll::Running(format!("spawning companion {unit}"));
-            }
-            if let Some(state) = companion_state(world, *unit) {
-                return companion_spawned(state, *unit);
-            }
-            // The spawn waits for its character body before it is a companion.
-            if crate::companion::is_spawning(world, *unit) {
-                return Poll::Running(format!("companion {unit}: its character body is loading"));
-            }
-            // The command is read and its spawn entity inserted a frame or
-            // two after it is written; nothing there after that is a refusal.
-            *polls += 1;
-            if *polls < 3 {
-                return Poll::Running(format!("spawning companion {unit}"));
-            }
-            Poll::Failed(format!("companion {unit} was not spawned; see the [companion] log line"))
-        }
-        Kind::CompanionWalk { unit, to, within, seq, written } => {
-            if !*written {
-                *written = true;
-                world.write_message(crate::companion::CompanionCommand::WalkTo { unit: *unit, to: *to, within: *within });
-                return Poll::Running(format!("companion {unit} is walking"));
-            }
-            match companion_state(world, *unit) {
-                Some(state) => companion_walked(state, *seq, *unit),
-                // Gone after the command: the walk cannot end.
-                None => Poll::Failed(format!("companion {unit} was removed while walking")),
-            }
-        }
-        Kind::CompanionBuild { unit, fixture, texture, place, swings, phase } => companion_build(world, *unit, *fixture, *texture, *place, *swings, phase),
-        Kind::CompanionDespawn { unit, written } => {
-            if !*written {
-                *written = true;
-                world.write_message(crate::companion::CompanionCommand::Despawn { unit: *unit });
-            }
-            if companion_seq(world, *unit).is_some() {
-                Poll::Running(format!("removing companion {unit}"))
-            } else {
-                Poll::Done(format!("companion {unit} removed"))
-            }
-        }
-        Kind::CameraDrag { from, by, start, secs, down } => {
-            if !*down {
-                if let Err(error) = hand::drag_touch(world, TouchPhase::Started, *from) {
-                    return Poll::Failed(error.into());
-                }
-                *down = true;
-                *start = shared.now;
-                return Poll::Running("finger down".into());
-            }
-            let done = (shared.now - *start) / secs.max(f32::EPSILON);
-            let at = *from + *by * done.min(1.0);
-            if let Err(error) = hand::drag_touch(world, TouchPhase::Moved, at) {
-                return Poll::Failed(error.into());
-            }
-            if done < 1.0 {
-                return Poll::Running(format!("{:.0} %", done * 100.0));
-            }
-            // The last move lands on the end point before the finger lifts.
-            *down = false;
-            match hand::drag_touch(world, TouchPhase::Ended, at) {
-                Ok(()) => Poll::Done(format!("dragged ({:.0}, {:.0}) px", by.x, by.y)),
-                Err(error) => Poll::Failed(error.into()),
-            }
-        }
-        Kind::CameraZoom { left, per_sec, until } => {
-            let step = if shared.now >= *until {
-                *left
-            } else {
-                let delta = world.resource::<Time>().delta_secs();
-                (*per_sec * delta).clamp(-left.abs(), left.abs())
-            };
-            if step != 0.0 {
-                if let Err(error) = hand::wheel(world, step) {
-                    return Poll::Failed(error.into());
-                }
-                *left -= step;
-            }
-            if shared.now >= *until || *left == 0.0 {
-                Poll::Done(String::new())
-            } else {
-                Poll::Running(format!("{left:.0} px left"))
+                Poll::Running(note)
             }
         }
         Kind::Parallel { tracks, join } => {
             let mut running = 0;
+            let mut end = None;
             for track in tracks.iter_mut() {
-                match track.tick(world, shared, ticket) {
+                match track.tick(world, shared, tickets) {
                     TrackState::Running => running += 1,
-                    TrackState::Done if *join == Join::Any => return Poll::Done("one track ended".into()),
+                    TrackState::Done if *join == Join::Any => {
+                        end = Some(Poll::Done("one track ended".into()));
+                        break;
+                    }
                     TrackState::Done => {}
-                    TrackState::Failed(error) => return Poll::Failed(error),
+                    TrackState::Failed(error) => {
+                        end = Some(Poll::Failed(error));
+                        break;
+                    }
                 }
             }
-            if running == 0 { Poll::Done(String::new()) } else { Poll::Running(format!("{running} tracks running")) }
-        }
-        Kind::Layout { step } => match crate::layout_director::settled(world) {
-            Some(Ok(())) => Poll::Done(layout_note(world, step)),
-            Some(Err(error)) => Poll::Failed(error),
-            None => Poll::Running(format!(
-                "the layout step {} is waiting for its save",
-                crate::layout_director::wire(step)
-            )),
-        },
-        Kind::SiteSwitch { site, moved } => {
-            let current = world.get_resource::<crate::site::SiteActive>().map(|active| active.site_type.clone());
-            let moving = world.contains_resource::<crate::site_move::SiteMoveActive>();
-            if current.as_deref() == Some(site.as_str()) && !moving {
-                Poll::Done(format!("on {site}"))
-            } else if *moved && !moving {
-                // A move that ends elsewhere was refused.
-                Poll::Failed(format!("the move ended on {current:?}"))
+            if let Some(end) = end {
+                for track in tracks.iter_mut() {
+                    track.abort(world, shared, tickets);
+                }
+                return end;
+            }
+            if running == 0 {
+                Poll::Done(String::new())
             } else {
-                *moved |= moving;
-                Poll::Running(format!("site {current:?}, moving {moving}"))
+                Poll::Running(format!("{running} tracks running"))
             }
         }
-    }
-}
-
-/// The note a finished layout step ends with: the fixtures the save
-/// created, by uid and cells, or the mode the switch left.
-fn layout_note(world: &World, step: &crate::layout_director::LayoutStep) -> String {
-    match step {
-        crate::layout_director::LayoutStep::SetFree { on } => {
-            format!("free layout {}", if *on { "on" } else { "off" })
-        }
-        crate::layout_director::LayoutStep::Clear { .. } => "the site is cleared".to_owned(),
-        crate::layout_director::LayoutStep::Edit { .. } => crate::layout_director::put_notes(world),
-    }
-}
-
-/// A layout step's draft, its decision and its save, in order: the step
-/// starts with its save in flight, and waits for it in [`Kind::Layout`]. The
-/// inner `Err` is the step's own refusal (a put rule, a save check), the
-/// outer one a site or editor state it could not run on.
-fn plan_edit(
-    world: &mut World,
-    step: &crate::layout_director::LayoutStep,
-) -> Result<Result<(), String>, String> {
-    crate::layout_director::open(world, step)?;
-    crate::layout_director::reset(world);
-    if let Err(refusal) = crate::layout_director::decide(world, step) {
-        return Ok(Err(refusal));
-    }
-    crate::layout_director::save(world).map(|_| Ok(()))
-}
-
-/// Whether no companion of `unit` is spawned, or is being spawned: the
-/// reason to refuse a spawn, as the world's companion commands do. `None`
-/// when one is there.
-fn companion_absent(world: &mut World, unit: u32) -> Result<(), String> {
-    if world.query::<&crate::companion::Companion>().iter(world).any(|companion| companion.unit == unit) {
-        return Err(format!("a companion of unit {unit} is already spawned"));
-    }
-    if crate::companion::is_spawning(world, unit) {
-        return Err(format!("a companion of unit {unit} is already being spawned"));
-    }
-    Ok(())
-}
-
-/// Retires the anchor of a world-point effect once the step is over: its
-/// emote's draws may still be in the presenter's commands, so it is hidden
-/// at once (what is left under it draws next frame and not), and it is
-/// despawned once its draws are gone.
-fn deactivate(world: &mut World, anchor: Entity) {
-    let since = world.resource::<Time>().elapsed_secs();
-    let Ok(mut entity) = world.get_entity_mut(anchor) else {
-        return;
-    };
-    if let Some(mut visibility) = entity.get_mut::<Visibility>() {
-        *visibility = Visibility::Hidden;
-    }
-    entity.insert(Retire { since });
-}
-
-/// Seconds an anchor that has no draws yet waits before it goes.
-const RETIRE_LONELY_SECS: f32 = 0.25;
-
-/// An effect's anchor whose emote has gone, and when that was found.
-#[derive(Component, Clone, Copy)]
-pub(crate) struct Retire {
-    since: f32,
-}
-
-/// Update: each retired anchor goes once no draw of an emote hangs under it
-/// any more.
-pub(crate) fn retire(
-    mut commands: Commands,
-    time: Res<Time>,
-    anchors: Query<(Entity, &Retire)>,
-    draws: Query<&ChildOf, With<crate::emoticon::EmoteDraw>>,
-) {
-    let held: std::collections::HashSet<Entity> = draws.iter().map(ChildOf::parent).collect();
-    let now = time.elapsed_secs();
-    for (entity, retire) in &anchors {
-        if !held.contains(&entity) && now - retire.since >= RETIRE_LONELY_SECS {
-            commands.entity(entity).despawn();
-        }
-    }
-}
-
-/// The entity of `unit`'s companion.
-fn companion_entity(world: &mut World, unit: u32) -> Option<Entity> {
-    world
-        .query::<(Entity, &crate::companion::Companion)>()
-        .iter(world)
-        .find(|(_, companion)| companion.unit == unit)
-        .map(|(entity, _)| entity)
-}
-
-/// The body `companion` wears, when it is dressed.
-fn worn_body(world: &mut World, companion: Entity) -> Option<Entity> {
-    world
-        .query::<(Entity, &crate::player_avatar::oc::OcModel)>()
-        .iter(world)
-        .find(|(_, model)| model.player == companion)
-        .map(|(entity, _)| entity)
-}
-
-/// The transform of `unit`'s companion: its place and the yaw it faces.
-fn companion_place(world: &mut World, unit: u32) -> Option<Transform> {
-    world
-        .query::<(&crate::companion::Companion, &Transform)>()
-        .iter(world)
-        .find(|(companion, _)| companion.unit == unit)
-        .map(|(_, transform)| *transform)
-}
-
-/// Where the placed fixture `uid` of the layout stands: at the root of its
-/// instance when that exists, else at the pose its placement row puts it
-/// at, on the site's own origin.
-pub(crate) fn companion_fixture(world: &mut World, uid: &str) -> Option<Vec3> {
-    let instance = world
-        .query::<(&crate::fixture::FixtureInstanceSeed, &GlobalTransform)>()
-        .iter(world)
-        .find(|(seed, _)| seed.uid() == uid)
-        .map(|(_, transform)| transform.translation());
-    if instance.is_some() {
-        return instance;
-    }
-    let placements = world.get_resource::<crate::fixture::FixturePlacements>()?;
-    let row = placements.editor_rows().into_iter().find(|row| row.uid == uid)?;
-    let pose = row.pose().ok()?;
-    // `ShowPutEffect`'s view position: the site's own origin plus the pose.
-    let origin = crate::fixture_edit::site_origin(world);
-    Some(origin + pose.translation)
-}
-
-/// The command number of `unit`'s companion: its spawn is the first.
-fn companion_seq(world: &mut World, unit: u32) -> Option<u64> {
-    companion_state(world, unit).map(|(_, status)| status.seq)
-}
-
-/// The state of `unit`'s companion, with its command number.
-fn companion_state(world: &mut World, unit: u32) -> Option<(crate::companion::CompanionState, crate::companion::CompanionStatus)> {
-    let mut companions = world.query::<(&crate::companion::Companion, &crate::companion::CompanionStatus)>();
-    companions
-        .iter(world)
-        .find(|(companion, _)| companion.unit == unit)
-        .map(|(_, status)| (status.state.clone(), status.clone()))
-}
-
-/// The end of a spawn: shown and standing, or walking to a spawn point off
-/// its seat.
-fn companion_spawned(state: (crate::companion::CompanionState, crate::companion::CompanionStatus), unit: u32) -> Poll {
-    use crate::companion::CompanionState;
-    let (state, _) = state;
-    match state {
-        CompanionState::Spawned => Poll::Running(format!("companion {unit}: its body is loading")),
-        CompanionState::Idle => Poll::Done(format!("companion {unit} spawned")),
-        CompanionState::Walking | CompanionState::Turning | CompanionState::Building | CompanionState::Gathering | CompanionState::Acting | CompanionState::Using => {
-            Poll::Running(format!("companion {unit} walks to its spawn point"))
-        }
-        CompanionState::Done => Poll::Done(format!("companion {unit} spawned at its spawn point")),
-        // The body is shown from its seat on: a walk-in that stops short
-        // leaves the companion standing where it stopped.
-        CompanionState::Failed(reason) => Poll::Done(format!("companion {unit} spawned short of its spawn point: {reason}")),
-    }
-}
-
-/// One frame of a `companion.build` step.
-fn companion_build(
-    world: &mut World,
-    unit: u32,
-    fixture: i32,
-    texture: Option<u32>,
-    place: BuildPlace,
-    swings: u32,
-    phase: &mut BuildStep,
-) -> Poll {
-    use crate::companion::{build::GHOST_ALPHA, CompanionCommand, FixtureGhosts};
-    use crate::fixture_edit::field_build::{self, FieldBuildState, FieldBuilds, FieldPut};
-    match phase {
-        BuildStep::Put => {
-            let Some(stand) = companion_place(world, unit) else {
-                return Poll::Failed(format!("no companion of unit {unit} is spawned"));
-            };
-            // One layout save is out at a time: a build whose turn has not
-            // come waits for the save in flight (until the step's timeout).
-            if field_build::saving(world) {
-                return Poll::Running(format!("companion {unit}: waiting for another build's save"));
-            }
-            // In front of the companion: its body faces its local +Z.
-            let near = place
-                .at
-                .map(Vec3::from)
-                .unwrap_or(stand.translation + stand.rotation * Vec3::Z * BUILD_AHEAD);
-            let put = FieldPut {
-                at: near,
-                exact: place.exact,
-                direction: place.direction.and_then(moly_law::fixture::Direction::from_u8),
-            };
-            match field_build::start(world, fixture, texture, put) {
-                Err(reason) => Poll::Failed(format!("fixture {fixture} was not put: {reason}")),
-                Ok((ticket, uid)) => {
-                    // Drawn as a ghost from its first frame.
-                    world.resource_mut::<FixtureGhosts>().set(&uid, GHOST_ALPHA);
-                    let note = format!("fixture {fixture} put as {uid} near {near:?}; saving");
-                    *phase = BuildStep::Saving { ticket, uid };
-                    Poll::Running(note)
+        Kind::Act(act) => {
+            if act.run.is_none() {
+                if act.next >= act.specs.len() {
+                    return Poll::Done(String::new());
                 }
-            }
-        }
-        BuildStep::Saving { ticket, uid } => {
-            let state = world.resource::<FieldBuilds>().state(*ticket).cloned();
-            match state {
-                None | Some(FieldBuildState::Saving) => Poll::Running(format!("fixture {uid}: saving the layout")),
-                Some(FieldBuildState::Reloading) => Poll::Running(format!("fixture {uid}: the layout is reloading")),
-                Some(FieldBuildState::Refused(reason)) => {
-                    world.resource_mut::<FixtureGhosts>().clear(uid);
-                    Poll::Failed(format!("fixture {uid}: {reason}"))
+                let spec = act.specs[act.next].clone();
+                act.next += 1;
+                // Each part of a step is a track of its own: the first is
+                // the step's ticket, the ones after it their own numbers from
+                // the step's place.
+                if act.next > 1 {
+                    act.step_ticket = sub_ticket(sub_ticket(ticket, 1), act.next as u64);
+                    tickets.insert(act.step_ticket);
                 }
-                Some(FieldBuildState::Placed { .. }) => {
-                    let mut instances = world.query::<(&crate::fixture::FixtureInstanceSeed, &GlobalTransform)>();
-                    let Some(at) = instances
-                        .iter(world)
-                        .find(|(seed, _)| seed.uid() == uid.as_str())
-                        .map(|(_, transform)| transform.translation())
-                    else {
-                        return Poll::Running(format!("fixture {uid}: waiting for its instance"));
-                    };
-                    let Some(seq) = companion_seq(world, unit) else {
-                        world.resource_mut::<FixtureGhosts>().clear(uid);
-                        return Poll::Failed(format!("companion {unit} was removed before its build"));
-                    };
-                    world.write_message(CompanionCommand::Build { unit, uid: uid.clone(), at, swings });
-                    let note = format!("fixture {uid} stands at {at:?}; companion {unit} builds it");
-                    // The command takes the next number.
-                    *phase = BuildStep::Building { seq: seq + 1, uid: uid.clone() };
-                    Poll::Running(note)
-                }
-            }
-        }
-        BuildStep::Building { seq, uid } => match companion_state(world, unit) {
-            Some(state) => companion_built(world, state, *seq, unit, uid),
-            None => Poll::Failed(format!("companion {unit} was removed while building")),
-        },
-    }
-}
-
-/// How far in front of the companion a build's put search starts, metres.
-const BUILD_AHEAD: f32 = 1.5;
-
-/// The end of a build: the status at or past the command's number, done or
-/// failed; a build that is done names where its fixture stands.
-fn companion_built(
-    world: &mut World,
-    state: (crate::companion::CompanionState, crate::companion::CompanionStatus),
-    seq: u64,
-    unit: u32,
-    uid: &str,
-) -> Poll {
-    use crate::companion::CompanionState;
-    let (state, status) = state;
-    if status.seq < seq {
-        return Poll::Running(format!("companion {unit} build {seq}: the command is queued"));
-    }
-    match state {
-        CompanionState::Idle
-        | CompanionState::Walking
-        | CompanionState::Turning
-        | CompanionState::Building | CompanionState::Gathering
-        | CompanionState::Acting
-        | CompanionState::Using => Poll::Running(format!("companion {unit} build {seq}: {}", state.label())),
-        CompanionState::Spawned => Poll::Running(format!("companion {unit}: its body is loading")),
-        CompanionState::Done if status.seq > seq => Poll::Failed(format!(
-            "companion {unit} build {seq} was never accepted: command {} came first",
-            status.seq
-        )),
-        CompanionState::Done => {
-            let note = format!("companion {unit} build {seq} done");
-            let cell = crate::fixture_edit::field_build::placed_cell(world, uid)
-                .map(|(center, direction)| {
-                    format!(", cell ({}, {}, {}) direction {}", center.x, center.y, center.z, direction as u8)
-                })
-                .unwrap_or_default();
-            match companion_fixture(world, uid) {
-                Some(at) => Poll::Done(format!("{note}; fixture {uid} at ({:.2}, {:.2}, {:.2}){cell}", at.x, at.y, at.z)),
-                None => Poll::Done(format!("{note}; fixture {uid}{cell}")),
-            }
-        }
-        CompanionState::Failed(reason) => Poll::Failed(format!("companion {unit} build {seq} failed: {reason}")),
-    }
-}
-
-/// The uid of the fixture a `companion.use` step names: the placed copy of
-/// a master id nearest the companion, or a placed uid as given.
-fn use_target(world: &mut World, unit: u32, target: &super::script::UseTarget) -> Result<String, String> {
-    use super::script::UseTarget;
-    let mut placed = world.query::<(&crate::fixture_activity_state::FixtureActivityIdentity, &GlobalTransform)>();
-    match target {
-        UseTarget::Uid(uid) => placed
-            .iter(world)
-            .any(|(identity, _)| identity.uid == *uid)
-            .then(|| uid.clone())
-            .ok_or_else(|| format!("no placed fixture {uid} on this site")),
-        UseTarget::Nearest(fixture) => {
-            let entity = companion_entity(world, unit).ok_or_else(|| format!("no companion of unit {unit} is spawned"))?;
-            let from = world
-                .get::<GlobalTransform>(entity)
-                .map(GlobalTransform::translation)
-                .ok_or_else(|| format!("companion {unit} has no place yet"))?;
-            placed
-                .iter(world)
-                .filter(|(identity, _)| identity.master_id == *fixture)
-                .min_by(|(_, a), (_, b)| {
-                    a.translation().distance_squared(from).total_cmp(&b.translation().distance_squared(from))
-                })
-                .map(|(identity, _)| identity.uid.clone())
-                .ok_or_else(|| format!("no placed fixture {fixture} on this site"))
-        }
-    }
-}
-
-/// The end of a use: the status at or past the command's number, done or
-/// failed.
-fn companion_used(
-    state: (crate::companion::CompanionState, crate::companion::CompanionStatus),
-    seq: u64,
-    unit: u32,
-    uid: &str,
-) -> Poll {
-    use crate::companion::CompanionState;
-    let (state, status) = state;
-    if status.seq < seq {
-        return Poll::Running(format!("companion {unit} use {seq}: the command is queued"));
-    }
-    match state {
-        CompanionState::Spawned => Poll::Running(format!("companion {unit}: its body is loading")),
-        CompanionState::Done if status.seq > seq => Poll::Failed(format!(
-            "companion {unit} use {seq} was never accepted: command {} came first",
-            status.seq
-        )),
-        CompanionState::Done => Poll::Done(format!("companion {unit} used fixture {uid}")),
-        CompanionState::Failed(reason) => Poll::Failed(format!("companion {unit} use {seq} failed: {reason}")),
-        state => Poll::Running(format!("companion {unit} use {seq}: {}", state.label())),
-    }
-}
-
-/// The end of a gather: the status at or past the command's number, done or
-/// failed.
-fn companion_gathered(
-    state: (crate::companion::CompanionState, crate::companion::CompanionStatus),
-    seq: u64,
-    unit: u32,
-    note: &str,
-) -> Poll {
-    use crate::companion::CompanionState;
-    let (state, status) = state;
-    if status.seq < seq {
-        return Poll::Running(format!("companion {unit} gather {seq}: the command is queued"));
-    }
-    match state {
-        CompanionState::Spawned => Poll::Running(format!("companion {unit}: its body is loading")),
-        CompanionState::Done if status.seq > seq => Poll::Failed(format!(
-            "companion {unit} gather {seq} was never accepted: command {} came first",
-            status.seq
-        )),
-        CompanionState::Done => Poll::Done(format!("companion {unit} gathered {note}")),
-        CompanionState::Failed(reason) => Poll::Failed(format!("companion {unit} gather {seq} failed: {reason}")),
-        state => Poll::Running(format!("companion {unit} gather {seq}: {}", state.label())),
-    }
-}
-
-/// The end of a motion: the status at or past the command's number, done or
-/// failed.
-fn companion_moved(
-    state: (crate::companion::CompanionState, crate::companion::CompanionStatus),
-    seq: u64,
-    unit: u32,
-    motion: &str,
-) -> Poll {
-    use crate::companion::CompanionState;
-    let (state, status) = state;
-    if status.seq < seq {
-        return Poll::Running(format!("companion {unit} motion {seq}: the command is queued"));
-    }
-    match state {
-        CompanionState::Spawned => Poll::Running(format!("companion {unit}: its body is loading")),
-        CompanionState::Done if status.seq > seq => Poll::Failed(format!(
-            "companion {unit} motion {seq} was never accepted: command {} came first",
-            status.seq
-        )),
-        CompanionState::Done => Poll::Done(format!("companion {unit} played {motion}")),
-        CompanionState::Failed(reason) => Poll::Failed(format!("companion {unit} motion {seq} failed: {reason}")),
-        state => Poll::Running(format!("companion {unit} motion {seq}: {}", state.label())),
-    }
-}
-
-/// The end of a walk: the status at or past the command's number, done or
-/// failed.
-fn companion_walked(state: (crate::companion::CompanionState, crate::companion::CompanionStatus), seq: u64, unit: u32) -> Poll {
-    use crate::companion::CompanionState;
-    let (state, status) = state;
-    if status.seq < seq {
-        return Poll::Running(format!("companion {unit} walk {seq}: the command is queued"));
-    }
-    match state {
-        CompanionState::Idle
-        | CompanionState::Walking
-        | CompanionState::Turning
-        | CompanionState::Building | CompanionState::Gathering
-        | CompanionState::Acting
-        | CompanionState::Using => Poll::Running(format!("companion {unit} walk {seq}: {}", state.label())),
-        CompanionState::Spawned => Poll::Running(format!("companion {unit}: its body is loading")),
-        CompanionState::Done if status.seq > seq => Poll::Failed(format!(
-            "companion {unit} walk {seq} was never accepted: command {} came first",
-            status.seq
-        )),
-        CompanionState::Done => Poll::Done(format!("companion {unit} walk {seq} arrived")),
-        CompanionState::Failed(reason) => Poll::Failed(format!("companion {unit} walk {seq} failed: {reason}")),
-    }
-}
-
-/// The end of a turn: the status at or past the command's number, done or
-/// failed.
-fn companion_turned(state: (crate::companion::CompanionState, crate::companion::CompanionStatus), seq: u64, unit: u32) -> Poll {
-    use crate::companion::CompanionState;
-    let (state, status) = state;
-    if status.seq < seq {
-        return Poll::Running(format!("companion {unit} face {seq}: the command is queued"));
-    }
-    match state {
-        CompanionState::Idle | CompanionState::Walking | CompanionState::Building | CompanionState::Gathering | CompanionState::Acting | CompanionState::Using => {
-            Poll::Running(format!("companion {unit} face {seq}: {}", state.label()))
-        }
-        CompanionState::Turning => Poll::Running(format!("companion {unit} face {seq}: turning")),
-        CompanionState::Spawned => Poll::Running(format!("companion {unit}: its body is loading")),
-        CompanionState::Done if status.seq > seq => Poll::Failed(format!(
-            "companion {unit} face {seq} was never accepted: command {} came first",
-            status.seq
-        )),
-        CompanionState::Done => Poll::Done(format!("companion {unit} face {seq} done")),
-        CompanionState::Failed(reason) => Poll::Failed(format!("companion {unit} face {seq} failed: {reason}")),
-    }
-}
-
-/// The player walking to a target along the navigation field.
-struct Walk {
-    to: Target,
-    within: f32,
-    corners: Vec<Vec2>,
-    next: usize,
-    /// The goal and field generation the corners were planned for.
-    planned: Option<(Vec2, u64)>,
-    /// The closest the player has come, and when.
-    best: (f32, f32),
-    /// Whether a goal the walk field cannot reach within `within` refuses:
-    /// a point walk (`player.walk_to`) wants a place to stand; an approach
-    /// to a target's contact circle or a button, and a drop heading to cross,
-    /// stop before their point and opt out ([`Walk::contact`]).
-    refuse_unreachable: bool,
-}
-
-impl Walk {
-    fn new(to: Target, within: f32) -> Self {
-        Self {
-            to,
-            within,
-            corners: Vec::new(),
-            next: 0,
-            planned: None,
-            best: (f32::INFINITY, 0.0),
-            refuse_unreachable: true,
-        }
-    }
-
-    /// A walk that ends on a contact circle or a button near the target, not
-    /// on the target point: the field may snap the point outward and that is
-    /// not a refusal.
-    fn contact(to: Target, within: f32) -> Self {
-        Self {
-            refuse_unreachable: false,
-            ..Self::new(to, within)
-        }
-    }
-
-    fn poll(&mut self, world: &mut World, shared: &mut Shared, path: &str, ticket: u64) -> Poll {
-        let goal = match cond::resolve(world, &self.to) {
-            Ok(goal) => goal,
-            Err(error) => {
-                shared.release_hand_of(world, ticket, path);
-                return Poll::Running(error);
-            }
-        };
-        let player = match cond::player(world) {
-            Ok(player) => player,
-            Err(error) => return Poll::Running(error),
-        };
-        let distance = flat(player, goal);
-        if distance <= self.within {
-            shared.release_hand_of(world, ticket, path);
-            return Poll::Done(format!("arrived at {distance:.2} m"));
-        }
-        // The stick takes no press while it is disabled (the entry before
-        // its finish, a dialog, an edit, a site move): stand and wait.
-        let enabled = world.get_resource::<crate::joystick::JoystickState>().is_some_and(|stick| stick.enabled);
-        if !enabled {
-            shared.release_hand_of(world, ticket, path);
-            return Poll::Running(format!("the joystick is disabled; {distance:.2} m to go"));
-        }
-        if let Some((_, owner)) = shared.hand_owner.as_ref().filter(|(owner, _)| *owner != ticket) {
-            return Poll::Failed(format!("the joystick finger is walking for {owner}"));
-        }
-        let goal_xz = Vec2::new(goal.x, goal.z);
-        let player_xz = Vec2::new(player.x, player.z);
-        let generation = world.get_resource::<crate::walk_face::WalkFace>().map_or(0, |face| face.generation());
-        if distance < self.best.0 - STALL_PROGRESS {
-            self.best = (distance, shared.now);
-        }
-        let stalled = shared.now - self.best.1 > STALL_SECS;
-        let replan = match self.planned {
-            None => true,
-            Some((planned_goal, planned_generation)) => {
-                planned_goal.distance(goal_xz) > GOAL_MOVED || planned_generation != generation || stalled
-            }
-        };
-        if replan {
-            let planned = world
-                .get_resource::<crate::walk_face::WalkFace>()
-                .map(|face| face.path(player_xz.into(), goal_xz.into()));
-            match planned {
-                // No walk field (a stage or a headless run): the straight line
-                // stays the plan.
-                None => self.corners = vec![goal_xz],
-                Some(Some(corners)) => {
-                    let corners: Vec<Vec2> = corners.into_iter().map(Vec2::from).collect();
-                    if self.refuse_unreachable {
-                        let reached = corners.last().copied().unwrap_or(goal_xz);
-                        let off = reached.distance(goal_xz);
-                        if off > self.within {
-                            shared.release_hand_of(world, ticket, path);
-                            return Poll::Failed(format!(
-                                "the goal ({:.2}, {:.2}) is not reachable on the walk field: the nearest reachable point is ({:.2}, {:.2}), {off:.2} m away, more than within {:.2}",
-                                goal_xz.x, goal_xz.y, reached.x, reached.y, self.within
-                            ));
-                        }
-                    }
-                    self.corners = corners;
-                }
-                Some(None) => {
-                    if self.refuse_unreachable {
-                        shared.release_hand_of(world, ticket, path);
-                        let nearest = world
-                            .get_resource::<crate::walk_face::WalkFace>()
-                            .and_then(|face| face.sample(goal_xz.into(), 1.0e4))
-                            .map_or_else(
-                                || "none".to_owned(),
-                                |point| format!("({:.2}, {:.2})", point[0], point[1]),
-                            );
-                        return Poll::Failed(format!(
-                            "no walk path from ({:.2}, {:.2}) to the goal ({:.2}, {:.2}); the nearest walkable point to the goal is {nearest}",
-                            player_xz.x, player_xz.y, goal_xz.x, goal_xz.y
-                        ));
-                    }
-                    self.corners = vec![goal_xz];
-                }
-            }
-            self.next = 0;
-            self.planned = Some((goal_xz, generation));
-            self.best = (distance, shared.now);
-        }
-        while self.next < self.corners.len() && self.corners[self.next].distance(player_xz) < CORNER_REACHED {
-            self.next += 1;
-        }
-        let aim = self.corners.get(self.next).copied().unwrap_or(goal_xz);
-        shared.hand_owner = Some((ticket, path.to_owned()));
-        shared.take_hand(ticket);
-        if let Err(error) = shared.hand.steer(world, ticket, aim - player_xz) {
-            return Poll::Running(error.to_owned());
-        }
-        Poll::Running(format!(
-            "{distance:.2} m to go, corner {}/{}",
-            (self.next + 1).min(self.corners.len()),
-            self.corners.len()
-        ))
-    }
-}
-
-/// Drops are taken from this far around the harvested object (metres).
-const DROP_REACH: f32 = 6.0;
-/// A drop the player has stood on this long (seconds) is not taken.
-const DROP_REFUSED_SECS: f32 = 3.0;
-/// A press that has started no swing after this long (seconds) is refused.
-const PRESS_ANSWER_SECS: f32 = 1.5;
-/// Presses are this far apart (seconds), as a hand taps.
-const PRESS_INTERVAL: f32 = 0.3;
-
-enum GatherPhase {
-    /// Walking into the object's contact circle until it is the target.
-    Approach,
-    /// Tapping the harvest button while the object has hit points left.
-    Swing,
-    /// Walking over the landed drops.
-    Collect,
-}
-
-/// `player.gather`: one harvest object through the harvest button, then its
-/// drops. The object is chosen once, when the step starts; the button is
-/// tapped as a finger taps it, so the harvest screen's own rules (the tool
-/// for the kind, the stamina, the swing loop) decide each press.
-struct Gather {
-    what: GatherRef,
-    collect: bool,
-    /// The object: its entity, UID and position.
-    object: Option<(Entity, u64, Vec3)>,
-    walk: Option<Walk>,
-    phase: GatherPhase,
-    /// When the joystick finger was lifted for the presses.
-    lifted_at: Option<f32>,
-    last_press: Option<f32>,
-    presses: u32,
-    /// The hit points when the last unanswered press went out.
-    hp_at_press: i32,
-    /// The drop walked to, and since when the player has stood on it.
-    drop: Option<(Vec3, Option<f32>)>,
-    drops_taken: u32,
-}
-
-impl Gather {
-    fn new(what: GatherRef, collect: bool) -> Self {
-        Self {
-            what,
-            collect,
-            object: None,
-            walk: None,
-            phase: GatherPhase::Approach,
-            lifted_at: None,
-            last_press: None,
-            presses: 0,
-            hp_at_press: 0,
-            drop: None,
-            drops_taken: 0,
-        }
-    }
-
-    /// The harvest object the step names: entity, UID, position, radius.
-    fn find(&self, world: &mut World) -> Result<(Entity, u64, Vec3, f32), String> {
-        let from = cond::player(world).unwrap_or(Vec3::ZERO);
-        let mut objects = world.query::<(Entity, &crate::harvest::HarvestObject, &GlobalTransform)>();
-        let rows: Vec<(Entity, u64, Vec3, f32, bool, i32)> = objects
-            .iter(world)
-            .map(|(entity, object, at)| {
-                (
-                    entity,
-                    object.uid,
-                    at.translation(),
-                    object.radius,
-                    object.status == crate::harvest::STATUS_HARVESTED,
-                    object.fixture_type,
-                )
-            })
-            .collect();
-        if rows.is_empty() {
-            return Err("this site has no gatherables".into());
-        }
-        match &self.what {
-            GatherRef::Uid(uid) => {
-                let (entity, uid, at, radius, harvested, _) = rows
-                    .into_iter()
-                    .find(|row| row.1 == *uid)
-                    .ok_or_else(|| format!("no gatherable with UID {uid} on this site"))?;
-                if harvested {
-                    return Err(format!("gatherable {uid} is already harvested"));
-                }
-                Ok((entity, uid, at, radius))
-            }
-            GatherRef::Nearest { kind } => rows
-                .into_iter()
-                .filter(|row| !row.4)
-                .filter(|row| kind.as_deref().is_none_or(|kind| crate::harvest::kind_word(row.5) == kind))
-                .min_by(|a, b| a.2.distance_squared(from).total_cmp(&b.2.distance_squared(from)))
-                .map(|(entity, uid, at, radius, _, _)| (entity, uid, at, radius))
-                .ok_or_else(|| match kind {
-                    Some(kind) => format!("no {kind} gatherable left to harvest on this site"),
-                    None => "no gatherable left to harvest on this site".to_owned(),
-                }),
-        }
-    }
-
-    fn poll(&mut self, world: &mut World, shared: &mut Shared, path: &str, ticket: u64) -> Poll {
-        let (entity, uid, origin) = match self.object {
-            Some(object) => object,
-            None => match self.find(world) {
-                Ok((entity, uid, at, radius)) => {
-                    self.object = Some((entity, uid, at));
-                    // Contact is the player inside the object's circle.
-                    let within = (radius * 0.6).max(0.15);
-                    self.walk = Some(Walk::contact(Target { what: TargetKind::Gatherable(uid), offset: [0.0; 2] }, within));
-                    (entity, uid, at)
-                }
-                Err(error) => {
-                    shared.release_hand_of(world, ticket, path);
-                    return Poll::Failed(error);
-                }
-            },
-        };
-        let Some(object) = world.get::<crate::harvest::HarvestObject>(entity) else {
-            shared.release_hand_of(world, ticket, path);
-            return Poll::Failed(format!("gatherable {uid} left the site"));
-        };
-        let (hp, kind, harvested) =
-            (object.hp, object.fixture_type, object.status == crate::harvest::STATUS_HARVESTED);
-        let targeted = world
-            .get_resource::<crate::harvest::action::HarvestTargeting>()
-            .and_then(|targeting| targeting.target);
-        let swinging = world
-            .get_resource::<crate::harvest::action::HarvestAction>()
-            .is_some_and(crate::harvest::action::HarvestAction::in_progress);
-        let now = shared.now;
-        match self.phase {
-            GatherPhase::Approach => {
-                if harvested {
-                    self.phase = GatherPhase::Collect;
-                    return Poll::Running(format!("gatherable {uid} is harvested"));
-                }
-                if targeted == Some(entity) {
-                    self.phase = GatherPhase::Swing;
-                    return Poll::Running(format!("gatherable {uid} is the target"));
-                }
-                let walk = self.walk.as_mut().expect("the walk is planned with the object");
-                match walk.poll(world, shared, path, ticket) {
-                    // In reach while another object is the target: walk on
-                    // into this one, which the player then faces.
-                    Poll::Done(note) => {
-                        walk.within = 0.05;
-                        Poll::Running(format!("{note}; the target is {targeted:?}, not gatherable {uid}"))
-                    }
-                    other => other,
-                }
-            }
-            GatherPhase::Swing => {
-                if harvested {
-                    if swinging {
-                        return Poll::Running(format!("gatherable {uid} harvested; the swing ends"));
-                    }
-                    if !self.collect {
-                        return Poll::Done(self.summary(uid, hp));
-                    }
-                    self.phase = GatherPhase::Collect;
-                    return Poll::Running(format!("gatherable {uid} harvested after {} presses", self.presses));
-                }
-                if swinging {
-                    return Poll::Running(format!("swinging: hp {hp}"));
-                }
-                if targeted != Some(entity) {
-                    self.phase = GatherPhase::Approach;
-                    self.lifted_at = None;
-                    return Poll::Running(format!("gatherable {uid} is no longer the target ({targeted:?})"));
-                }
-                // Lift the joystick finger first and press on a later frame.
-                if shared.hand.pressing(ticket) || self.lifted_at.is_none() {
-                    shared.release_hand_of(world, ticket, path);
-                    self.lifted_at = Some(now);
-                    return Poll::Running("standing for the presses".into());
-                }
-                let Some(button) = world.get_resource::<crate::harvest::HarvestButton>() else {
-                    return Poll::Running("the harvest screen is not set up".into());
-                };
-                if button.cannot {
-                    let tool = (0..=9).contains(&kind).then(|| crate::harvest::law::tool_type_for(kind)).flatten();
-                    return Poll::Failed(format!(
-                        "the harvest button shows it cannot act: no tool for gatherable {uid} (it needs {tool:?})"
-                    ));
-                }
-                if !(button.shown && button.interactable) {
-                    return Poll::Running(format!(
-                        "the harvest button is not ready (shown {}, interactable {})",
-                        button.shown, button.interactable
-                    ));
-                }
-                if let Some(last) = self.last_press {
-                    if hp == self.hp_at_press && now - last > PRESS_ANSWER_SECS {
-                        let stamina = world
-                            .get_resource::<crate::harvest::action::HarvestPlayerModel>()
-                            .map(|model| model.stamina.sum());
-                        return Poll::Failed(format!(
-                            "the press on gatherable {uid} started no swing (hp {hp}, stamina {stamina:?}, {} presses)",
-                            self.presses
-                        ));
-                    }
-                    if now - last < PRESS_INTERVAL {
-                        return Poll::Running(format!("hp {hp}"));
-                    }
-                }
-                let (view, node) = crate::harvest::action_button_node();
-                let position = match hand::ui_point(world, view, node) {
-                    Ok(position) => position,
-                    Err(error) => return Poll::Running(error),
-                };
-                match hand::tap(world, position) {
-                    Ok(()) => {
-                        self.hp_at_press = hp;
-                        self.last_press = Some(now);
-                        self.presses += 1;
-                        Poll::Running(format!("pressed the harvest button ({}), hp {hp}", self.presses))
-                    }
-                    Err(error) => Poll::Running(error.to_owned()),
-                }
-            }
-            GatherPhase::Collect => self.collect(world, shared, path, ticket, uid, origin, hp),
-        }
-    }
-
-    fn collect(
-        &mut self,
-        world: &mut World,
-        shared: &mut Shared,
-        path: &str,
-        ticket: u64,
-        uid: u64,
-        origin: Vec3,
-        hp: i32,
-    ) -> Poll {
-        let mut landed = Vec::new();
-        let mut falling = 0;
-        let mut drops = world.query::<(&crate::harvest::HarvestDropItem, &GlobalTransform)>();
-        for (drop, at) in drops.iter(world) {
-            let at = at.translation();
-            if flat(at, origin) > DROP_REACH {
-                continue;
-            }
-            if drop.radius > 0.0 {
-                landed.push(at);
-            } else {
-                falling += 1;
-            }
-        }
-        let player = match cond::player(world) {
-            Ok(player) => player,
-            Err(error) => return Poll::Running(error),
-        };
-        // The drop walked to is taken once nothing lies where it was.
-        if let Some((at, _)) = self.drop {
-            if !landed.iter().any(|drop| drop.distance(at) < 0.05) {
-                self.drop = None;
-                self.walk = None;
-                self.drops_taken += 1;
-            }
-        }
-        if self.drop.is_none() {
-            let Some(next) = landed.iter().copied().min_by(|a, b| flat(*a, player).total_cmp(&flat(*b, player))) else {
-                if falling > 0 {
-                    return Poll::Running(format!("{falling} drops still falling"));
-                }
-                shared.release_hand_of(world, ticket, path);
-                return Poll::Done(self.summary(uid, hp));
-            };
-            // Pickups happen only while the player moves, so the walk aims
-            // past the drop: a drop already underfoot is still crossed. The
-            // point is a heading, not a place to stand (the drop's pickup
-            // radius takes it), so a snapped point is not a refusal.
-            let away = Vec2::new(next.x - player.x, next.z - player.z).normalize_or_zero();
-            let beyond = if away == Vec2::ZERO { Vec2::X } else { away } * 0.5;
-            self.drop = Some((next, None));
-            self.walk = Some(Walk::contact(
-                Target { what: TargetKind::Point([next.x + beyond.x, next.z + beyond.y]), offset: [0.0; 2] },
-                0.15,
-            ));
-        }
-        let walk = self.walk.as_mut().expect("the walk is planned with the drop");
-        let polled = walk.poll(world, shared, path, ticket);
-        let (at, since) = self.drop.as_mut().expect("a drop is chosen above");
-        match polled {
-            Poll::Done(_) => {
-                let since = *since.get_or_insert(shared.now);
-                if shared.now - since <= DROP_REFUSED_SECS {
-                    return Poll::Running(format!("on the drop at ({:.2}, {:.2})", at.x, at.z));
-                }
-                let at = *at;
-                let bag = world
-                    .get_resource::<crate::userdata::client::inventory::ClientMysekaiInventory>()
-                    .map(|inventory| {
-                        let limit = world
-                            .get_resource::<crate::userdata::client::inventory::PossessionMasters>()
-                            .and_then(|masters| inventory.material_max_count(masters));
-                        (inventory.total_material_possession(), limit)
-                    });
-                shared.release_hand_of(world, ticket, path);
-                Poll::Failed(format!(
-                    "the drop at ({:.2}, {:.2}) is not taken after {DROP_REFUSED_SECS} s on it (bag held and limit {bag:?})",
-                    at.x, at.z
-                ))
-            }
-            other => other,
-        }
-    }
-
-    fn summary(&self, uid: u64, hp: i32) -> String {
-        format!("gatherable {uid} harvested: {} presses, hp {hp}, {} drops taken", self.presses, self.drops_taken)
-    }
-}
-
-/// A tap on the craft screen that has not shown its answer after this long
-/// (seconds) is refused.
-const CRAFT_ANSWER_SECS: f32 = 2.0;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CraftStepPhase {
-    /// Waiting for the open screen, then choosing the blueprint.
-    Choose,
-    /// The choice is handed over; reading the apply button.
-    Check,
-    /// The apply button is tapped; the confirm is answered.
-    Confirm,
-    /// The confirm's OK is tapped; the craft runs to its result.
-    Craft,
-}
-
-/// `player.craft`'s last step: one blueprint on the open craft screen. The
-/// screen's own checks decide (the apply button's balloon, the term, the
-/// server's answer), and each refusal ends the step with its reason.
-struct CraftStep {
-    blueprint: i32,
-    phase: CraftStepPhase,
-    /// When the last tap or key went out.
-    input_at: f32,
-    executed: bool,
-    chosen: String,
-}
-
-impl CraftStep {
-    fn new(blueprint: i32) -> Self {
-        Self { blueprint, phase: CraftStepPhase::Choose, input_at: 0.0, executed: false, chosen: String::new() }
-    }
-
-    fn poll(&mut self, world: &mut World, shared: &mut Shared) -> Poll {
-        use crate::home_action::craft::{self as craft, CraftPhase};
-        let now = shared.now;
-        let screen = craft::phase(world);
-        match self.phase {
-            CraftStepPhase::Choose => {
-                if screen != CraftPhase::Idle {
-                    return Poll::Running(format!("waiting for the open craft screen ({screen:?})"));
-                }
-                match craft::choose(world, self.blueprint) {
-                    Ok(note) => {
-                        self.chosen = note;
-                        self.phase = CraftStepPhase::Check;
-                        self.input_at = now;
-                        Poll::Running(format!("blueprint {} chosen: {}", self.blueprint, self.chosen))
+                let holder = holder_name(ticket, &path);
+                let mut ctx = ActCtx::new(Holder::new(holder, Rank::Director), act.step_ticket, &path, shared.now);
+                ctx.card = Card::new();
+                return match spec.start(world, &mut ctx) {
+                    Ok(run) => {
+                        act.run = Some(run);
+                        act.card = ctx.card;
+                        Poll::Running(String::new())
                     }
                     Err(error) => Poll::Failed(error),
-                }
-            }
-            CraftStepPhase::Check => match craft::selected(world) {
-                Some((id, state)) if id == self.blueprint => match state {
-                    Err(reason) => Poll::Failed(format!("blueprint {} cannot be crafted: {reason}", self.blueprint)),
-                    Ok(()) => {
-                        let Some((view, node)) = crate::home_action::craft::view::apply_button_node(world) else {
-                            return Poll::Running("the craft screen's view is not built".into());
-                        };
-                        let position = match hand::ui_point(world, view, &node) {
-                            Ok(position) => position,
-                            Err(error) => return Poll::Running(error),
-                        };
-                        match hand::tap(world, position) {
-                            Ok(()) => {
-                                self.phase = CraftStepPhase::Confirm;
-                                self.input_at = now;
-                                Poll::Running("the apply button tapped".into())
-                            }
-                            Err(error) => Poll::Running(error.to_owned()),
-                        }
-                    }
-                },
-                _ if now - self.input_at > CRAFT_ANSWER_SECS => {
-                    Poll::Failed(format!("blueprint {} was not selected ({})", self.blueprint, self.chosen))
-                }
-                _ => Poll::Running(format!("waiting for blueprint {} to be selected", self.blueprint)),
-            },
-            CraftStepPhase::Confirm => match screen {
-                CraftPhase::Confirm => {
-                    let (_, caller, view, node) = match crate::common_dialog::shown_button(world, true) {
-                        Ok(button) => button,
-                        Err(error) => return Poll::Running(error),
-                    };
-                    let position = match hand::ui_point(world, view, &node) {
-                        Ok(position) => position,
-                        Err(error) => return Poll::Running(error),
-                    };
-                    match hand::tap(world, position) {
-                        Ok(()) => {
-                            self.phase = CraftStepPhase::Craft;
-                            self.input_at = now;
-                            Poll::Running(format!("the confirm's OK tapped ({caller})"))
-                        }
-                        Err(error) => Poll::Running(error.to_owned()),
-                    }
-                }
-                CraftPhase::TermLimit => {
-                    Poll::Failed(format!("blueprint {}'s term is over: the term limit dialog shows", self.blueprint))
-                }
-                _ if now - self.input_at > CRAFT_ANSWER_SECS => Poll::Failed(format!(
-                    "the apply tap opened no confirm ({screen:?}){}",
-                    craft::refusal(world).map(|reason| format!(": {reason}")).unwrap_or_default()
-                )),
-                _ => Poll::Running("waiting for the confirm".into()),
-            },
-            CraftStepPhase::Craft => match screen {
-                CraftPhase::Dialogs
-                    if world
-                        .get_resource::<crate::ui_layers::ScreenManager>()
-                        .is_some_and(crate::ui_layers::ScreenManager::exists_dialog) =>
-                {
-                    self.executed = true;
-                    // The follow-up dialogs (bonus, rank-up, new site, status)
-                    // close on the back key, as on their close buttons.
-                    if now - self.input_at > 1.0 {
-                        self.input_at = now;
-                        if let Err(error) = hand::back_key(world) {
-                            return Poll::Running(error.to_owned());
-                        }
-                        return Poll::Running("a follow-up dialog shows; the back key closes it".into());
-                    }
-                    Poll::Running("a follow-up dialog shows".into())
-                }
-                CraftPhase::Executing | CraftPhase::Dialogs | CraftPhase::Done => {
-                    self.executed = true;
-                    Poll::Running(format!("crafting ({screen:?})"))
-                }
-                CraftPhase::Result => {
-                    self.executed = true;
-                    // The result dialog closes on the back key, as on its
-                    // close area.
-                    if now - self.input_at > 1.0 {
-                        self.input_at = now;
-                        if let Err(error) = hand::back_key(world) {
-                            return Poll::Running(error.to_owned());
-                        }
-                        return Poll::Running("the result shows; the back key closes it".into());
-                    }
-                    Poll::Running("the result shows".into())
-                }
-                CraftPhase::Idle | CraftPhase::Closed if self.executed => {
-                    Poll::Done(format!("blueprint {} crafted ({})", self.blueprint, self.chosen))
-                }
-                CraftPhase::Confirm if now - self.input_at > CRAFT_ANSWER_SECS => {
-                    Poll::Failed("the confirm's OK tap did not answer it".into())
-                }
-                _ if now - self.input_at > CRAFT_ANSWER_SECS => Poll::Failed(format!(
-                    "the craft was not done: {}",
-                    craft::refusal(world).unwrap_or_else(|| format!("the screen is {screen:?}"))
-                )),
-                _ => Poll::Running("waiting for the craft".into()),
-            },
-        }
-    }
-}
-
-/// How long one layout command may take to show its effect (seconds).
-const LAYOUT_ANSWER_SECS: f32 = 15.0;
-/// How many times a move is sent while the reported center stands off the
-/// wanted tile.
-const LAYOUT_MOVES: u32 = 3;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PlacePhase {
-    /// Waiting for the open editor.
-    Enter,
-    /// Choosing the owned catalog row.
-    Select,
-    /// Turning the selection a quarter turn at a time.
-    Rotate,
-    /// Moving the selection onto the wanted tile.
-    Move,
-    /// Deciding the placement.
-    Decide,
-    /// Saving the draft.
-    Save,
-}
-
-/// `layout.place`: one owned fixture through the layout editor's own commands.
-/// Each command object is the one `moly.layout.command` takes and is read by
-/// that method's own reader, so a step and the editor's buttons, list cells
-/// and drags go through the same checks; every phase reads the editor's view
-/// to see what its command did. The editor stays open afterwards, as it does
-/// after the same sequence of buttons.
-struct LayoutPlace {
-    fixture: i32,
-    texture: Option<u32>,
-    center: [i8; 3],
-    rotate: u32,
-    decide: bool,
-    save: bool,
-    phase: PlacePhase,
-    /// The catalog row chosen, the turns and the moves sent.
-    row: Option<usize>,
-    turns: u32,
-    moves: u32,
-    /// The tile the next move names: `move_to` takes the touched tile, and
-    /// the reported center can stand off it by a tile.
-    target: [i32; 3],
-    /// The selection the moves belong to.
-    uid: String,
-    /// The direction the turn in flight started from.
-    direction: Option<String>,
-    /// A command of this phase is in flight, and when it went out.
-    sent: bool,
-    sent_at: f32,
-    save_sent: bool,
-    /// When the save confirmation was last tapped.
-    tapped_at: f32,
-}
-
-impl LayoutPlace {
-    fn new(fixture: i32, texture: Option<u32>, center: [i8; 3], rotate: u32, decide: bool, save: bool) -> Self {
-        Self {
-            fixture,
-            texture,
-            center,
-            rotate,
-            decide,
-            save,
-            phase: PlacePhase::Enter,
-            row: None,
-            turns: 0,
-            moves: 0,
-            target: [center[0] as i32, center[1] as i32, center[2] as i32],
-            uid: String::new(),
-            direction: None,
-            sent: false,
-            sent_at: 0.0,
-            save_sent: false,
-            tapped_at: f32::NEG_INFINITY,
-        }
-    }
-
-    /// The command the current phase waits on.
-    fn word(&self) -> &'static str {
-        match self.phase {
-            PlacePhase::Enter => "enter",
-            PlacePhase::Select => "select_catalog",
-            PlacePhase::Rotate => "rotate",
-            PlacePhase::Move => "move_to",
-            PlacePhase::Decide => "decide",
-            PlacePhase::Save => "save",
-        }
-    }
-
-    fn begin(&mut self, phase: PlacePhase, now: f32) {
-        self.phase = phase;
-        self.sent = false;
-        self.sent_at = now;
-    }
-
-    /// Sends one command through the control surface's own reader and marks
-    /// this phase as waiting for its effect.
-    fn send(&mut self, world: &mut World, params: Value, now: f32) -> Poll {
-        let queued = match layout_command(world, params) {
-            Ok(queued) => queued,
-            Err(error) => return Poll::Failed(error),
-        };
-        self.sent = true;
-        self.sent_at = now;
-        Poll::Running(format!("sent {queued}"))
-    }
-
-    /// What the view shows now, for a wait that has to report itself.
-    fn reading(&self, view: &crate::fixture_edit::EditView) -> String {
-        let selected = match &view.selected {
-            Some(selected) => format!(
-                "{} fixture {} at [{}, {}, {}] {:?}",
-                selected.item.uid,
-                selected.item.fixture_id,
-                selected.item.center.x,
-                selected.item.center.y,
-                selected.item.center.z,
-                selected.put_status
-            ),
-            None => "no selection".to_owned(),
-        };
-        format!("{selected}; {} placed rows; feedback {}", view.placed_rows.len(), view.feedback)
-    }
-
-    fn poll(&mut self, world: &mut World, shared: &mut Shared) -> Poll {
-        let Some(view) = world.get_resource::<crate::fixture_edit::EditView>().cloned() else {
-            return Poll::Failed("the layout editor is not set up".into());
-        };
-        let now = shared.now;
-        if self.phase != PlacePhase::Enter && !view.active {
-            return Poll::Failed("the layout editor closed during the placement".into());
-        }
-        // The editor answers in the frame after a command arrives. While its
-        // own save confirmation is up, the save has an answer to wait for.
-        if self.sent && self.phase != PlacePhase::Save && now - self.sent_at > LAYOUT_ANSWER_SECS {
-            return Poll::Failed(format!(
-                "the {} command was not answered in {LAYOUT_ANSWER_SECS:.0} s ({})",
-                self.word(),
-                self.reading(&view)
-            ));
-        }
-        match self.phase {
-            PlacePhase::Enter => {
-                if view.active {
-                    self.begin(PlacePhase::Select, now);
-                    return Poll::Running("the layout editor is open".into());
-                }
-                if self.sent {
-                    return Poll::Running("waiting for the layout editor to open".into());
-                }
-                self.send(world, json!({ "command": "enter" }), now)
-            }
-            PlacePhase::Select => {
-                if let Some(selected) = view.selected.as_ref() {
-                    if selected.item.fixture_id != self.fixture
-                        || self.texture.is_some_and(|texture| selected.item.texture_id != texture)
-                    {
-                        return Poll::Failed(format!(
-                            "the editor selected fixture {} texture {} instead of fixture {}{}",
-                            selected.item.fixture_id,
-                            selected.item.texture_id,
-                            self.fixture,
-                            self.texture.map_or(String::new(), |texture| format!(" texture {texture}"))
-                        ));
-                    }
-                    self.uid = selected.item.uid.clone();
-                    self.begin(PlacePhase::Rotate, now);
-                    return Poll::Running(format!("selected {} of the owned catalog", self.uid));
-                }
-                if self.sent {
-                    return Poll::Running(format!("waiting for catalog row {} to be selected", self.row.unwrap_or_default()));
-                }
-                let row = view.catalog.iter().find(|row| {
-                    row.fixture_id == self.fixture
-                        && self.texture.is_none_or(|texture| row.texture_id == texture)
-                        && row.placeable > 0
-                });
-                let Some(row) = row else {
-                    return Poll::Failed(self.no_row(&view));
                 };
-                self.row = Some(row.index);
-                self.send(world, json!({ "command": "select_catalog", "index": row.index }), now)
             }
-            PlacePhase::Rotate => {
-                let Some(selected) = view.selected.as_ref() else {
-                    return Poll::Failed(format!("the selection was dropped before the turns ({})", view.feedback));
-                };
-                if self.turns == self.rotate {
-                    self.begin(PlacePhase::Move, now);
-                    return Poll::Running(format!("turned {} quarter turn(s)", self.turns));
-                }
-                let direction = format!("{:?}", selected.item.direction);
-                if self.sent {
-                    if self.direction.as_deref() != Some(direction.as_str()) {
-                        self.turns += 1;
-                        self.direction = None;
-                        self.sent = false;
-                        return Poll::Running(format!("turn {} of {} done, now {direction}", self.turns, self.rotate));
-                    }
-                    return Poll::Running(format!("waiting for the turn; the direction is {direction}"));
-                }
-                self.direction = Some(direction);
-                self.send(world, json!({ "command": "rotate" }), now)
+            // A lease taken from the step's holder ends it with the reason
+            // the taker gave.
+            let holder = act.holder.clone();
+            let revoked = world.resource_mut::<Leases>().revoked(&holder).first().map(|(_, reason)| reason.clone());
+            if let Some(reason) = revoked {
+                return Poll::Failed(reason);
             }
-            PlacePhase::Move => {
-                let Some(selected) = view.selected.as_ref() else {
-                    return Poll::Failed(format!("the selection was dropped before the move ({})", view.feedback));
-                };
-                let at = selected.item.center;
-                if at.x == self.center[0] && at.z == self.center[2] {
-                    let note = format!("the fixture is on tile [{}, {}, {}]", at.x, at.y, at.z);
-                    if !self.decide {
-                        return Poll::Done(format!("{note}; left selected, not decided"));
-                    }
-                    self.begin(PlacePhase::Decide, now);
-                    return Poll::Running(note);
-                }
-                if self.sent {
-                    return Poll::Running(format!("waiting for the move; the center is [{}, {}, {}]", at.x, at.y, at.z));
-                }
-                if self.moves == LAYOUT_MOVES {
-                    return Poll::Failed(format!(
-                        "the editor kept the fixture's center at [{}, {}, {}] instead of tile [{}, ?, {}] ({})",
-                        at.x, at.y, at.z, self.center[0], self.center[2], view.feedback
-                    ));
-                }
-                // The first move names the requested tile itself, as the
-                // proxy's sequence does; later moves add the difference
-                // between the last touched tile and the centre the editor
-                // reports, as a drag correcting itself does.
-                let target = if self.moves == 0 {
-                    [
-                        self.center[0] as i32,
-                        self.center[1] as i32,
-                        self.center[2] as i32,
-                    ]
-                } else {
-                    [
-                        self.target[0] + self.center[0] as i32 - at.x as i32,
-                        self.center[1] as i32,
-                        self.target[2] + self.center[2] as i32 - at.z as i32,
-                    ]
-                };
-                let (Ok(x), Ok(y), Ok(z)) = (
-                    i8::try_from(target[0]),
-                    i8::try_from(target[1]),
-                    i8::try_from(target[2]),
-                ) else {
-                    return Poll::Failed(format!("the corrected tile {target:?} is outside the layout grid"));
-                };
-                self.target = target;
-                self.moves += 1;
-                self.send(world, json!({ "command": "move_to", "center": [x, y, z] }), now)
+            let mut ctx = ActCtx::new(Holder::new(holder, Rank::Director), act.step_ticket, &path, shared.now);
+            ctx.card = std::mem::take(&mut act.card);
+            let run = act.run.as_mut().expect("started above");
+            let poll = run.poll(world, &mut ctx);
+            if !matches!(poll, ActPoll::Running(_)) {
+                act.run = None;
+                act.laid.extend(ctx.card.all().iter().cloned());
+                shared.keep(world, ctx.card.all());
             }
-            PlacePhase::Decide => {
-                if view.selected.is_none() {
-                    let placed = view.placed_rows.iter().find(|row| row.uid == self.uid);
-                    let Some(placed) = placed else {
-                        return Poll::Failed(format!(
-                            "the editor lists no fixture with uid {} after the decision ({})",
-                            self.uid, view.feedback
-                        ));
-                    };
-                    let at = placed.center;
-                    let note = format!("placed fixture {} ({}) at [{}, {}, {}]", self.fixture, self.uid, at.x, at.y, at.z);
-                    if !self.save {
-                        return Poll::Done(note);
-                    }
-                    self.begin(PlacePhase::Save, now);
-                    return Poll::Running(format!("{note}; saving"));
-                }
-                let selected = view.selected.as_ref().expect("checked above");
-                if let crate::fixture_edit::PutStatus::Refused(refusal) = selected.put_status {
-                    return Poll::Failed(format!(
-                        "the editor refuses to put fixture {} on tile [{}, {}, {}]: {refusal:?}",
-                        self.fixture,
-                        selected.item.center.x,
-                        selected.item.center.y,
-                        selected.item.center.z
-                    ));
-                }
-                if self.sent {
-                    return Poll::Running("waiting for the decision".into());
-                }
-                self.send(world, json!({ "command": "decide" }), now)
-            }
-            PlacePhase::Save => {
-                if view.save_dialog {
-                    // The editor asks before it saves over a cutscene area or
-                    // with invalid fixtures listed; its OK is the answer a
-                    // player gives.
-                    if now - self.tapped_at < 1.0 {
-                        return Poll::Running("waiting for the save confirmation to close".into());
-                    }
-                    let (_, caller, key, node) = match crate::common_dialog::shown_button(world, true) {
-                        Ok(button) => button,
-                        Err(error) => return Poll::Running(error),
-                    };
-                    let position = match hand::ui_point(world, key, &node) {
-                        Ok(position) => position,
-                        Err(error) => return Poll::Running(error),
-                    };
-                    return match hand::tap(world, position) {
-                        Ok(()) => {
-                            self.tapped_at = now;
-                            Poll::Running(format!("tapped OK on {key} from {caller}"))
-                        }
-                        Err(error) => Poll::Running(error.to_owned()),
-                    };
-                }
-                if self.save_sent {
-                    if !view.dirty {
-                        let at = view.placed_rows.iter().find(|row| row.uid == self.uid).map(|row| row.center);
-                        return Poll::Done(match at {
-                            Some(at) => format!("placed fixture {} ({}) at [{}, {}, {}] and saved", self.fixture, self.uid, at.x, at.y, at.z),
-                            None => format!("placed fixture {} ({}) and saved", self.fixture, self.uid),
-                        });
-                    }
-                    if now - self.sent_at > LAYOUT_ANSWER_SECS {
-                        return Poll::Failed(format!(
-                            "the save left the draft dirty for {LAYOUT_ANSWER_SECS:.0} s (selected {}, save dialog {})",
-                            view.selected.is_some(),
-                            view.save_dialog
-                        ));
-                    }
-                    return Poll::Running("waiting for the save".into());
-                }
-                if !view.can_save {
-                    return Poll::Running(format!(
-                        "waiting to save (selected {}, dialog {})",
-                        view.selected.is_some(),
-                        view.save_dialog
-                    ));
-                }
-                self.save_sent = true;
-                self.send(world, json!({ "command": "save" }), now)
-            }
-        }
-    }
-
-    /// Why no catalog row can be selected.
-    fn no_row(&self, view: &crate::fixture_edit::EditView) -> String {
-        let rows: Vec<usize> = view
-            .catalog
-            .iter()
-            .filter(|row| row.fixture_id == self.fixture)
-            .map(|row| row.index)
-            .collect();
-        let texture = self.texture.map_or(String::new(), |texture| format!(" texture {texture}"));
-        if rows.is_empty() {
-            format!("fixture {}{texture} is not in the owned catalog", self.fixture)
-        } else {
-            format!("fixture {}{texture}: every owned copy is placed (catalog rows {rows:?})", self.fixture)
+            act.card = ctx.card;
+            poll
         }
     }
 }
 
-/// One layout editor command built the way `moly.layout.command` builds it.
-fn layout_command(world: &mut World, params: Value) -> Result<String, String> {
-    let Value::Object(params) = params else {
-        return Err("a layout command is an object".to_owned());
-    };
-    let command = crate::control::layout::command(&params)?;
-    let queued = format!("{command:?}");
-    world.write_message(command);
-    Ok(queued)
-}
-
-/// A tap that has started no delivery after this long (seconds) is refused.
-const DELIVER_ANSWER_SECS: f32 = 2.0;
-
-/// `player.deliver`: the delivery button's press and release, the two
-/// requests the delivery screen sends, on a birthday party in session. The
-/// delivery's own rules decide what a press does (the release window,
-/// `CanDelivery`, the ends of the hold loop and the end action); the step
-/// ends once the end action has run, with the points the party gained.
-struct Deliver {
-    /// The party the press named.
-    party: i32,
-    /// Seconds to hold the button; none holds it until the party has nothing
-    /// left to deliver.
-    hold: Option<f32>,
-    /// When the press went out, and when the delivery was seen running.
-    asked_at: f32,
-    started_at: Option<f32>,
-    /// The release has been sent.
-    released: bool,
-    points_at_press: i32,
-    /// The refresh dialog's back key was pressed.
-    closed_refresh: bool,
-}
-
-impl Deliver {
-    /// The press: refused before it is sent when no party is in session.
-    fn press(world: &mut World, party: Option<i32>, hold: Option<f32>, now: f32) -> Result<Self, String> {
-        let Some(model) = world.get_resource::<crate::delivery::DeliveryModel>() else {
-            return Err("the delivery screen is not set up".to_owned());
-        };
-        if !model.parties.iter().any(|site| party.is_none_or(|id| site.id == id)) {
-            return Err(match party {
-                Some(id) => format!("no birthday party {id} is in session"),
-                None => "no birthday party is in session".to_owned(),
-            });
-        }
-        let id = party.unwrap_or_else(|| model.parties[0].id);
-        let points = model.party(id).map_or(0, |site| site.tally.current_points());
-        world.write_message(crate::delivery::DeliveryRequest::Start(Some(id)));
-        Ok(Self {
-            party: id,
-            hold,
-            asked_at: now,
-            started_at: None,
-            released: false,
-            points_at_press: points,
-            closed_refresh: false,
-        })
-    }
-
-    fn poll(&mut self, world: &mut World, shared: &mut Shared) -> Poll {
-        let Some(model) = world.get_resource::<crate::delivery::DeliveryModel>() else {
-            return Poll::Failed("the delivery screen is not set up".into());
-        };
-        let state = model.state;
-        let executing = model.executing;
-        let home = world
-            .get_resource::<crate::site::SiteActive>()
-            .map(|site| site.site_type.clone());
-        let (points, can, left) = model
-            .party(self.party)
-            .map_or((0, false, 0), |site| {
-                (site.tally.current_points(), site.tally.can_delivery(), site.tally.remaining())
-            });
-        if !executing && self.started_at.is_none() {
-            // The press starts the flow in the frame after the request; a
-            // press the flow refuses leaves the state where it was.
-            if shared.now - self.asked_at <= DELIVER_ANSWER_SECS {
-                return Poll::Running(format!("waiting for the delivery of party {} to start (state {state:?})", self.party));
-            }
-            return Poll::Failed(format!(
-                "the press on party {} started no delivery (state {state:?}, {} left to deliver, site {home:?})",
-                self.party, left
-            ));
-        }
-        if self.started_at.is_none() {
-            self.started_at = Some(shared.now);
-        }
-        if !self.released {
-            let held = self.hold.is_some_and(|hold| shared.now - self.asked_at >= hold);
-            if held || !can {
-                world.write_message(crate::delivery::DeliveryRequest::End);
-                self.released = true;
-                return Poll::Running(format!(
-                    "released the delivery button ({}, {left} left to deliver)",
-                    if held { "held long enough" } else { "nothing left to deliver" }
-                ));
-            }
-        }
-        if !executing && state == crate::delivery::DeliveryActionState::Idle {
-            return Poll::Done(format!(
-                "party {} delivered: points {} to {}",
-                self.party, self.points_at_press, points
-            ));
-        }
-        // The end action waits for the refresh dialog's close, which the back
-        // key gives it.
-        if !self.closed_refresh
-            && world
-                .get_resource::<crate::delivery::honor::DialogAwait>()
-                .is_some_and(|awaiting| awaiting.refresh.is_some())
-        {
-            self.closed_refresh = true;
-            return match hand::back_key(world) {
-                Ok(()) => Poll::Running("pressed the back key on the refresh dialog".into()),
-                Err(error) => Poll::Running(error.to_owned()),
-            };
-        }
-        Poll::Running(format!(
-            "delivering party {}: state {state:?}, {points} points, {left} left to deliver",
-            self.party
-        ))
+/// Lets a step that ended give its hand and camera back; its characters and
+/// activities stay its track's.
+fn release_step(world: &mut World, ticket: u64, path: &str, kind: &mut Kind) {
+    if let Kind::Act(act) = kind {
+        hand::release_of(world, ticket, path);
+        let holder = act.holder.clone();
+        let mut leases = world.resource_mut::<Leases>();
+        leases.release(&Channel::Hand, &holder);
+        leases.release(&Channel::Camera, &holder);
     }
 }
 
-/// `dialog.answer`: a tap on the shown common dialog's OK or cancel button,
-/// done once the dialog is gone. A sub-window dialog with no common button
-/// (the learn-phenomenon one) is answered with the back key its own class
-/// registers, which is the answer it takes from the screen.
-struct DialogAnswer {
-    ok: bool,
-    tapped: Option<(crate::ui_layers::DialogId, f32)>,
-    /// The sub-window dialog answered with the back key, and when.
-    pressed: Option<(crate::ui_layers::DialogId, f32)>,
-}
-
-/// Whether the screen manager still shows the dialog `id`.
-fn dialog_open(world: &World, id: crate::ui_layers::DialogId) -> bool {
-    world.get_resource::<crate::ui_layers::ScreenManager>().is_some_and(|screens| {
-        screens
-            .dialogs()
-            .any(|(open, _, state)| open == id && state != crate::ui_layers::DialogState::Closed)
-    })
-}
-
-/// The topmost dialog still open, with its handle: the one the screen
-/// manager hands the back key to.
-fn topmost_dialog(world: &World) -> Option<(crate::ui_layers::DialogId, crate::ui_layers::DialogType)> {
-    world
-        .get_resource::<crate::ui_layers::ScreenManager>()?
-        .dialogs()
-        .filter(|(_, _, state)| *state != crate::ui_layers::DialogState::Closed)
-        .map(|(id, dialog, _)| (id, dialog))
-        .last()
-}
-
-impl DialogAnswer {
-    fn poll(&mut self, world: &mut World, shared: &mut Shared) -> Poll {
-        if let Some((id, at)) = self.pressed {
-            if !dialog_open(world, id) {
-                return Poll::Done(format!("closed the dialog ({})", if self.ok { "answer" } else { "cancel" }));
-            }
-            if shared.now - at < 1.0 {
-                return Poll::Running("waiting for the dialog to close".into());
+/// Ends a step early: its run stopped, its hand lifted, its characters given
+/// back to their AI and its activities ended.
+fn stop(world: &mut World, shared: &mut Shared, _tickets: &mut BTreeSet<u64>, path: &str, kind: &mut Kind) {
+    if let Kind::Act(act) = kind {
+        if let Some(mut run) = act.run.take() {
+            let holder = act.holder.clone();
+            let mut ctx = ActCtx::new(Holder::new(holder, Rank::Director), act.step_ticket, path, shared.now);
+            run.stop(world, &mut ctx);
+        }
+        let mut laid = std::mem::take(&mut act.laid);
+        laid.extend_from_slice(act.card.all());
+        for leaving in laid {
+            match leaving {
+                Leaving::Activity(activity) => moly_features::npc_fixture_activity::preview::cancel(world, activity),
+                Leaving::Talk(entity) => Taken::hand_back(world, entity),
             }
         }
-        if let Some((id, at)) = self.tapped {
-            if !crate::common_dialog::is_shown(world, id) {
-                return Poll::Done(format!("answered {}", if self.ok { "OK" } else { "cancel" }));
-            }
-            if shared.now - at < 1.0 {
-                return Poll::Running("waiting for the dialog to close".into());
-            }
-        }
-        let (id, caller, view, node) = match crate::common_dialog::shown_button(world, self.ok) {
-            Ok(button) => button,
-            Err(error) => return self.answer_without_button(world, shared, error),
-        };
-        let position = match hand::ui_point(world, view, &node) {
-            Ok(position) => position,
-            Err(error) => return Poll::Running(error),
-        };
-        match hand::tap(world, position) {
-            Ok(()) => {
-                self.tapped = Some((id, shared.now));
-                Poll::Running(format!("tapped {} on {view} from {caller}", if self.ok { "OK" } else { "cancel" }))
-            }
-            Err(error) => Poll::Running(error.to_owned()),
-        }
-    }
-
-    /// The shown dialog that has no common button. The learn-phenomenon one
-    /// takes the back key its own class registers as its whole answer: its
-    /// close area, its panel body and the hardware back key all call
-    /// `CloseProcess -> Close`, and the run that opened it waits for its
-    /// close. Another family's dialog is named and left alone.
-    fn answer_without_button(&mut self, world: &mut World, shared: &mut Shared, error: String) -> Poll {
-        let Some((id, dialog)) = topmost_dialog(world) else {
-            return Poll::Running(error);
-        };
-        if dialog != crate::ui_layers::DialogType::LearnPhenomenaSubWindowDialog {
-            return Poll::Running(format!("{error}; the topmost dialog is {dialog:?}"));
-        }
-        match hand::back_key(world) {
-            Ok(()) => {
-                self.pressed = Some((id, shared.now));
-                Poll::Running(format!("pressed the back key on {dialog:?}"))
-            }
-            Err(error) => Poll::Running(error.to_owned()),
-        }
+        let holder = act.holder.clone();
+        hand::release_of(world, act.step_ticket, path);
+        world.resource_mut::<Leases>().release_prefix(&holder);
     }
 }
 
-/// Walking to a target until its action button heads the stack, then
-/// pressing it.
-struct Interact {
-    walk: Walk,
-    button: ButtonType,
-    lifted_at: Option<f32>,
-    last_change: f32,
-}
-
-impl Interact {
-    /// The stack entry this interaction presses: a character's or a placed
-    /// fixture's own entry when the target names one.
-    fn wanted(&self, world: &World) -> Option<TargetId> {
-        let state = world.get_resource::<crate::action_button::ActionButtonState>()?;
-        match &self.walk.to.what {
-            TargetKind::Npc(unit) => Some(TargetId::Character(*unit)),
-            TargetKind::FixtureUid(uid) => state.fixture_key(uid).map(TargetId::Fixture),
-            _ => None,
-        }
+/// What a `where` step writes: the player's position and each target's.
+fn where_notes(world: &mut World, of: &[moly_features::act::Target]) -> String {
+    let mut notes = vec![match moly_features::act::targets::player(world) {
+        Ok(at) => format!("player ({:.2}, {:.2}, {:.2})", at.x, at.y, at.z),
+        Err(error) => error,
+    }];
+    for target in of {
+        notes.push(match moly_features::act::targets::resolve(world, target) {
+            Ok(at) => format!("{:?} ({:.2}, {:.2}, {:.2})", target.what, at.x, at.y, at.z),
+            Err(error) => format!("{:?}: {error}", target.what),
+        });
     }
-
-    fn poll(&mut self, world: &mut World, shared: &mut Shared, path: &str, ticket: u64) -> Poll {
-        let wanted = self.wanted(world);
-        let Some(state) = world.get_resource::<crate::action_button::ActionButtonState>() else {
-            return Poll::Running("the action buttons are not set up".into());
-        };
-        let head = state.current();
-        let want = self.button;
-        let ours = move |(button, target): (ButtonType, TargetId)| {
-            button == want && wanted.is_none_or(|wanted| wanted == target)
-        };
-        let stacked = match wanted {
-            Some(target) => state.contains(self.button, target),
-            None => state.stacked(self.button),
-        };
-        let change_shown = state.change_shown();
-        let now = shared.now;
-        if head.is_some_and(ours) && now - self.last_change >= ACTION_BUTTON_INPUT_INTERVAL + 0.05 {
-            // Lift the joystick finger first and tap on a later frame, once
-            // the player stands, if the button still heads the stack.
-            if shared.hand.pressing(ticket) || self.lifted_at.is_none() {
-                shared.release_hand_of(world, ticket, path);
-                self.lifted_at = Some(now);
-                return Poll::Running(format!("{:?} heads the stack; standing", self.button));
-            }
-            let Some(position) = hand::button_position(world, self.button) else {
-                return Poll::Running(format!("{:?} heads the stack but its view is not laid out", self.button));
-            };
-            return match hand::tap(world, position) {
-                Ok(()) => Poll::Done(format!("pressed {:?} at ({:.0}, {:.0})", self.button, position.x, position.y)),
-                Err(error) => Poll::Running(error.to_owned()),
-            };
-        }
-        self.lifted_at = None;
-        if let Some((shown, _)) = head.filter(|head| !ours(*head)) {
-            if stacked && change_shown && now - self.last_change >= 1.0 {
-                if let Some(position) = hand::change_position(world, shown) {
-                    shared.release_hand_of(world, ticket, path);
-                    if hand::tap(world, position).is_ok() {
-                        self.last_change = now;
-                        return Poll::Running(format!("{:?} is stacked behind {shown:?}; tapped the change-target button", self.button));
-                    }
-                }
-            }
-        }
-        match self.walk.poll(world, shared, path, ticket) {
-            Poll::Done(note) => Poll::Running(format!("{note}; waiting for {:?} to head the stack (head {head:?})", self.button)),
-            Poll::Running(note) => Poll::Running(format!("{note}; head {head:?}")),
-            failed => failed,
-        }
-    }
+    notes.join("; ")
 }

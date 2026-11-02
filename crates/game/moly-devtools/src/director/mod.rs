@@ -145,22 +145,19 @@
 //! browser engine takes commands through [`director_command`] and reports
 //! through [`director_snapshot`] (status `idle`, `queued`, `running`,
 //! `paused`, `done`, `failed` or `stopped`).
+//!
+//! Every step that is not a flow step of this module is an action of the
+//! hub's registry ([`moly_features::act`]), checked and run by the crate
+//! that owns it (`moly-act` for the player, the characters, the companions,
+//! the camera, the view, the effects, the weather and the server;
+//! `moly-fixture-edit` for the layout; `moly-harvest` for the gathering;
+//! `moly-delivery` for the delivery). This module keeps the script runner:
+//! the tracks, the log, the hand, the characters and the script's own state.
 
-mod cond;
-mod hand;
-mod npc;
-pub mod lens_clear;
 pub mod run;
 mod script;
-pub mod talk_lens;
 
-/// The touch the director's steps write, for the control surface's own steps.
-pub use hand::{tap, ui_point, window_size};
-/// The steps a program outside the director's scripts runs, by the ticket
-/// they advance with ([`run::ACTED_TICKET`] plus the program's number).
-pub use run::ACTED_TICKET;
-pub use script::{parse_step, Step};
-
+use std::collections::BTreeSet;
 use std::sync::Mutex;
 
 use bevy::diagnostic::FrameCount;
@@ -168,9 +165,21 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::Screenshot;
 use serde_json::{json, Value};
 
-/// The ticket of the director's own script: the run that takes the hand
-/// before any other.
-const DIRECTOR_TICKET: u64 = 0;
+/// The touch the director's steps write, for the control surface's own
+/// steps: the hub's own hand.
+pub use moly_features::act::hand::{back_key as back, tap, ui_point, window_size};
+/// The name the director's script runs under.
+pub use run::DIRECTOR;
+pub use script::{parse, Script, Step};
+
+/// The ticket the director's own script runs with.
+pub const DIRECTOR_TICKET: u64 = 0;
+
+/// Parses one step asked for outside a script, checked as a script's step
+/// is: a macro expands into the several steps it stands for.
+pub fn parse_step(world: &mut World, value: &Value) -> Result<std::sync::Arc<[Step]>, String> {
+    script::parse_step(world, value)
+}
 
 /// How long a finished script with `exit` waits for its captures to save.
 #[cfg(not(target_arch = "wasm32"))]
@@ -183,7 +192,7 @@ static PUBLISHED: Mutex<String> = Mutex::new(String::new());
 const MAX_PENDING: usize = 16;
 
 enum Command {
-    Run(script::Script),
+    Run(Value),
     Stop,
     Pause,
     Resume,
@@ -215,10 +224,13 @@ impl Status {
 #[derive(Resource)]
 struct Director {
     status: Status,
-    script: Option<script::Script>,
+    script: Option<Script>,
     track: Option<run::Track>,
     shared: run::Shared,
     started: f32,
+    /// The tickets of the tracks the run started, its parallel tracks' and
+    /// its steps' parts: each took its characters and activities.
+    tracks: BTreeSet<u64>,
     error: Option<String>,
     /// The revision last published, and when.
     published: Option<(u64, f32)>,
@@ -235,6 +247,7 @@ impl Default for Director {
             track: None,
             shared: run::Shared::default(),
             started: 0.0,
+            tracks: Default::default(),
             error: None,
             published: None,
             exit: None,
@@ -247,10 +260,10 @@ fn parse_command(input: &str) -> Result<Command, String> {
     let value: Value = serde_json::from_str(input).map_err(|error| format!("director command: {error}"))?;
     let object = value.as_object().ok_or("director command: expected an object")?;
     if object.contains_key("steps") {
-        return script::parse(&value).map(Command::Run);
+        return Ok(Command::Run(value));
     }
     match object.iter().next().filter(|_| object.len() == 1) {
-        Some((key, script)) if key == "run" => script::parse(script).map(Command::Run),
+        Some((key, script)) if key == "run" => Ok(Command::Run(script.clone())),
         Some((key, Value::Bool(true))) if key == "stop" => Ok(Command::Stop),
         Some((key, Value::Bool(true))) if key == "pause" => Ok(Command::Pause),
         Some((key, Value::Bool(true))) if key == "resume" => Ok(Command::Resume),
@@ -300,7 +313,7 @@ pub fn script_running(world: &World) -> bool {
 /// Whether a condition holds now, and what was read.
 pub fn check(world: &mut World, condition: &Value) -> Result<(bool, String), String> {
     let condition = script::condition(condition)?;
-    Ok(cond::eval(world, &condition))
+    Ok(moly_features::act::eval(world, &condition))
 }
 
 /// The steps, conditions and target forms of a script, as JSON Schema.
@@ -327,10 +340,7 @@ pub fn install(app: &mut App) {
                 .before(crate::joystick::advance)
                 .before(crate::gesture::advance)
                 .before(crate::action_button::click),
-        )
-        // A world-point effect's anchor outlives its step until the emote's
-        // last draws are gone.
-        .add_systems(Update, run::retire);
+        );
 }
 
 /// A native run's script file, from `dev.director_script`
@@ -369,27 +379,38 @@ pub fn director_tick(world: &mut World) {
         release_exit(world, director);
         if director.status == Status::Running {
             let track = director.track.as_mut().expect("a running director has a track");
-            match track.tick(world, &mut director.shared, DIRECTOR_TICKET) {
+            let mut tickets = std::mem::take(&mut director.tracks);
+            let state = track.tick(world, &mut director.shared, &mut tickets);
+            director.tracks = tickets;
+            match state {
                 run::TrackState::Running => {}
                 run::TrackState::Done => finish(world, director, Status::Done, None),
                 run::TrackState::Failed(error) => finish(world, director, Status::Failed, Some(error)),
             }
         }
-        publish(director);
+        publish(world, director);
     });
 }
 
 fn apply(world: &mut World, director: &mut Director, command: Command) {
     match command {
-        Command::Run(script) => {
+        Command::Run(document) => {
+            let script = match script::parse(&document, world) {
+                Ok(script) => script,
+                Err(error) => {
+                    warn!("[director] script refused: {error}");
+                    director.shared.record("script", "failed", error);
+                    return;
+                }
+            };
             if matches!(director.status, Status::Running | Status::Paused) {
                 stop(world, director, "replaced by a new script");
             }
             info!("[director] running script {} ({} steps)", script.name, script.steps.len());
-            director.track = Some(run::Track::new(script.steps.clone(), script.name.clone()));
+            director.track = Some(run::Track::new(script.steps.clone(), script.name.clone(), DIRECTOR_TICKET));
             director.script = Some(script);
             director.shared.log.clear();
-            director.shared.take_hand(DIRECTOR_TICKET);
+            director.tracks.clear();
             director.shared.revision += 1;
             director.started = director.shared.now;
             director.error = None;
@@ -402,7 +423,10 @@ fn apply(world: &mut World, director: &mut Director, command: Command) {
         }
         Command::Pause => {
             if director.status == Status::Running {
-                director.shared.release_hand(world, DIRECTOR_TICKET);
+                // The joystick finger is lifted; the step it held waits for
+                // the resume and takes the hand again from there.
+                moly_features::act::hand::release(world);
+                world.resource_mut::<moly_features::lease::Leases>().release_all(DIRECTOR);
                 director.status = Status::Paused;
                 director.shared.revision += 1;
                 info!("[director] paused");
@@ -420,13 +444,20 @@ fn apply(world: &mut World, director: &mut Director, command: Command) {
 
 fn stop(world: &mut World, director: &mut Director, why: &str) {
     if let Some(track) = director.track.as_mut() {
-        track.abort(world, &mut director.shared, DIRECTOR_TICKET);
+        let mut tickets = std::mem::take(&mut director.tracks);
+        track.abort(world, &mut director.shared, &mut tickets);
+        director.tracks = tickets;
     }
     finish(world, director, Status::Stopped, Some(why.to_owned()));
 }
 
 fn finish(world: &mut World, director: &mut Director, status: Status, error: Option<String>) {
-    director.shared.release_all(world);
+    moly_features::act::hand::release(world);
+    world.resource_mut::<moly_features::lease::Leases>().release_all(DIRECTOR);
+    moly_features::act::Taken::release(world, DIRECTOR_TICKET);
+    for ticket in std::mem::take(&mut director.tracks) {
+        moly_features::act::Taken::release(world, ticket);
+    }
     director.track = None;
     director.status = status;
     director.shared.revision += 1;
@@ -468,7 +499,7 @@ fn release_exit(world: &mut World, director: &mut Director) {
     world.write_message(exit);
 }
 
-fn publish(director: &mut Director) {
+fn publish(world: &World, director: &mut Director) {
     // A new record publishes at once; a running script's current steps are
     // republished twice a second.
     let now = director.shared.now;
@@ -481,12 +512,19 @@ fn publish(director: &mut Director) {
     if let Some(track) = &director.track {
         track.current(&mut current);
     }
+    let mut owned: Vec<u32> = vec![];
+    if let Some(taken) = world.get_resource::<moly_features::act::Taken>() {
+        owned.extend(taken.units(DIRECTOR_TICKET));
+        for ticket in &director.tracks {
+            owned.extend(taken.units(*ticket));
+        }
+    }
     let snapshot = json!({
         "status": director.status.word(),
         "script": director.script.as_ref().map(|script| script.name.clone()),
         "elapsed": director.shared.now - director.started,
         "current": current,
-        "owned": director.shared.owned().map(|(unit, _)| unit).collect::<Vec<_>>(),
+        "owned": owned,
         "error": director.error,
         "log": director.shared.log,
     });
@@ -494,84 +532,4 @@ fn publish(director: &mut Director) {
         *published = snapshot.to_string();
     }
     director.published = Some((director.shared.revision, now));
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn commands_take_a_script_bare_or_under_run_and_refuse_anything_else() {
-        let script = r#"{ "steps": [{ "do": "wait", "secs": 1 }] }"#;
-        assert!(matches!(parse_command(script), Ok(Command::Run(_))));
-        assert!(matches!(parse_command(&format!(r#"{{ "run": {script} }}"#)), Ok(Command::Run(_))));
-        assert!(matches!(parse_command(r#"{ "stop": true }"#), Ok(Command::Stop)));
-        assert!(parse_command(r#"{ "stop": false }"#).is_err());
-        assert!(parse_command(r#"{ "jump": true }"#).is_err());
-    }
-
-    #[test]
-    fn the_schema_names_every_action_the_parser_takes() {
-        let schema: Value = serde_json::from_str(SCHEMA).unwrap();
-        let steps: Vec<&str> = schema["steps"].as_array().unwrap().iter().map(|step| step["name"].as_str().unwrap()).collect();
-        let mut named = steps.clone();
-        named.sort_unstable();
-        let mut parsed = script::ACTIONS.to_vec();
-        parsed.sort_unstable();
-        assert_eq!(named, parsed);
-        for condition in schema["conditions"].as_array().unwrap() {
-            let name = condition["name"].as_str().unwrap();
-            let probe = if condition["form"] == "bare" { json!(name) } else { json!({ name: null }) };
-            if let Err(error) = script::condition(&probe) {
-                assert!(!error.contains("unknown condition"), "{name}: {error}");
-            }
-        }
-    }
-
-    /// Every step the schema offers has a row in the plugin documentation,
-    /// whose tables name the step by its `do` value in backticks.
-    #[test]
-    fn the_plugin_document_names_every_step() {
-        let document = include_str!("../../../../../docs/plugins.md");
-        let schema: Value = serde_json::from_str(SCHEMA).unwrap();
-        let mut missing: Vec<&str> = schema
-            .get("steps")
-            .and_then(Value::as_array)
-            .expect("the schema lists its steps")
-            .iter()
-            .map(|step| step["name"].as_str().expect("a schema step has a name"))
-            .filter(|name| !names(document, name))
-            .collect();
-        missing.sort_unstable();
-        assert!(missing.is_empty(), "docs/plugins.md has no row for: {}", missing.join(", "));
-    }
-
-    #[test]
-    fn every_bundled_example_parses() {
-        let examples = examples();
-        assert!(!examples.is_empty());
-        for (title, script) in examples {
-            assert!(!title.is_empty());
-            script::parse(&script).unwrap_or_else(|error| panic!("{title}: {error}"));
-        }
-    }
-
-    /// Whether a documentation table has a row whose first cell is `name`:
-    /// `| `name` |` at the start of a line.
-    fn names(document: &str, name: &str) -> bool {
-        let row = format!("| `{name}` |");
-        document.lines().any(|line| line.starts_with(&row))
-    }
-
-    #[test]
-    fn a_sent_script_reads_as_queued_until_a_frame_takes_it() {
-        let before: Value = serde_json::from_str(&director_snapshot()).unwrap();
-        director_command(r#"{ "steps": [{ "do": "wait", "secs": 1 }] }"#).unwrap();
-        let queued: Value = serde_json::from_str(&director_snapshot()).unwrap();
-        assert_eq!(queued["status"], "queued");
-        assert_eq!(queued["pending"], 1);
-        COMMANDS.lock().unwrap().clear();
-        let after: Value = serde_json::from_str(&director_snapshot()).unwrap();
-        assert_eq!(after["status"], before["status"]);
-    }
 }

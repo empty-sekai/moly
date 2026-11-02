@@ -15,6 +15,8 @@
 //! and the walk cells are baked with it), or `Refused` with the reason.
 
 use super::{actors, layout_rules, owned, put_search, validation, EditPhase, EditSession, Facing, PutAim};
+pub use moly_features::field_build::{FieldBuildState, FieldPut};
+use moly_features::field_build::FieldBuilder;
 use moly_features::fixture::{EditableFixture, FixturePlacements};
 use moly_law::fixture::Direction;
 use moly_features::userdata::Answered;
@@ -22,19 +24,6 @@ use bevy::prelude::*;
 use moly_link::ServerLink;
 use moly_protocol::{Call, Refusal, Reply};
 use std::collections::HashMap;
-
-/// Where a field build stands.
-#[derive(Clone, Debug, PartialEq)]
-pub enum FieldBuildState {
-    /// The housing layout call is out.
-    Saving,
-    /// Saved; the layout is reloading and the walk cells rebaking.
-    Reloading,
-    /// The fixture `uid` is in the layout, spawned, with the walk cells
-    /// baked around it.
-    Placed { uid: String },
-    Refused(String),
-}
 
 /// The field build in flight, from its call to its reload.
 struct InFlight {
@@ -69,20 +58,6 @@ impl FieldBuilds {
     }
 }
 
-/// Where and how a field build puts its fixture.
-#[derive(Clone, Copy, Debug)]
-pub struct FieldPut {
-    /// A world point: the put search starts at the tile nearest it, or, when
-    /// `exact`, the fixture goes on the cell it falls in or the put is
-    /// refused.
-    pub at: Vec3,
-    pub exact: bool,
-    /// The direction number the put gets (0 front, 1 left, 2 back, 3 right,
-    /// the number a camera yaw of 90 × n degrees gives); the camera's yaw
-    /// decides it when absent.
-    pub direction: Option<Direction>,
-}
-
 /// Is a field build's layout save in flight? Only one save is out at a time:
 /// [`start`] refuses while it is.
 pub fn saving(world: &World) -> bool {
@@ -97,6 +72,16 @@ pub fn placed_cell(world: &World, uid: &str) -> Option<(moly_law::fixture::GridP
         .into_iter()
         .find(|row| row.uid == uid)
         .map(|row| (row.center, row.direction))
+}
+
+/// The calls a step reaches the field build by.
+pub fn builder() -> FieldBuilder {
+    FieldBuilder {
+        saving,
+        start,
+        state: |world, ticket| world.get_resource::<FieldBuilds>()?.state(ticket).cloned(),
+        placed_cell,
+    }
 }
 
 /// Puts an owned copy of `fixture_id` (of `texture`, or any) where `put`

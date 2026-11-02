@@ -27,25 +27,29 @@
 //!
 //! `moly.observe` answers what the `moly.observe` method answers. A step
 //! asked for with `moly.act` is checked when it is asked for, as a
-//! [`crate::director::parse_step`] step, and runs as a track with its own
-//! shared state; the task resumes with its outcome once the step ends:
-//! `{ ok = true, value }` with the step's result (a `log`'s text, a
-//! `where`'s positions) or `{ ok = false, reason }` with the refusal or the
-//! failure. A step that ran to its end without a note takes `value` as
-//! `null`. A refused step is never started.
+//! [`crate::director::parse_step`] step of the hub's action registry, and
+//! runs as a track of its own under the holder `plugin:<number>`, ranked
+//! [`Rank::Plugin`](moly_features::lease::Rank::Plugin); the task resumes
+//! with its outcome once the step ends: `{ ok = true, value }` with the
+//! step's result (a `log`'s text, a `where`'s positions) or
+//! `{ ok = false, reason }` with the refusal or the failure. A step that ran
+//! to its end without a note takes `value` as `null`. A refused step is
+//! never started.
 //!
 //! Control lease: the steps that drive the player through the virtual hand
-//! ([`is_hand_action`](crate::plugin_host::is_hand_action): `player.*`, `camera.*`, `tap`, `ui.tap` and
-//! `dialog.answer`) belong to one owner at a time. A human is above the
-//! director and a plugin is below it: while a director script runs, a plugin
-//! hand step is refused by name, and a plugin hand step is refused by name
-//! while another plugin's hand step holds the hand. The hand step that
-//! starts first holds the hand until its track ends (done, failed or
-//! aborted). A plugin asks for its steps once per frame, so the task that
+//! ([`is_hand_action`](crate::plugin_host::is_hand_action): `player.*`, `camera.*`, `tap`, `ui.tap`,
+//! `dialog.answer` and `key.*`) belong to one owner at a time, on the hand
+//! lease ([`Channel::Hand`](moly_features::lease::Channel::Hand)). A human is
+//! above the director and a plugin is below it: while a director script
+//! runs, a plugin hand step is refused by name, and a plugin hand step is
+//! refused by name while another plugin's hand step holds the hand. The hand
+//! step that starts first holds the hand until its track ends (done, failed
+//! or aborted). A plugin asks for its steps once per frame, so the task that
 //! asks for the hand first holds it. When human input arrives (a key press,
-//! a mouse button, a touch, a gamepad button or stick) the hand step that
-//! holds the hand is aborted, and it fails with [`HUMAN_INPUT`](crate::plugin_host::HUMAN_INPUT): `human
-//! input took control`.
+//! a mouse button, a touch, a gamepad button or stick) the person takes the
+//! hand, and the step that holds it is aborted with
+//! [`HUMAN_INPUT`](crate::plugin_host::HUMAN_INPUT): `human input took
+//! control`.
 //!
 //! Store: each plugin has one JSON object at `plugins/store/<id>.json` in
 //! the data directory, read when its scripts load and written once, at the
@@ -76,7 +80,6 @@ use moly_plugin::{Profile, SeamKind};
 use serde_json::{json, Value};
 
 use crate::director::run::{Shared, Track, TrackState};
-use crate::director::{Step, ACTED_TICKET};
 
 /// The reason a plugin's hand step fails with when a person takes the hand.
 pub const HUMAN_INPUT: &str = "human input took control";
@@ -150,16 +153,42 @@ struct PluginRow {
 /// One step a plugin asked for.
 struct Act {
     plugin: PluginId,
-    track: Track,
-    /// Whether the step's action drives the hand.
-    hand: bool,
-    /// The ticket the track runs under in the shared state.
+    /// The ticket the step's actions run as: its hand, its characters.
     ticket: u64,
+    track: Track,
+    /// The tickets of the parts this step's track started: its parallel
+    /// tracks' and its steps' parts, each with their own characters and
+    /// activities.
+    tickets: std::collections::BTreeSet<u64>,
     /// The ended steps counted when the step was asked for: the step's own
     /// result is the record that follows.
     ended: usize,
     /// The outcome, once the step has ended, for the next poll.
     outcome: Option<Result<Value, String>>,
+}
+
+/// Takes the hand for a plugin's step, refused by name as a hand step of a
+/// plugin is: while a director script runs, and while another plugin's step
+/// holds it. The plugin that asks first holds it, so its step's actions find
+/// the lease its run keeps.
+fn take_hand(world: &mut World, acts: &BTreeMap<u64, Act>, ticket: u64) -> Result<(), String> {
+    if crate::director::script_running(world) {
+        return Err(DIRECTOR_HOLDS.into());
+    }
+    let holder = moly_features::lease::Holder::new(format!("plugin:{ticket}"), moly_features::lease::Rank::Plugin);
+    let refused = world
+        .resource_mut::<moly_features::lease::Leases>()
+        .take(moly_features::lease::Channel::Hand, &holder)
+        .err();
+    let Some(refusal) = refused else {
+        return Ok(());
+    };
+    // The refusal names the plugin whose step holds the hand.
+    let holding = acts.values().find(|act| refusal.holder.id == format!("plugin:{}", act.ticket));
+    match holding {
+        Some(act) => Err(format!("{HAND_HELD} ({})", act.plugin)),
+        None => Err(HAND_HELD.into()),
+    }
 }
 
 /// Whether a plugin set was loaded at start.
@@ -414,6 +443,7 @@ fn advance(world: &mut World) {
     let events = lease::bus_since(host.events);
     host.events = lease::bus_latest();
     if human {
+        lease::take_hand(world);
         abort_hand(world, &mut host);
     }
     advance_steps(world, &mut host, refusing);
@@ -458,16 +488,18 @@ fn publish_report(world: &mut World) {
 }
 
 /// Aborts the hand step that holds the hand, if any: its task resumes with
-/// [`HUMAN_INPUT`] as the step's failure.
+/// [`HUMAN_INPUT`] as the step's failure. The person has the hand; the
+/// step's run lets go of what it still counted.
 fn abort_hand(world: &mut World, host: &mut PluginHost) {
     let Some(ticket) = host.hand.take() else {
         return;
     };
     let Some(act) = host.acts.get_mut(&ticket) else { return };
-    act.track.abort(world, &mut host.shared, act.ticket);
+    act.track.abort(world, &mut host.shared, &mut act.tickets);
     act.outcome = Some(Err(HUMAN_INPUT.to_owned()));
-    let shared_ticket = act.ticket;
-    host.shared.release(world, shared_ticket);
+    let step = act.ticket;
+    world.resource_mut::<moly_features::lease::Leases>().release_all(&format!("plugin:{step}"));
+    moly_features::act::Taken::release(world, step);
 }
 
 /// The host as one frame's scripts see it: a step's control is refused while
@@ -483,27 +515,22 @@ impl Host for Frame<'_> {
     }
 
     fn act(&mut self, plugin: &PluginId, step: Value) -> Result<u64, String> {
-        let steps = crate::director::parse_step(&step).map_err(|reason| format!("step refused: {reason}"))?;
+        let steps = crate::director::parse_step(self.world, &step).map_err(|reason| format!("step refused: {reason}"))?;
         let hand = is_hand(&steps);
+        let ticket = self.host.next_ticket + 1;
+        // The step's ticket is its run's: the offset the steps asked for
+        // outside a script take, plus its number.
+        let run = crate::director::run::ACTED_TICKET | ticket;
         if hand {
-            if crate::director::script_running(self.world) {
-                return Err(DIRECTOR_HOLDS.into());
-            }
-            if let Some(holder) = self.host.hand.and_then(|ticket| self.host.acts.get(&ticket)) {
-                return Err(format!("{HAND_HELD} ({})", holder.plugin));
-            }
+            take_hand(self.world, &self.host.acts, run)?;
         }
-        self.host.next_ticket += 1;
-        let ticket = self.host.next_ticket;
+        self.host.next_ticket = ticket;
         let ended = self.host.shared.ended();
-        let track = Track::new(steps, format!("{plugin}/act"));
-        if hand {
-            // The hand is lent before the step's own track runs, so the step
-            // that asks first holds it.
-            self.host.hand = Some(ticket);
-        }
-        let act = Act { plugin: plugin.clone(), track, hand, ticket: ACTED_TICKET | ticket, ended, outcome: None };
-        self.host.acts.insert(ticket, act);
+        let track = Track::new(steps, format!("{plugin}/act"), run);
+        self.host.acts.insert(
+            ticket,
+            Act { plugin: plugin.clone(), ticket: run, track, tickets: Default::default(), ended, outcome: None },
+        );
         Ok(ticket)
     }
 
@@ -531,10 +558,8 @@ impl Host for Frame<'_> {
 /// Advances the plugins' steps, the one that holds the hand first, and lets
 /// the hand go when its step ends. While a director script runs no hand step
 /// starts.
-fn advance_steps(world: &mut World, host: &mut PluginHost, refusing: bool) {
-    let holding = host.hand;
-    let mut tickets: Vec<u64> = holding.into_iter().collect();
-    tickets.extend(host.acts.keys().copied().filter(|ticket| Some(*ticket) != holding));
+fn advance_steps(world: &mut World, host: &mut PluginHost, _refusing: bool) {
+    let tickets: Vec<u64> = host.acts.keys().copied().collect();
     let mut ended = Vec::new();
     for ticket in tickets {
         let Some(act) = host.acts.get_mut(&ticket) else { continue };
@@ -542,18 +567,7 @@ fn advance_steps(world: &mut World, host: &mut PluginHost, refusing: bool) {
             // The task has not read the outcome yet.
             continue;
         }
-        if act.hand && Some(ticket) != holding {
-            // Another step holds the hand: this one is refused by name.
-            act.outcome = Some(Err(HAND_HELD.to_owned()));
-            ended.push(ticket);
-            continue;
-        }
-        if act.hand && refusing {
-            // The director's script holds the hand: the step waits for its
-            // end.
-            continue;
-        }
-        let state = act.track.tick(world, &mut host.shared, act.ticket);
+        let state = act.track.tick(world, &mut host.shared, &mut act.tickets);
         // A step that ended reports its own result, the last note its track
         // recorded.
         let value = if matches!(state, TrackState::Running) {
@@ -576,25 +590,27 @@ fn advance_steps(world: &mut World, host: &mut PluginHost, refusing: bool) {
     }
     for ticket in ended {
         let Some(act) = host.acts.get(&ticket) else { continue };
-        // The hand is free again, and whatever the step held is let go; its
-        // outcome waits for the task's next poll.
+        // Whatever the step held is let go, and the characters it took go
+        // back to their AI; its outcome waits for the task's next poll.
+        let step = act.ticket;
         if host.hand == Some(ticket) {
             host.hand = None;
         }
-        let shared_ticket = act.ticket;
-        host.shared.release(world, shared_ticket);
+        world.resource_mut::<moly_features::lease::Leases>().release_all(&format!("plugin:{step}"));
+        moly_features::act::Taken::release(world, step);
     }
 }
 
 /// Whether the steps drive the player through the virtual hand.
-pub fn is_hand(steps: &[Step]) -> bool {
+pub fn is_hand(steps: &[crate::director::Step]) -> bool {
     steps.iter().any(|step| is_hand_action(&step.action))
 }
 
 /// Whether an action drives the player through the virtual hand:
-/// `player.*`, `camera.*`, `tap`, `ui.tap` and `dialog.answer`.
+/// `player.*`, `camera.*`, `tap`, `ui.tap`, `dialog.answer` and `key.*`.
 pub fn is_hand_action(action: &str) -> bool {
-    matches!(action, "tap" | "ui.tap" | "dialog.answer") || action.starts_with("player.") || action.starts_with("camera.")
+    let named = matches!(action, "tap" | "ui.tap" | "dialog.answer");
+    named || ["player.", "camera.", "key."].iter().any(|family| action.starts_with(family))
 }
 
 fn join_ids(ids: &[PluginId]) -> String {

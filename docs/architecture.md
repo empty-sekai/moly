@@ -16,6 +16,7 @@
 | `crates/game/moly-world` | Areas, furniture, walkable surfaces and character behaviour |
 | `crates/game/moly-ui` | Prefab UI, UI management and common dialogs |
 | `crates/game/moly-features` | The hub: the field flow, the menu shell, crafting, dialogs, and the shared types and registries the domain crates below install into |
+| `crates/game/moly-act` | The actions every client shares, registered with the hub's action registry: the player through the virtual hand, the characters, the companions, the camera and its talk lens, the view, effects, the site, the weather and the server |
 | `crates/game/moly-convert` | Conversion: the machine's slots, the items it converts and their screen and dialogs |
 | `crates/game/moly-mission` | Missions: their screen, list cells, detail and list dialogs and the reward receive |
 | `crates/game/moly-photo` | Photo mode: field capture, frame selection and saving the shot to a local file |

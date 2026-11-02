@@ -242,6 +242,10 @@ pub fn install(app: &mut App) {
     crate::game_settings::install(app);
     crate::player_data::install_stage(app);
     crate::fixture_colors::install(app);
+    // The actions every client shares, and the hub's registry they are
+    // registered with: the stage's library and its talk lens ask for them.
+    moly_features::act::install(app);
+    moly_act::install(app);
     app.add_systems(bevy::app::PreStartup, crate::ui_font::add_asset);
     app.add_systems(Startup, audio::init_settings);
     app.add_systems(

@@ -1,10 +1,10 @@
 //! The person's input behind the control lease, and the bus's events as the
 //! host reads them.
 //!
-//! A person's input aborts a plugin's running hand step (see the module
-//! docs): a key press, a mouse button, a touch that starts, a gamepad button
-//! pressed or a gamepad stick moved. The director's own touches are not a
-//! person's; its keys are.
+//! A person's input takes the hand for itself (a key press, a mouse button, a
+//! touch that starts, a gamepad button pressed or a gamepad stick moved), and
+//! every program's hand step it takes the hand from ends with the reason the
+//! lease gives. The director's own touches are not a person's; its keys are.
 
 use bevy::ecs::message::Messages;
 use bevy::input::gamepad::{GamepadAxis, GamepadAxisChangedEvent, GamepadButtonChangedEvent};
@@ -12,6 +12,7 @@ use bevy::input::mouse::MouseButton;
 use bevy::input::touch::{TouchInput, TouchPhase};
 use bevy::input::{ButtonInput, ButtonState};
 use bevy::prelude::*;
+use moly_features::lease::{Channel, Holder, Leases, Rank};
 use serde_json::Value;
 
 /// How far a stick must move from rest to count as a person's input.
@@ -43,4 +44,15 @@ pub(super) fn human_input(world: &World) -> bool {
         .iter_current_update_messages()
         .any(|touch| touch.phase == TouchPhase::Started);
     keys || mouse || pad || stick || touch
+}
+
+/// A person's input this frame takes the hand, whatever program had it: the
+/// finger down is lifted, and each step that had the hand ends with the
+/// lease's reason on its next poll.
+pub(super) fn take_hand(world: &mut World) {
+    let person = Holder::new("person", Rank::Human);
+    let took = world.resource_mut::<Leases>().take(Channel::Hand, &person).is_ok();
+    if took {
+        moly_features::act::hand::release(world);
+    }
 }

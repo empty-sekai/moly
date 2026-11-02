@@ -44,6 +44,7 @@
 //! call.
 
 pub mod bloom;
+pub mod deliver_action;
 pub mod drops;
 pub mod flow;
 pub mod honor;
@@ -455,6 +456,7 @@ pub struct DeliveryPlugin;
 
 impl Plugin for DeliveryPlugin {
     fn build(&self, app: &mut App) {
+        deliver_action::install(app);
         app.add_message::<DeliveryCollision>()
             .add_message::<DeliveryRequest>()
             .add_message::<DeliveryProgress>()

@@ -55,6 +55,7 @@ mod arrival;
 pub mod catalog;
 pub mod companion_gather;
 mod clips;
+mod gather_actions;
 pub(crate) mod damage;
 mod drops;
 mod effects;
@@ -757,6 +758,10 @@ fn publish_model_stamina(
 
 impl Plugin for HarvestPlugin {
     fn build(&self, app: &mut App) {
+        crate::gather_actions::install(app);
+        // Where the site's gatherables stand, for the targets other domains'
+        // steps name.
+        app.add_systems(PostUpdate, crate::gather_actions::report_targets);
         app.init_resource::<HarvestHits>()
             .init_resource::<HarvestHitResults>()
             .init_resource::<HarvestStats>()

@@ -62,7 +62,7 @@ crates = ["moly-world"]
 crates = ["moly-features"]
 
 [layers.domain]
-crates = ["moly-convert", "moly-mission", "moly-photo", "moly-fixture-edit", "moly-delivery", "moly-harvest", "moly-content-library", "moly-cutscene"]
+crates = ["moly-convert", "moly-mission", "moly-photo", "moly-fixture-edit", "moly-delivery", "moly-harvest", "moly-content-library", "moly-cutscene", "moly-act"]
 
 [layers.tools]
 crates = ["moly-devtools"]
@@ -103,6 +103,7 @@ crates = ["moly-app", "moly-stage", "moly-android", "moly-launcher", "moly-serve
 "crates/game/moly-convert/Cargo.toml" = "domain"
 "crates/game/moly-mission/Cargo.toml" = "domain"
 "crates/game/moly-photo/Cargo.toml" = "domain"
+"crates/game/moly-act/Cargo.toml" = "domain"
 "crates/game/moly-fixture-edit/Cargo.toml" = "domain"
 "crates/game/moly-delivery/Cargo.toml" = "domain"
 "crates/game/moly-harvest/Cargo.toml" = "domain"

@@ -1,0 +1,17 @@
+[package]
+name = "moly-act"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+moly-features = { path = "../moly-features" }
+moly-law = { path = "../../base/moly-law" }
+moly-config = { path = "../../base/moly-config" }
+moly-protocol = { path = "../../net/moly-protocol" }
+moly-link = { path = "../../net/moly-link" }
+bevy = { workspace = true }
+serde_json = "1"
+
+[lints]
+workspace = true

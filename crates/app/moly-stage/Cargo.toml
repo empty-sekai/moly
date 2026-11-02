@@ -17,6 +17,7 @@ moly-audio = { path = "../../game/moly-audio" }
 moly-ui = { path = "../../game/moly-ui" }
 moly-world = { path = "../../game/moly-world" }
 moly-features = { path = "../../game/moly-features" }
+moly-act = { path = "../../game/moly-act" }
 moly-fixture-edit = { path = "../../game/moly-fixture-edit" }
 moly-content-library = { path = "../../game/moly-content-library" }
 moly-cutscene = { path = "../../game/moly-cutscene" }

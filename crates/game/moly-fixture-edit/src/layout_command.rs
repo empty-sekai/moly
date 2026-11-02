@@ -7,11 +7,10 @@ use bevy::prelude::*;
 use moly_law::fixture::GridPosition;
 use serde_json::{json, Map, Value};
 
-use crate::fixture_edit::{
-    EditCatalogView, EditCommand, EditItemView, EditSelectionView, EditView, PutStatus,
-};
+use crate::{EditCatalogView, EditCommand, EditItemView, EditSelectionView, EditView, PutStatus};
 
-pub(super) const COMMANDS: &[&str] = &[
+/// The editor's commands, as moly.layout.command names them.
+pub const COMMANDS: &[&str] = &[
     "enter",
     "select_content",
     "select_environment",
@@ -36,7 +35,8 @@ pub(super) const COMMANDS: &[&str] = &[
     "cancel_clean_up",
 ];
 
-pub(super) fn view(world: &World) -> Value {
+/// moly.layout.view: the editor's state as the view reports it.
+pub fn view(world: &World) -> Value {
     let Some(view) = world.get_resource::<EditView>() else {
         return json!({ "active": false });
     };
@@ -142,7 +142,7 @@ pub fn command(params: &Map<String, Value>) -> Result<EditCommand, String> {
         "select_content" => {
             let kind = params.get("kind").and_then(Value::as_i64)
                 .ok_or("select_content needs source kind 0, 1, 2, 3, 4 or 19")?;
-            EditCommand::SelectContent(crate::fixture_edit::EditContentType::from_tab_kind(kind)
+            EditCommand::SelectContent(crate::EditContentType::from_tab_kind(kind)
                 .ok_or("select_content kind is not a source content kind")?)
         }
         "select_environment" => {
