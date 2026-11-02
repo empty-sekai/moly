@@ -1156,21 +1156,20 @@ mod tests {
         assert_eq!(state.active.as_ref().unwrap().choice.ticket, 77);
     }
     #[test]
-    fn closing_cancels_owners_but_retains_scene_ownership_until_restore() {
+    fn closing_hides_the_browser_and_keeps_the_playback() {
         let mut state = playing();
         let catalog = LibraryCatalog::default();
         assert_eq!(
             apply_in_test(BrowserCommand::Close, &mut state, &catalog),
-            (1, 1)
+            (0, 0)
         );
         assert!(!state.external_open);
         assert!(!state.open);
         assert!(state.external_ui);
-        assert!(state.stopping);
+        assert!(!state.stopping);
         assert!(state.scene_owned);
         assert!(state.active.is_some());
         let snapshot = project(&state, &catalog, &LibraryContext::default());
-        assert_eq!(snapshot["status"]["phase"], "restoring");
         assert_eq!(snapshot["status"]["canStop"], true);
     }
     #[test]

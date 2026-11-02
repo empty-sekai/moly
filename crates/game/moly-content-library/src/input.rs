@@ -309,7 +309,7 @@ pub(super) fn apply_action(
                 state.search_focus = false;
                 state.changed();
             } else if state.open {
-                close(state, io);
+                close(state);
             } else {
                 state.open = true;
                 state.search_focus = false;
@@ -330,7 +330,7 @@ pub(super) fn apply_action(
             state.release_guard = 2;
             state.changed();
         }
-        LibraryAction::Close => close(state, io),
+        LibraryAction::Close => close(state),
         LibraryAction::OpenFixtureDialog(id) => {
             if catalog.fixture(id).is_some() && !state.browser_busy() {
                 state.fixture_dialog = Some(id);
@@ -568,11 +568,18 @@ fn cancel(io: &mut LibraryInput) {
         PlayerFixtureCancelReason::User,
     ));
 }
-fn close(state: &mut ContentLibrary, io: &mut LibraryInput) {
-    if state.active.is_some() || state.pending.is_some() {
-        cancel(io);
-        state.stopping = true;
-        state.cleanup_frames = 2;
+/// Closing the browser only hides it while it stages, plays or restores a
+/// choice: the scene and the playback stay until Stop or Restore ends them,
+/// and the browser comes back as it was.
+fn close(state: &mut ContentLibrary) {
+    if state.browser_busy() {
+        state.open = false;
+        state.watching = true;
+        state.search_focus = false;
+        state.picker_open = false;
+        state.release_guard = 2;
+        state.changed();
+        return;
     }
     state.close();
 }
