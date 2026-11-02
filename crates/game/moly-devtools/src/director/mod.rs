@@ -149,6 +149,7 @@
 mod cond;
 mod hand;
 mod npc;
+pub mod lens_clear;
 pub mod run;
 mod script;
 pub mod talk_lens;

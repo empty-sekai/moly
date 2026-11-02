@@ -218,6 +218,7 @@ pub fn install(app: &mut App) {
         .init_resource::<Captures>()
         .init_resource::<PluginsAnswer>()
         .init_resource::<crate::camera::FreeCameraPose>()
+        .init_resource::<crate::director::lens_clear::FixtureBounds>()
         .init_resource::<TimeStep>()
         .add_systems(Startup, share_sender)
         .add_systems(First, crate::bus::stamp)
@@ -230,7 +231,9 @@ pub fn install(app: &mut App) {
         .add_systems(
             PostUpdate,
             (
+                crate::director::lens_clear::measure_fixtures,
                 crate::director::talk_lens::follow_speaker,
+                crate::director::lens_clear::clear_view,
                 crate::camera::apply_free_camera,
                 free_camera_global,
             )

@@ -584,6 +584,7 @@ pub fn bind_voice(
             // `dev.talk_auto_advance` (`MOLY_TALK_AUTO_ADVANCE`) `1`: a line
             // advances as soon as its own voice has played out, without a tap
             // — the pacing a recording needs, where nobody is there to click.
+            // A line without a voice waits the auto mode's interval instead.
             if auto_advance_on_voice_end() {
                 state.release_lead = Some(AUTO_ADVANCE_LEAD);
             }
@@ -750,8 +751,10 @@ pub fn read_click_input(
     // `IsNextTalkIntervalEnd`, once per frame as `WaitClicked` consults it: a
     // voice playing or the typewriter running zeroes the interval (and the
     // release it may hold); otherwise it accumulates and its end is the
-    // release.
-    if state.present && state.auto {
+    // release. Under `dev.talk_auto_advance` a line without a voice is
+    // released the same way, so a recording does not wait on a tap.
+    let auto = state.auto || auto_advance_on_voice_end();
+    if state.present && auto {
         if state.voice_playing || state.playing {
             state.auto_wait = 0.0;
             state.auto_release = false;
@@ -765,7 +768,7 @@ pub fn read_click_input(
                 info!("[talkwin] auto mode: IsNextTalkIntervalEnd ({AUTO_INTERVAL_SECONDS:.1}s, no voice), release set");
             }
         }
-    } else if !state.auto {
+    } else if !auto {
         state.auto_wait = 0.0;
         state.auto_release = false;
     }

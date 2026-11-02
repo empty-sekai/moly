@@ -674,11 +674,12 @@ fn start(world: &mut World, shared: &mut Shared, ticket: u64, step: Step, path: 
             Err(error) => return ended(path, Err(error), optional),
         },
         Node::DialogAnswer { ok } => Kind::DialogAnswer(DialogAnswer { ok: *ok, tapped: None, pressed: None }),
-        Node::NpcPlayTalk { unit, talk } => {
-            let result = super::npc::play_talk(world, *unit, *talk)
+        Node::NpcPlayTalk { unit, talk, fixture } => {
+            let result = super::npc::play_talk(world, *unit, *talk, fixture.as_ref())
                 .map(|_| format!("talk {talk} asked to play on character {unit}"));
             return ended(path, result, optional);
-        }        Node::NpcWarp { unit, to } => {
+        }
+        Node::NpcWarp { unit, to } => {
             let result = match super::cond::npc(world, *unit) {
                 Ok(entity) => {
                     // A warped character stands where it was put: its AI makes no
@@ -702,7 +703,8 @@ fn start(world: &mut World, shared: &mut Shared, ticket: u64, step: Step, path: 
                 None => Err("the player is not on the site".to_owned()),
             };
             return ended(path, result, optional);
-        }        Node::CameraFree { position, target, fov } => {
+        }
+        Node::CameraFree { position, target, fov } => {
             let pose = crate::camera::FreeCameraPose(Some(crate::camera::FreeCameraPoseValue {
                 eye: Vec3::from(*position),
                 target: Vec3::from(*target),
@@ -712,7 +714,7 @@ fn start(world: &mut World, shared: &mut Shared, ticket: u64, step: Step, path: 
             world.insert_resource(pose);
             return ended(path, Ok("the free camera holds the pose".to_owned()), optional);
         }
-        Node::TalkLens { distance, height, target, fov, swing, unit, wide, wide_hold } => {
+        Node::TalkLens { distance, height, target, fov, swing, unit, wide, wide_hold, glide, push, clear } => {
             world.insert_resource(super::talk_lens::TalkLens {
                 distance: *distance,
                 height: *height,
@@ -722,6 +724,9 @@ fn start(world: &mut World, shared: &mut Shared, ticket: u64, step: Step, path: 
                 idle_unit: *unit,
                 wide: *wide,
                 wide_hold: *wide_hold,
+                glide: *glide,
+                clear: *clear,
+                push: *push,
             });
             return ended(path, Ok("the talk lens follows the speaker".to_owned()), optional);
         }

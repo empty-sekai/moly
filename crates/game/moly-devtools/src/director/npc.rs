@@ -428,9 +428,23 @@ fn site_type(world: &World, entity: Entity) -> Option<i32> {
 
 /// Plays a conversation at once: the request carries the row itself
 /// (`exact`), which is the content library's own path, so no gathering runs
-/// and no cast has to be recruited. The speakers' own activities are
-/// cancelled first so the conversation is theirs.
-pub fn play_talk(world: &mut World, unit: u32, talk: i32) -> Result<Entity, String> {
+/// and no cast has to be recruited. The row's own backend decides how it
+/// plays; a fixture conversation plays at `fixture`, a placed instance of one
+/// of its fixtures (by UID, or the instance of that master id nearest the
+/// speaker). The speakers' own activities are cancelled first so the
+/// conversation is theirs.
+pub fn play_talk(
+    world: &mut World,
+    unit: u32,
+    talk: i32,
+    fixture: Option<&super::script::FixtureRef>,
+) -> Result<Entity, String> {
+    let content = {
+        let mut catalog = SystemState::<crate::player_talk::TalkCatalog>::new(world);
+        let catalog = catalog.get(world).map_err(|error| format!("the talk catalog is not ready: {error}"))?;
+        catalog.resolve(talk).map(|resolved| resolved.content())
+    }
+    .ok_or_else(|| format!("talk {talk} has no script"))?;
     let speakers = {
         let tables = world
             .get_resource::<crate::fixture_activity_data::FixtureActivityTables>()
@@ -473,16 +487,40 @@ pub fn play_talk(world: &mut World, unit: u32, talk: i32) -> Result<Entity, Stri
             crate::npc::stop_for_external_activity(world, other);
         }
     }
+    let target_fixture = fixture.map(|fixture| placed_fixture(world, fixture, entity)).transpose()?;
     world.write_message(crate::player_talk::PlayerTalkRequest {
         entity,
         unit,
-        exact: Some(crate::npc_objective::TalkContent {
-            master_id: talk,
-            backend: crate::npc_objective::TalkBackend::CommonSomeCharacter,
-            is_general: Some(true),
-        }),
-        target_fixture: None,
+        exact: Some(content),
+        target_fixture,
     });
     info!("[director] talk {talk} handed to the talk player on character {unit} (no gathering)");
     Ok(entity)
+}
+
+/// The placed fixture `fixture` names: the instance of that UID, or the
+/// instance of that master id nearest the character `near`.
+fn placed_fixture(world: &mut World, fixture: &super::script::FixtureRef, near: Entity) -> Result<Entity, String> {
+    use super::script::FixtureRef;
+    let from = world.get::<GlobalTransform>(near).map_or(Vec3::ZERO, GlobalTransform::translation);
+    let mut placed = world.query_filtered::<(
+        Entity,
+        &crate::fixture_activity_state::FixtureActivityIdentity,
+        &GlobalTransform,
+    ), With<crate::fixture::FixtureRoot>>();
+    match fixture {
+        FixtureRef::Uid(uid) => placed
+            .iter(world)
+            .find(|(_, identity, _)| identity.uid == *uid)
+            .map(|(entity, _, _)| entity)
+            .ok_or_else(|| format!("no placed fixture with UID {uid}")),
+        FixtureRef::Id(id) => placed
+            .iter(world)
+            .filter(|(_, identity, _)| identity.master_id == *id)
+            .min_by(|(_, _, a), (_, _, b)| {
+                a.translation().distance_squared(from).total_cmp(&b.translation().distance_squared(from))
+            })
+            .map(|(entity, _, _)| entity)
+            .ok_or_else(|| format!("no placed fixture of master id {id}")),
+    }
 }

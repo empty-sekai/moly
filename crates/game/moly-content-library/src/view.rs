@@ -1430,6 +1430,7 @@ pub fn refresh(
         &mut BorderColor,
     )>,
     mut cache: Local<ViewCache>,
+    clean: Option<Res<moly_features::clean_view::CleanView>>,
 ) {
     if state.external_ui {
         for (_, region, mut node, _, _, _) in &mut regions {
@@ -1461,7 +1462,9 @@ pub fn refresh(
     for (entity, region, mut node, computed, scroll, text_font) in &mut regions {
         let visible = match region {
             Region::Overlay => state.open,
-            Region::Transport => state.watching,
+            // The clean view hides every UI view but the talk window; the
+            // transport bar is one.
+            Region::Transport => state.watching && !clean.as_ref().is_some_and(|clean| clean.switches().hud()),
             Region::FixtureDialog => state.fixture_dialog.is_some(),
             Region::CharacterPicker => {
                 state.open && state.picker_open && state.fixture_dialog.is_none()

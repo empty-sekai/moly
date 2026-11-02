@@ -158,13 +158,13 @@ fn threshold(k: u32) -> f32 {
 
 /// How many of the sixteen thresholds `alpha` passes (`alpha` − threshold is
 /// not below zero). Alphas of one level keep and discard the same fragments.
-fn dither_level(alpha: f32) -> u32 {
+pub fn dither_level(alpha: f32) -> u32 {
     (0..16).filter(|&k| alpha - threshold(k) >= 0.0).count() as u32
 }
 
 /// The alpha a copy holds for `level`: 0 below the first threshold, 1 above
 /// the last, otherwise midway between the two thresholds that bound it.
-fn level_alpha(level: u32) -> f32 {
+pub fn level_alpha(level: u32) -> f32 {
     match level {
         0 => 0.0,
         16.. => 1.0,
@@ -174,7 +174,7 @@ fn level_alpha(level: u32) -> f32 {
 
 /// The material of `base` holding the view state, or `None` when `base`
 /// already holds it. `Err` names a family without the dither axes.
-fn with_state(base: &SiteMaterial, active: bool, alpha: f32) -> Result<Option<SiteMaterial>, SiteFamily> {
+pub fn with_state(base: &SiteMaterial, active: bool, alpha: f32) -> Result<Option<SiteMaterial>, SiteFamily> {
     match base.key.family {
         SiteFamily::Tree => {
             if !active && !base.key.tree_dither {

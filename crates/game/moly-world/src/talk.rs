@@ -615,11 +615,8 @@ pub struct ActiveTalk {
     /// to the referent of any step (a look or an eye change can name a
     /// listener).
     voice_speaker: Option<u32>,
-    /// The last voice line names no single cast member (the whole cast
-    /// speaks, or the referent is not a slot of this talk).
-    voice_group: bool,
-    /// The last name-bar text reads as the whole cast.
-    label_all: bool,
+    /// The step index of the name bar that opened the line on screen.
+    line_label: Option<usize>,
     /// When the last voice line began, on the app clock.
     voice_at: f32,
     /// The latest animation start of a cast member: who, and when.
@@ -655,39 +652,93 @@ impl ActiveTalk {
         self.speaker
     }
 
-    /// Who the next voice line belongs to: the first voice step the stream has
-    /// not reached yet.
-    pub fn upcoming_voice_speaker(&self) -> Option<u32> {
-        self.row.steps.get(self.state.cursor..)?.iter().find_map(|step| match step {
-            FixtureStep::Voice { who, .. } => resolve_speaker(self, *who, self.state.cursor),
-            _ => None,
-        })
-    }
-
     /// Who the last voice line belongs to; None before the first one.
     pub fn voice_speaker(&self) -> Option<u32> {
         self.voice_speaker
     }
 
-    /// Whether the last voice line has no single speaker.
-    pub fn voice_group(&self) -> bool {
-        self.voice_group || self.label_all
+    /// Who speaks the line on screen, read from that line's own steps (from
+    /// its name bar to its text): the voice's cast member, else the first
+    /// cast member whose eye or mouth changes, else the first whose
+    /// animation changes. A listener's reaction later in the line does not
+    /// change it, and a line without a voice still has its speaker.
+    pub fn line_speaker(&self) -> Option<u32> {
+        self.line_label.and_then(|label| self.speaker_of_line(label))
     }
 
-    /// Whether the next voice line the stream has not reached yet has no
-    /// single speaker.
-    pub fn upcoming_voice_is_group(&self) -> bool {
-        let mut all = false;
-        for step in self.row.steps.get(self.state.cursor..).unwrap_or_default() {
+    /// Who speaks the next line the stream has not reached yet.
+    pub fn upcoming_line_speaker(&self) -> Option<u32> {
+        self.next_line_label().and_then(|label| self.speaker_of_line(label))
+    }
+
+    /// Whether the line on screen has no single speaker: its name bar names
+    /// several speakers, or its voice names no single cast member.
+    pub fn line_is_group(&self) -> bool {
+        self.line_label.is_some_and(|label| self.line_has_no_single_speaker(label))
+    }
+
+    /// Whether the next line the stream has not reached yet has no single
+    /// speaker.
+    pub fn upcoming_line_is_group(&self) -> bool {
+        self.next_line_label().is_some_and(|label| self.line_has_no_single_speaker(label))
+    }
+
+    fn next_line_label(&self) -> Option<usize> {
+        let from = self.state.cursor;
+        let steps = self.row.steps.get(from..)?;
+        Some(from + steps.iter().position(|step| matches!(step, FixtureStep::Label { .. }))?)
+    }
+
+    /// The steps of the line a name bar opens, up to its text.
+    fn line_steps(&self, label: usize) -> impl Iterator<Item = &FixtureStep> {
+        self.row
+            .steps
+            .get(label + 1..)
+            .unwrap_or_default()
+            .iter()
+            .take_while(|step| !matches!(step, FixtureStep::Label { .. } | FixtureStep::Text { .. }))
+    }
+
+    fn speaker_of_line(&self, label: usize) -> Option<u32> {
+        let mut face = None;
+        let mut motion = None;
+        for step in self.line_steps(label) {
             match step {
-                FixtureStep::Label { name } => all = is_all_speakers(name),
                 FixtureStep::Voice { who, .. } => {
-                    return all || resolve_speaker(self, *who, self.state.cursor).is_none();
+                    if let Some(unit) = self.cast_unit(*who) {
+                        return Some(unit);
+                    }
+                }
+                FixtureStep::ChangeNpcEye { who, .. } | FixtureStep::ChangeNpcMouth { who, .. } => {
+                    face = face.or_else(|| self.cast_unit(*who));
+                }
+                FixtureStep::ChangeAnimation { who, .. } => {
+                    motion = motion.or_else(|| self.cast_unit(*who));
                 }
                 _ => {}
             }
         }
-        false
+        face.or(motion)
+    }
+
+    fn line_has_no_single_speaker(&self, label: usize) -> bool {
+        if let Some(FixtureStep::Label { name }) = self.row.steps.get(label) {
+            if names_several_speakers(name) {
+                return true;
+            }
+        }
+        self.line_steps(label)
+            .any(|step| matches!(step, FixtureStep::Voice { who, .. } if self.cast_unit(*who).is_none()))
+    }
+
+    /// The cast member a step's referent names; None for the player's slot,
+    /// a fractional referent or a unit outside this talk.
+    fn cast_unit(&self, who: f64) -> Option<u32> {
+        if who <= 0.0 || who.fract() != 0.0 {
+            return None;
+        }
+        let unit = who as u32;
+        self.has_participant(unit).then_some(unit)
     }
 
     /// A cast member that started an animation more than `after` seconds into
@@ -1002,8 +1053,7 @@ pub fn start_selected(
         player: Some(player),
         speaker: None,
         voice_speaker: None,
-        voice_group: false,
-        label_all: false,
+        line_label: None,
         voice_at: 0.0,
         reaction: None,
         hold_logged: None,
@@ -1171,8 +1221,7 @@ pub fn voice_probe(
         player: None,
         speaker: None,
         voice_speaker: None,
-        voice_group: false,
-        label_all: false,
+        line_label: None,
         voice_at: 0.0,
         reaction: None,
         hold_logged: None,
@@ -1366,8 +1415,7 @@ pub fn partvoice_probe(
         player: None,
         speaker: None,
         voice_speaker: None,
-        voice_group: false,
-        label_all: false,
+        line_label: None,
         voice_at: 0.0,
         reaction: None,
         hold_logged: None,
@@ -1736,7 +1784,6 @@ pub fn advance_talk(
             if unit.is_some() {
                 active.voice_speaker = unit;
             }
-            active.voice_group = unit.is_none();
             active.voice_at = now;
         }
         // The voice line is delivered to the audio domain (serve_voice starts it in
@@ -1868,9 +1915,12 @@ pub fn advance_talk(
 /// voice/眼/口/动作/表情件的 0 号指称是 0 条；0 号实际出现的步只有转身
 /// 一族（look_at_body 两侧、look_at_fixture、look_at_to_npc），它们各自
 /// 走玩家的转身入口。
-/// The name-bar text of a line the whole cast speaks together.
-fn is_all_speakers(name: &str) -> bool {
-    name.trim() == "全員"
+/// The name-bar text of a line several cast members speak together: the
+/// whole cast (`全員`, `みんな`) or names joined with `・`. Such a line's
+/// voice step still names a single slot, so the name bar is what tells.
+fn names_several_speakers(name: &str) -> bool {
+    let name = name.trim();
+    name == "全員" || name == "みんな" || name.contains('・')
 }
 
 fn resolve_speaker(active: &ActiveTalk, who: f64, index: usize) -> Option<u32> {
@@ -2027,7 +2077,7 @@ fn dispatch_step(
             // Name bar SetText (Label → name-bar text component) — the window opens
             // on this chain. The corpus contains 0 occurrences of a label step at an
             // anchored jump; this branch is a defensive record.
-            active.label_all = is_all_speakers(name);
+            active.line_label = Some(index);
             window.set_label_at(TalkSession::Pair(&mut *active), index, name);
             info!(
                 "[talk] 段 {} 步 {} label：名字栏 SetText（{} 字，名字不进日志）",
