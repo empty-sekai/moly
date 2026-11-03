@@ -328,9 +328,10 @@ pub struct ShadowMapGpu {
     pub depth_texture: Texture,
     /// 深度图视图：深度 pass 的 attachment，站点材质的采样源。
     pub depth_view: TextureView,
-    /// 比较采样器：NEAREST 单 texel 比较（源九 tap 是 lod0 单 texel 硬件
-    /// 比较，不再叠引擎级滤波）；`LessEqual` = 存储深度 ≥ 片元深度时点亮
-    /// （本图 z 从近到远递增，normal-Z）。
+    /// 比较采样器：双线性比较，每个 tap 由硬件对相邻 2×2 texel 各比较一次
+    /// 再按小数位插值——引擎给主光阴影图的过滤方式就是双线性（只有强制点
+    /// 采样的平台例外），九 tap 帐篷滤波的小数偏移正是按这一点排的；
+    /// `LessEqual` = 存储深度 ≥ 片元深度时点亮（本图 z 从近到远递增，normal-Z）。
     pub cmp_sampler: Sampler,
     /// 消费块 buffer：全族一份，绑站点材质 group 3 binding 10。
     pub consumer_buffer: Buffer,
@@ -2150,8 +2151,8 @@ fn init_shadow_resources(
     let cmp_sampler = render_device.create_sampler(&SamplerDescriptor {
         address_mode_u: AddressMode::ClampToEdge,
         address_mode_v: AddressMode::ClampToEdge,
-        mag_filter: FilterMode::Nearest,
-        min_filter: FilterMode::Nearest,
+        mag_filter: FilterMode::Linear,
+        min_filter: FilterMode::Linear,
         mipmap_filter: MipmapFilterMode::Nearest,
         compare: Some(CompareFunction::LessEqual),
         ..Default::default()
