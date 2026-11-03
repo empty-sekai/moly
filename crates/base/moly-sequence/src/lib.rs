@@ -12,6 +12,11 @@
 //! the screen colour at any `t`, the same however playback reached `t`.
 //! Only one-shot actions depend on direction: [`Compiled::events`] reports
 //! those whose time lies between two sampled times.
+//!
+//! A camera clip may be previewed at one time of its own ([`Compiled::shot`]),
+//! and one camera clip's sample may be reshaped into the key form authors
+//! write (`keys` for the eye, `keys` for the look) and back
+//! ([`ShotKeys`], [`EyeKey`], [`AimKey`], [`Compiled::pose_from_keys`]).
 
 mod actor;
 mod bake;
@@ -27,6 +32,7 @@ pub mod time;
 use std::fmt;
 
 pub use bake::{compile, Catalog, NoCatalog};
+pub use camera::{AimKey, CameraClip, EyeKey, ShotKeys};
 pub use doc::Sequence;
 pub use sample::{ActorFrame, CameraPose, CaptionFrame, Frame, Host, LineFrame, Look, MotionFrame, Moving, SoundFrame, SoundKey};
 

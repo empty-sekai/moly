@@ -164,11 +164,18 @@ pub fn frame(world: &mut World) {
     // for it ends with the reason, and the status keeps it.
     let failed = laid.err();
     // The end stays on its last frame, its camera, line, captions and screen
-    // colour held until a stop; only the sounds and the events' runs end.
+    // colour held until a stop; only the sounds, the events' runs and the
+    // camera framing (which has taken the camera by then) end.
     if player.ended {
         player.ended = false;
         sounds::down(world, &mut player);
         controls::stop(world, &mut player);
+        if player.framing {
+            // The played time did not move: the camera the page framed at
+            // is the sequence's again.
+            cameras::release(world, &mut player);
+            player.framing = false;
+        }
     }
     world.insert_resource(player);
     if let Some(reason) = failed {
@@ -235,6 +242,9 @@ pub fn begin(world: &mut World, t: f32) -> Result<(), String> {
     }
     player.clips = Some(clips);
     player.state = State::Playing;
+    // The sequence owns the camera again once it plays.
+    player.framing = false;
+    player.camera.holder = Some(holder.clone());
     player.sampled = vec![Vec::new(); player.actors.len()];
     player.t = t;
     player.live_camera = live;
@@ -332,6 +342,7 @@ pub fn stop(world: &mut World, why: &str) {
     players_back(world, &mut player);
     let was_playing = player.state != State::Stopped;
     player.state = State::Stopped;
+    player.framing = false;
     player.actors.clear();
     player.sampled.clear();
     player.clips = None;
@@ -346,6 +357,98 @@ pub fn stop(world: &mut World, why: &str) {
     if was_playing {
         info!("[sequence] {} stopped at {at:.2} s ({why})", name.as_deref().unwrap_or_default());
     }
+}
+
+// ---- framing a shot ----
+
+/// Lets the camera go to the free camera while the player is paused, or takes
+/// it back for the sequence: the frames that follow lay everything but the
+/// camera while it is free (`cameras::lay` has no holder to write under).
+pub fn framing(world: &mut World, free: bool) {
+    let mut player = std::mem::take(&mut *world.resource_mut::<Player>());
+    if player.state == State::Paused && player.framing != free {
+        if free {
+            cameras::release(world, &mut player);
+        } else if let Some(doc) = player.doc.as_ref() {
+            let holder = crate::holder(doc.name());
+            match cameras::claim(world, &mut player, &holder) {
+                Ok(()) => {
+                    // The camera the clip gives at the played time is laid
+                    // again on the next frame.
+                    player.dirty = true;
+                }
+                Err(reason) => crate::refuse(world, format!("the camera is not the sequence's: {reason}")),
+            }
+        }
+        player.framing = free;
+    }
+    world.insert_resource(player);
+}
+
+/// Writes the camera as it stands into the document at the time `at` (the
+/// played time when absent) of the camera clip that holds it, then saves the
+/// file, which the reload that follows reads back. The JSON the file holds
+/// is edited: a file that no longer parses is refused and left as it was,
+/// and a file that was formatted by hand loses that formatting only where it
+/// is written.
+pub fn capture_key(world: &mut World, at: Option<f32>) -> Result<crate::Reply, crate::Refusal> {
+    let (path, clip) = {
+        let player = world.resource::<Player>();
+        let Some(doc) = player.doc.as_ref() else {
+            return Err(crate::refusal("no sequence is loaded"));
+        };
+        let time = at.unwrap_or(player.t);
+        let Some(clip) = doc.compiled.camera_clip(time) else {
+            return Err(crate::refusal(format!("no camera clip holds {time:.3} s")));
+        };
+        doc.compiled.shot_keys(clip.index).map_err(|shape| {
+            crate::refusal(format!(
+                "the camera clip {} is not written from keys: its eye is a \"{shape}\" {}",
+                clip.index,
+                match shape {
+                    "target" => "look, which keeps its target; only a \"dir\" or an absent look takes the camera's angles",
+                    "rig" => "shot, which the host places",
+                    _ => "and only a \"keys\" eye or one the clip leaves out takes a key",
+                }
+            ))
+        })?;
+        (doc.path.clone(), clip)
+    };
+    let Some(pose) = cameras::live(world) else {
+        return Err(crate::refusal("the live camera is not known"));
+    };
+    let aim = crate::keys::Aim { eye: pose.eye, target: pose.eye + pose.rotation * Vec3::NEG_Z, fov: pose.fov };
+    let text = std::fs::read_to_string(&path).map_err(|error| crate::refusal(format!("cannot read {}: {error}", path.display())))?;
+    let mut document: serde_json::Value =
+        serde_json::from_str(&text).map_err(|error| crate::refusal(format!("{} does not parse as JSON: {error}", path.display())))?;
+    let capture = crate::keys::capture(&mut document, &clip, &aim).map_err(crate::refusal)?;
+    let saved = write_document(&path, &document);
+    match saved {
+        Ok(()) => {
+            // The reload that follows reads this save back, at the played
+            // time the frame already stands on.
+            info!("[sequence] {}: {}", path.display(), capture.note());
+            Ok(crate::Reply::Keyed(capture))
+        }
+        Err(reason) => {
+            crate::refuse(world, reason.clone());
+            Err(crate::refusal(reason))
+        }
+    }
+}
+
+/// Writes a document to its file: pretty JSON with two spaces, LF line ends
+/// and no byte order mark, replaced in one step so a refused write leaves the
+/// old file whole.
+fn write_document(path: &std::path::Path, document: &serde_json::Value) -> Result<(), String> {
+    let mut text = serde_json::to_string_pretty(document).map_err(|error| format!("the document does not write: {error}"))?;
+    text.push('\n');
+    let beside = path.with_extension("json.tmp");
+    std::fs::write(&beside, text.as_bytes()).map_err(|error| format!("cannot write {}: {error}", beside.display()))?;
+    std::fs::rename(&beside, path).map_err(|error| {
+        let _ = std::fs::remove_file(&beside);
+        format!("cannot replace {}: {error}", path.display())
+    })
 }
 
 // ---- the host the sample reads ----

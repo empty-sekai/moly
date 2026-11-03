@@ -182,6 +182,40 @@ pub(crate) struct Envelope<'a> {
     pub after: Option<Extend>,
 }
 
+/// The timing and blending numbers of a clip as a document writes them: the
+/// content time of a sequence time, the weight at each edge, and how far the
+/// clip extends.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Shape {
+    pub clip_in: f32,
+    pub speed: f32,
+    pub blend_in: f32,
+    pub blend_out: f32,
+    pub ease_in: Ease,
+    pub ease_out: Ease,
+    pub before: Option<Extend>,
+    pub after: Option<Extend>,
+}
+
+impl From<Shape> for Envelope<'_> {
+    fn from(shape: Shape) -> Self {
+        Envelope {
+            id: None,
+            start: None,
+            duration: None,
+            end: None,
+            clip_in: shape.clip_in,
+            speed: shape.speed,
+            blend_in: shape.blend_in,
+            blend_out: shape.blend_out,
+            ease_in: shape.ease_in,
+            ease_out: shape.ease_out,
+            before: shape.before,
+            after: shape.after,
+        }
+    }
+}
+
 // ---- camera ----
 
 #[derive(Clone, Debug, Deserialize)]

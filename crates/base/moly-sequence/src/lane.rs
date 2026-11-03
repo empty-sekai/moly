@@ -31,7 +31,24 @@ pub(crate) struct Shape {
     pub after: Option<Extend>,
 }
 
-/// A clip's state at one time.
+impl Shape {
+    /// The numbers as a document writes them.
+    pub(crate) fn written(&self) -> crate::doc::Shape {
+        crate::doc::Shape {
+            clip_in: self.clip_in,
+            speed: self.speed,
+            blend_in: self.blend_in,
+            blend_out: self.blend_out,
+            ease_in: self.ease_in,
+            ease_out: self.ease_out,
+            before: self.before,
+            after: self.after,
+        }
+    }
+}
+
+/// A clip's state at one time, as a clip reports it at a time and the
+/// sampler reads it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Presence {
     /// 0..=1 from the blend in and blend out; 1 where the clip extends.
@@ -49,7 +66,7 @@ impl<P> Span<P> {
         self.end - self.start
     }
 
-    pub fn presence(&self, t: f32) -> Option<Presence> {
+    pub(crate) fn presence(&self, t: f32) -> Option<Presence> {
         if t < self.from || t > self.until {
             return None;
         }

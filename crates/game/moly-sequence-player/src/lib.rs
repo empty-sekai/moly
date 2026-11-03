@@ -18,6 +18,10 @@
 //! `sequence.play` and `sequence.stop` actions, and the hot reload of a
 //! loaded file.
 //!
+//! A paused player may leave the camera to the free camera to frame a shot
+//! ([`frame`]), and write the camera as it stands into the document's camera
+//! clip as one key ([key]); the reload shows the key.
+//!
 //! Ownership: the camera is held as the holder `sequence:<name>` of the
 //! sequence rank, so a holder of the same or a higher rank (the director, a
 //! person) takes it from the player, which then stops by name. The actors are
@@ -29,6 +33,7 @@
 mod actors;
 mod cameras;
 mod controls;
+mod keys;
 mod lines;
 #[cfg(not(target_arch = "wasm32"))]
 mod remote;
@@ -163,6 +168,9 @@ pub struct Player {
     /// (clip name, looping, seconds into it, weight): a frame that asks for
     /// the same pose again writes nothing.
     pub(crate) sampled: Vec<Vec<(String, bool, f32, f32)>>,
+    /// The camera is left to the free camera while paused, to frame a shot
+    /// that a key writes into the document ([`frame`], [`key`]).
+    pub(crate) framing: bool,
 }
 
 impl Player {
@@ -190,6 +198,11 @@ impl Player {
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
     }
+
+    /// The camera is left to the free camera while paused, to frame a key.
+    pub fn framing(&self) -> bool {
+        self.framing
+    }
 }
 
 /// A refused load, play or seek, as the methods and the actions report it.
@@ -214,6 +227,8 @@ pub enum Reply {
     Paused { t: f32 },
     Seeked { t: f32 },
     Speed { scale: f32 },
+    Framing { on: bool },
+    Keyed(keys::Capture),
     Stopped,
 }
 
@@ -226,6 +241,9 @@ impl Reply {
             Self::Paused { t } => format!("paused at {t:.2} s"),
             Self::Seeked { t } => format!("seeked to {t:.2} s"),
             Self::Speed { scale } => format!("speed {scale}"),
+            Self::Framing { on: true } => "the camera is free to frame a shot; key the shot into the document with moly.sequence.key".to_owned(),
+            Self::Framing { on: false } => "the camera is the sequence's again".to_owned(),
+            Self::Keyed(capture) => capture.note(),
             Self::Stopped => "stopped".to_owned(),
         }
     }
@@ -448,6 +466,35 @@ pub fn set_speed(world: &mut World, scale: f32) -> Result<Reply, Refusal> {
     Ok(reply)
 }
 
+/// Lets the camera go to the free camera while the player is paused, so a
+/// shot can be framed and keyed; `on` false takes it back for the sequence.
+/// A play or a stop ends framing.
+pub fn frame(world: &mut World, on: bool) -> Result<Reply, Refusal> {
+    let player = world.resource::<Player>();
+    if player.state != State::Paused {
+        return Err(refusal("the sequence is not paused; pause it to frame a shot"));
+    }
+    if player.framing == on {
+        return Ok(Reply::Framing { on });
+    }
+    run::framing(world, on);
+    let reply = Reply::Framing { on };
+    info!("[sequence] {}", reply.note());
+    Ok(reply)
+}
+
+/// Writes the camera as it stands into the camera clip that holds `at` (the
+/// played time when `at` is absent) of the document, as one key, and saves
+/// the file at once; the reload that follows puts the key in play. Only a
+/// paused player takes a key, and the key is the camera wherever it stands:
+/// framed into by hand, or the shot the current clip gives (the live camera).
+pub fn key(world: &mut World, at: Option<f32>) -> Result<Reply, Refusal> {
+    if world.resource::<Player>().state != State::Paused {
+        return Err(refusal("the sequence is not paused; pause it to take a key"));
+    }
+    run::capture_key(world, at)
+}
+
 /// Stops the player and gives every output back: the events, the sounds, the
 /// line, the overlay, the camera and each actor (settled into its idle when
 /// its body was still the player's), then the character leases and takes.
@@ -468,6 +515,7 @@ pub fn status(world: &World) -> Value {
             "markers": [],
             "cast": [],
             "ended": false,
+            "framing": player.framing,
             "last_error": player.last_error,
         });
     };
@@ -487,6 +535,7 @@ pub fn status(world: &World) -> Value {
         "speed": player.speed,
         "markers": markers,
         "cast": cast,
+        "framing": player.framing,
         "ended": player.at_end(),
         "last_error": player.last_error,
     })

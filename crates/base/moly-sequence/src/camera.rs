@@ -101,7 +101,30 @@ fn look_rotation(forward: Vec3, roll: f32) -> Quat {
     Quat::from_mat3(&Mat3::from_cols(right, up, back)) * Quat::from_rotation_z(roll.to_radians())
 }
 
+/// The yaw and pitch in degrees that look along `direction`: yaw is about +Y
+/// with 0 facing +Z, and pitch is positive upwards. A direction without a
+/// horizontal part takes the highest pitch its vertical sign allows, at yaw 0.
+pub(crate) fn aim_angles(direction: Vec3) -> (f32, f32) {
+    let direction = direction.try_normalize().unwrap_or(Vec3::NEG_Z);
+    let pitch = direction.y.clamp(-1.0, 1.0).asin().to_degrees();
+    let yaw = if direction.x.abs() > 1e-6 || direction.z.abs() > 1e-6 { direction.x.atan2(direction.z).to_degrees() } else { 0.0 };
+    (yaw, pitch)
+}
+
 impl CameraPose {
+    /// The pose that looks from `eye` along the yaw and pitch (degrees, the
+    /// document's convention) with `fov` degrees across, as a shot with that
+    /// aim and no roll would place the camera.
+    pub fn aiming(eye: Vec3, yaw: f32, pitch: f32, fov: f32) -> CameraPose {
+        CameraPose { eye, rotation: look_rotation(forward(yaw, pitch), 0.0), fov, near: 0.1, far: 1000.0, focus: None, aperture: None }
+    }
+
+    /// The yaw and pitch in degrees of this pose's view direction, in the
+    /// document's convention.
+    pub fn aiming_angles(&self) -> (f32, f32) {
+        aim_angles(self.rotation * Vec3::NEG_Z)
+    }
+
     /// This pose moved `weight` of the way to `other`.
     pub fn blend(&self, other: &CameraPose, weight: f32) -> CameraPose {
         if weight >= 1.0 {
@@ -212,4 +235,108 @@ impl Compiled {
         }
         Some(pose)
     }
+
+    /// How many clips the camera track has.
+    pub fn camera_clips(&self) -> usize {
+        self.camera.spans.len()
+    }
+
+    /// The clip of the camera track that holds sequence time `t`: its index,
+    /// its start and end, its content time at `t` (the time a key of it is
+    /// written at) and its timing and blending numbers. An open clip ends at
+    /// the next clip's start, as the sampler makes it; a time at the end of a
+    /// clip and the start of the next belongs to the next.
+    pub fn camera_clip(&self, t: f32) -> Option<CameraClip> {
+        let spans = &self.camera.spans;
+        let index = spans.iter().rposition(|span| span.start <= t && t < span.end)?;
+        let span = &spans[index];
+        let presence = span.presence(t)?;
+        Some(CameraClip { index, start: span.start, end: span.end, local: presence.local, shape: span.shape.written() })
+    }
+
+    /// One camera clip as a shot with that aim and no roll would place the
+    /// camera at its content time `local`: no shake, and the live camera's
+    /// lens values for everything the clip leaves unset. `None` for a rig
+    /// shot, whose placement belongs to the host.
+    pub fn shot(&self, index: usize, local: f32, host: &dyn Host) -> Option<CameraPose> {
+        let span = self.camera.spans.get(index)?;
+        let Place::Eye { .. } = &span.payload.place else {
+            return None;
+        };
+        let live = host.live_camera();
+        let pose = self.shot_pose(&span.payload, &Presence { weight: 1.0, local, progress: 0.0, elapsed: 0.0 }, 0.0, host, &live);
+        Some(CameraPose { focus: None, aperture: None, ..pose })
+    }
+
+    /// The keys a camera clip of a document may be written from: a keyed eye
+    /// keeps its points, an eye absent from the document (which samples the
+    /// live camera's eye) becomes the one point `at`, and a
+    /// look that is a `dir` keeps its angles. `Err` names the shape that is
+    /// not keyed: `"path"`, `"orbit"`, `"follow"`, `"at"` (a fixed eye),
+    /// `"target"` (an aim at a point), `"rig"` or no clip at all.
+    pub fn shot_keys(&self, index: usize) -> Result<ShotKeys, &'static str> {
+        let Some(span) = self.camera.spans.get(index) else {
+            return Err("no clip");
+        };
+        let Place::Eye { eye, aim } = &span.payload.place else {
+            return Err("rig");
+        };
+        let eye = match eye {
+            Eye::Keys(keys) => keys.iter().map(|(t, position, ease)| EyeKey { t: *t, pos: position.to_array(), ease: *ease }).collect(),
+            Eye::At(_) => return Err("at"),
+            Eye::Path { .. } => return Err("path"),
+            Eye::Orbit { .. } => return Err("orbit"),
+            Eye::Follow { .. } => return Err("follow"),
+        };
+        let aim = match aim {
+            Aim::Dir(direction) => {
+                let (yaw, pitch) = aim_angles(*direction);
+                AimKey { yaw, pitch }
+            }
+            Aim::At { .. } => return Err("target"),
+            Aim::Travel => return Err("path"),
+        };
+        Ok(ShotKeys { eye, aim })
+    }
+}
+
+/// A camera clip of a compiled sequence, as [`Compiled::camera_clip`] finds
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CameraClip {
+    /// The clip's index in the camera track.
+    pub index: usize,
+    /// Sequence seconds; `end` is the next clip's start for an open clip.
+    pub start: f32,
+    pub end: f32,
+    /// Content seconds into the clip at the time asked for.
+    pub local: f32,
+    /// The clip's timing and blending numbers, which name its content time
+    /// from the sequence time.
+    pub shape: crate::doc::Shape,
+}
+
+/// The keys of one camera clip: its eye as `keys` points with clip-local
+/// times, and the aim's `dir` angles in degrees.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShotKeys {
+    pub eye: Vec<EyeKey>,
+    pub aim: AimKey,
+}
+
+/// One `keys` point of an eye: a clip-local time, a world position and the
+/// ease of the segment that arrives at it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EyeKey {
+    pub t: f32,
+    pub pos: [f32; 3],
+    pub ease: Ease,
+}
+
+/// A look as the aim's `dir` writes it: `[yaw, pitch]` in degrees, yaw about
+/// +Y with 0 facing +Z and pitch positive upwards.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AimKey {
+    pub yaw: f32,
+    pub pitch: f32,
 }

@@ -31,7 +31,8 @@ pub fn claim(world: &mut World, player: &mut Player, holder: &Holder) -> Result<
     Ok(())
 }
 
-/// Lets the camera go at a stop.
+/// Lets the camera go: at a stop, or to frame a shot with the free camera
+/// while the player is paused.
 pub fn release(world: &mut World, player: &mut Player) {
     let Some(holder) = player.camera.holder.take() else {
         return;

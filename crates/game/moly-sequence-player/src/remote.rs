@@ -1,10 +1,12 @@
 //! The sequence's methods of the control surface: `moly.sequence.load`,
-//! `play`, `pause`, `seek`, `speed`, `stop`, `status` and `schema`.
+//! `play`, `pause`, `seek`, `speed`, `stop`, `frame` (the free
+//! camera, while paused), `key` (the camera as it stands, as a key of the
+//! document), `status` and `schema`.
 //!
 //! The methods join the protocol's table at `Startup`, once the control
-//! surface has built it. A method that changes the player queues its command
-//! for the player's next frame and answers that frame's reply and status;
-//! `status` and `schema` answer at once.
+//! surface has built it. A method that changes the player runs on the world
+//! at once (an instant method runs on the main thread, on the world itself)
+//! and answers its note and the status; `status` and `schema` answer at once.
 
 use bevy::prelude::*;
 use bevy_remote::{error_codes, BrpError, BrpResult, RemoteMethodSystemId, RemoteMethods};
@@ -13,7 +15,18 @@ use serde_json::{json, Map, Value};
 use crate::controls::Command;
 
 /// The methods, by name.
-const METHODS: &[&str] = &["moly.sequence.load", "moly.sequence.play", "moly.sequence.pause", "moly.sequence.seek", "moly.sequence.speed", "moly.sequence.stop", "moly.sequence.status", "moly.sequence.schema"];
+const METHODS: &[&str] = &[
+    "moly.sequence.load",
+    "moly.sequence.play",
+    "moly.sequence.pause",
+    "moly.sequence.seek",
+    "moly.sequence.speed",
+    "moly.sequence.stop",
+    "moly.sequence.frame",
+    "moly.sequence.key",
+    "moly.sequence.status",
+    "moly.sequence.schema",
+];
 
 /// The params each method takes, as JSON Schema.
 fn params_schema() -> Value {
@@ -24,6 +37,8 @@ fn params_schema() -> Value {
         "moly.sequence.seek": { "type": "object", "properties": { "t": { "type": "number", "minimum": 0 }, "marker": { "type": "string" } }, "additionalProperties": false },
         "moly.sequence.speed": { "type": "object", "properties": { "scale": { "type": "number", "minimum": 0 } }, "required": ["scale"], "additionalProperties": false },
         "moly.sequence.stop": { "type": "object", "additionalProperties": false },
+        "moly.sequence.frame": { "type": "object", "properties": { "on": { "type": "boolean", "description": "Absent or true lets the free camera frame the shot; false gives the camera back to the sequence." } }, "additionalProperties": false },
+        "moly.sequence.key": { "type": "object", "properties": { "at": { "type": "number", "minimum": 0, "description": "The sequence time the key is taken at; absent takes the played time." } }, "additionalProperties": false },
         "moly.sequence.status": { "type": "object", "additionalProperties": false },
         "moly.sequence.schema": { "type": "object", "additionalProperties": false }
     })
@@ -43,9 +58,13 @@ fn register(world: &mut World) {
     let seek = world.register_system(seek);
     let speed = world.register_system(speed);
     let stop = world.register_system(stop);
+    let frame = world.register_system(frame);
+    let key = world.register_system(key);
     let status = world.register_system(status);
     let schema = world.register_system(schema);
     let mut methods = world.resource_mut::<RemoteMethods>();
+    methods.insert("moly.sequence.frame", RemoteMethodSystemId::Instant(frame));
+    methods.insert("moly.sequence.key", RemoteMethodSystemId::Instant(key));
     methods.insert("moly.sequence.load", RemoteMethodSystemId::Instant(load));
     methods.insert("moly.sequence.play", RemoteMethodSystemId::Instant(play));
     methods.insert("moly.sequence.pause", RemoteMethodSystemId::Instant(pause));
@@ -148,6 +167,31 @@ fn speed(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
 fn stop(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     object(params, "moly.sequence.stop", &[])?;
     run(world, Command::Stop, "moly.sequence.stop")
+}
+
+/// `moly.sequence.frame`: the camera goes to the free camera while paused
+/// (the `on` field absent or true), or comes back to the sequence (`on`
+/// false). The camera's lease goes with it.
+fn frame(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let params = object(params, "moly.sequence.frame", &["on"])?;
+    let on = match params.get("on") {
+        None => true,
+        Some(on) => on.as_bool().ok_or_else(|| refuse("moly.sequence.frame: on must be true or false"))?,
+    };
+    crate::frame(world, on)
+        .map(|reply| json!({ "reply": reply.note(), "status": crate::status(world) }))
+        .map_err(|error| refusal(format!("moly.sequence.frame: {}", error.0)))
+}
+
+/// `moly.sequence.key`: writes the camera as it stands into the document at
+/// the camera clip that holds `at` (the played time when absent), as one key
+/// of its eye, and saves the file; the reload that follows shows it.
+fn key(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let params = object(params, "moly.sequence.key", &["at"])?;
+    let at = seconds(&params, "at", "moly.sequence.key")?;
+    crate::key(world, at)
+        .map(|reply| json!({ "reply": reply.note(), "status": crate::status(world) }))
+        .map_err(|error| refusal(format!("moly.sequence.key: {}", error.0)))
 }
 
 fn status(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
