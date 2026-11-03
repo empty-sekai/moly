@@ -79,7 +79,7 @@ use bevy::world_serialization::{WorldInstanceReady, WorldAssetRoot};
 use moly_assets::character as schema;
 use moly_assets::json::JsonAsset;
 use moly_law::path::TurnMotion;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 /// Segment transition duration: the transition argument the switch call passes as a
@@ -237,6 +237,39 @@ pub enum BodyOwner {
     CutScene,
     /// A still pose held for a portrait capture.
     Portrait,
+    /// A sequence player sampling its tracks at the played time.
+    Sequence,
+}
+
+impl BodyOwner {
+    /// The owner as a note names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Alone => "an alone action",
+            Self::Communication => "a communication",
+            Self::Talk => "a talk",
+            Self::PlayerTalk => "a player talk",
+            Self::Event => "an event",
+            Self::ChangeSite => "a site change",
+            Self::FixtureActivity => "a fixture activity",
+            Self::FixtureTalk => "a fixture talk",
+            Self::CutScene => "a cut-scene",
+            Self::Portrait => "a portrait",
+            Self::Sequence => "a sequence",
+        }
+    }
+}
+
+/// One motion a pose plays: the shared library's clip `clip`, sampled
+/// `local` seconds into it at `weight`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PoseLayer {
+    pub clip: String,
+    /// Seconds into the clip; a looping layer takes it modulo the clip's
+    /// length, one that plays once holds its last frame past the end.
+    pub local: f32,
+    pub weight: f32,
+    pub looping: bool,
 }
 
 /// One owner's hold on an NPC body: valid until the owner hands it back or a
@@ -355,6 +388,66 @@ impl MotionDriver {
         self.nodes.get(clip_name).copied()
     }
 
+    /// Poses the animator from the library's clips directly, without the
+    /// transitions of locomotion: each layer is an animation of the graph
+    /// started at its time and weight, and every animation of the player the
+    /// layers do not list is stopped. Only the holder of `token` writes;
+    /// anything else is refused with the owner that holds the body.
+    ///
+    /// The transitions of the player are cleared: their `advance_transitions`
+    /// would write the departing animation's fading weight over every weight
+    /// of the player each frame. The animations the transitions were fading
+    /// stay in the player, paused and unweighted, so the body's own expiry
+    /// (`expire_completed_transitions`) never stops a layer this call is about
+    /// to write, and the next segment change of locomotion crossfades in from
+    /// them. The locomotion ledger closes (`playing` empty), so that change is
+    /// taken again.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pose(
+        &mut self,
+        token: BodyToken,
+        layers: &[PoseLayer],
+        graphs: &mut Assets<AnimationGraph>,
+        library: &Gltf,
+        player: &mut AnimationPlayer,
+        transitions: &mut AnimationTransitions,
+        clips: &Assets<AnimationClip>,
+        unit: u32,
+    ) -> Result<(), String> {
+        if !self.holds(token) {
+            let owner = self.held_by().map_or("no state".to_owned(), |owner| owner.name().to_owned());
+            return Err(format!("unit {unit}'s body is held by {owner}"));
+        }
+        let mut listed: HashSet<AnimationNodeIndex> = HashSet::new();
+        for layer in layers {
+            if !layer.local.is_finite() || !layer.weight.is_finite() || layer.weight < 0.0 {
+                return Err(format!("the layer of {} is sampled at {:.3} s with weight {}", layer.clip, layer.local, layer.weight));
+            }
+            let node = self.clip_node(graphs, library, &layer.clip, unit);
+            listed.insert(node);
+            let length = library
+                .named_animations
+                .get(layer.clip.as_str())
+                .and_then(|clip| clips.get(clip))
+                .map(AnimationClip::duration)
+                .ok_or_else(|| format!("the library clip {} has no length", layer.clip))?;
+            let local = if layer.looping && length > 0.0 { layer.local.rem_euclid(length) } else { layer.local.clamp(0.0, length) };
+            player.play(node).set_weight(layer.weight).seek_to(local).pause();
+        }
+        // The transitions cannot fade over a pose no state of theirs plays.
+        if let Some(main) = transitions.get_main_animation().filter(|main| !listed.contains(main)) {
+            player.stop(main);
+        }
+        let fading: Vec<AnimationNodeIndex> =
+            player.playing_animations().map(|(node, _)| *node).filter(|node| !listed.contains(node)).collect();
+        *transitions = AnimationTransitions::new();
+        for node in fading {
+            player.play(node).set_weight(0.0).pause();
+        }
+        self.playing = None;
+        Ok(())
+    }
+
     fn lead_in(&self, kind: MotionKind) -> Option<LeadIn> {
         match kind {
             MotionKind::IdleS => self.idle_s,
@@ -399,6 +492,13 @@ impl MotionDriver {
             MotionKind::TurnL(motion) => format!("{}_L", motion.base_name()),
         }
     }
+}
+
+/// The length in seconds of the shared library's clip `clip_name`, when the
+/// library has exactly that clip and it is loaded.
+pub fn motion_length(clip_name: &str, library: &Gltf, clips: &Assets<AnimationClip>) -> Option<f32> {
+    let clip = library.named_animations.get(clip_name)?;
+    clips.get(clip).map(AnimationClip::duration)
 }
 
 /// 源起始段的等待秒数：`TimeSpan.FromSeconds(段长 / 速度)` 取整到毫秒后

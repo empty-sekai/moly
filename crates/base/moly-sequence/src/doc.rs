@@ -516,7 +516,9 @@ pub struct AudioTrack {
 #[serde(rename_all = "snake_case")]
 pub enum Sound {
     Voice(Voice),
-    Bgm(String),
+    /// A BGM cue and the cue sheet bundle that holds it, as a voice names
+    /// its own.
+    Bgm(Voice),
     Se(String),
     File(String),
 }

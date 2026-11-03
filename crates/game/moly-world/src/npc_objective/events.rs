@@ -438,6 +438,34 @@ pub fn reset_face(world: &mut World, entity: Entity) {
     });
 }
 
+/// Writes the eye pattern `eye` and the mouth pattern `mouth` (each `None`
+/// left as it is) on the character `entity`'s face materials, a name the
+/// tables do not hold reading as the tables' zero-valued row. The reason
+/// names what refuses it: the facial tables are not loaded, or the body has
+/// no such material slot.
+pub fn set_face(world: &mut World, entity: Entity, eye: Option<&str>, mouth: Option<&str>) -> Result<(), String> {
+    if eye.is_none() && mouth.is_none() {
+        return Ok(());
+    }
+    let Some(materials) = world.get::<crate::character_material::ToonMaterials>(entity) else { return Err("the body has no materials yet".to_owned()); };
+    let slots = (materials.slot_handle("eye").cloned(), materials.slot_handle("mouth").cloned());
+    if eye.is_some() && slots.0.is_none() { return Err("the body has no eye material slot".to_owned()); }
+    if mouth.is_some() && slots.1.is_none() { return Err("the body has no mouth material slot".to_owned()); }
+    if !world.contains_resource::<Assets<crate::character_material::CharacterMaterial>>() { return Err("the character materials are not in the world".to_owned()); }
+    let rows = {
+        let Some(tables) = world.get_resource::<crate::alone_action_runtime::FacialTables>() else { return Err("the facial tables are not loaded".to_owned()); };
+        (eye.and_then(|eye| tables.eye_pattern(eye)), mouth.and_then(|mouth| tables.lip_pattern(mouth)))
+    };
+    let Some(mut assets) = world.get_resource_mut::<Assets<crate::character_material::CharacterMaterial>>() else { return Err("the character materials are not in the world".to_owned()); };
+    if let (Some(row), Some(handle)) = (rows.0, slots.0.as_ref()) {
+        crate::alone_action_runtime::apply_eye_pattern(&mut assets, handle, Some(row));
+    }
+    if let (Some(row), Some(handle)) = (rows.1, slots.1.as_ref()) {
+        crate::alone_action_runtime::apply_mouth_pattern(&mut assets, handle, row);
+    }
+    Ok(())
+}
+
 fn photo_face(world: &mut World, entity: Entity, row: &PhotoRow) {
     let Some(materials) = world.get::<crate::character_material::ToonMaterials>(entity) else { return; };
     let (Some(eye), Some(mouth)) = (materials.slot_handle("eye").cloned(), materials.slot_handle("mouth").cloned()) else { return; };

@@ -1095,6 +1095,42 @@ impl TalkWindowState {
     pub fn release_pending(&self) -> bool {
         self.release_lead.is_some()
     }
+
+    /// Shows a line of another owner than a talk: the name plate and `text`
+    /// with its first `shown` characters written. The owner sets the revealed
+    /// count itself every frame, so the typewriter and the click latches stay
+    /// off, and the end sign shows once the whole line is written. The window
+    /// is present at full alpha.
+    pub fn show_written_line(&mut self, name: &str, text: &str, shown: usize) {
+        self.present = true;
+        self.alpha = 1.0;
+        self.fade = None;
+        self.hide_ui = false;
+        self.set_label_plain(name);
+        self.text.clear();
+        self.text.push_str(text);
+        self.text_translated = false;
+        self.shown = shown.min(text.chars().count());
+        self.playing = false;
+        self.skip_text = false;
+        self.clicked = false;
+        self.auto_release = false;
+        self.release_lead = None;
+        self.end_icon = self.shown >= text.chars().count();
+        self.end_star_clock = 0.0;
+    }
+
+    /// Takes the window away after [`Self::show_written_line`]: with no fade,
+    /// no text, the menu closed and auto off, as a closed window has them.
+    pub fn withdraw_written_line(&mut self) {
+        self.reset_for_admission(false);
+    }
+
+    fn set_label_plain(&mut self, name: &str) {
+        self.label_translated = false;
+        self.label.clear();
+        self.label.push_str(name);
+    }
 }
 
 fn auto_advance_on_voice_end() -> bool {

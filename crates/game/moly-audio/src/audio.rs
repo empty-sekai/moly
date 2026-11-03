@@ -1944,6 +1944,17 @@ impl Routing {
         })
     }
 
+    /// Every stream the table holds, as its cue and package.
+    pub fn stream_keys(&self) -> impl Iterator<Item = (String, String)> + '_ {
+        self.streams.0.keys().cloned()
+    }
+
+    /// The whole length of a `(cue, package)` stream in seconds, when the
+    /// table holds it.
+    pub fn stream_length(&self, cue: &str, package: &str) -> Option<f32> {
+        self.streams.0.get(&(cue.to_owned(), package.to_owned())).map(|stream| stream.duration as f32)
+    }
+
     /// The gain facts of `(cue, package)`, when exported.
     fn cue_gain(&self, cue: &str, package: &str) -> Option<&CueGain> {
         self.sequences

@@ -28,6 +28,7 @@ members = [
     "crates/game/moly-content-library",
     "crates/game/moly-cutscene",
     "crates/game/moly-act",
+    "crates/game/moly-sequence-player",
     "crates/game/moly-devtools",
     "crates/game/moly-masters",
     "crates/game/moly-game",

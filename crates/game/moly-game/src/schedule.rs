@@ -278,6 +278,9 @@ pub fn install(app: &mut App) {
     // registered with, before the runner that asks for them.
     moly_features::act::install(app);
     moly_act::install(app);
+    // The sequence player: its `sequence.play` and `sequence.stop` actions
+    // among the others, and its control surface methods.
+    moly_sequence_player::install(app);
     crate::director::install(app);
     // Native only: the browser engine runs no Luau plugins.
     #[cfg(not(target_arch = "wasm32"))]

@@ -5587,6 +5587,7 @@ dependencies = [
  "moly-mission",
  "moly-photo",
  "moly-render",
+ "moly-sequence-player",
  "moly-ui",
  "moly-world",
  "naga 29.0.4",
@@ -5769,6 +5770,18 @@ version = "0.0.6"
 dependencies = [
  "bevy_math",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "moly-sequence-player"
+version = "0.0.6"
+dependencies = [
+ "bevy",
+ "bevy_remote",
+ "moly-audio",
+ "moly-features",
+ "moly-sequence",
  "serde_json",
 ]
 
