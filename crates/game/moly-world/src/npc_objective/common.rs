@@ -101,6 +101,7 @@ fn set_lower(world: &mut World, entity: Entity, state: LowerState) {
 pub(super) fn reserved(world: &World, entity: Entity) -> bool { world.get::<TalkReservation>(entity).is_some() }
 
 fn recruitable(world: &World, entity: Entity) -> bool {
+    if world.get::<crate::npc::DirectedOwned>(entity).is_some() { return false; }
     let Some(actions) = world.get::<NpcActions>(entity) else { return false; };
     if !actions.ready() || actions.current == NpcAction::Talk || world.get::<crate::talk::TalkHold>(entity).is_some() { return false; }
     if matches!(actions.current, NpcAction::FixtureAction | NpcAction::FixtureActionIdle | NpcAction::MainSomeFixtureAction | NpcAction::SomeFixtureAction | NpcAction::ChangeSite) { return false; }
@@ -112,13 +113,15 @@ fn recruitable(world: &World, entity: Entity) -> bool {
 }
 
 fn reservable(world: &World, entity: Entity, site: &str) -> bool {
-    world.get::<NpcActions>(entity).is_some_and(|state| state.ready()
+    world.get::<crate::npc::DirectedOwned>(entity).is_none()
+        && world.get::<NpcActions>(entity).is_some_and(|state| state.ready()
         && state.site_type == site && state.current != NpcAction::ChangeSite)
         && world.get::<CommonMember>(entity).is_none()
         && world.get::<TalkReservation>(entity).is_none()
 }
 
 fn communication_eligible(world: &World, entity: Entity, main: bool, now: f32, refresh: f32) -> bool {
+    if world.get::<crate::npc::DirectedOwned>(entity).is_some() { return false; }
     let Some(state) = world.get::<NpcActions>(entity) else { return false; };
     if !state.ready() || state.since_initialized < 1.0
         || world.get::<CommonMember>(entity).is_some() || world.get::<TalkReservation>(entity).is_some() {

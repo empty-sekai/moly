@@ -23,9 +23,7 @@ use crate::npc_objective::{MemberRng, ObjectiveFace, ObjectiveMind};
 /// The reason a taken character's loop shows while another program owns it.
 pub const OWNED: &str = "the director owns this character";
 
-/// Marks a character taken from its AI.
-#[derive(Component)]
-pub struct DirectedOwned;
+pub use crate::npc::DirectedOwned;
 
 /// Takes the character of `unit`. A character in a conversation, or whose
 /// loop has ended for another reason, is refused.

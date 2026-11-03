@@ -509,6 +509,12 @@ pub fn leave_player_talk_to(commands: &mut Commands, entity: Entity, state: Opti
     });
 }
 
+/// Marks a character taken from its AI by a host action: its AI makes no
+/// decision, and no conversation recruits or reserves it, until it is given
+/// back.
+#[derive(Component)]
+pub struct DirectedOwned;
+
 /// The ordinary objective owner has accepted cancellation. Dispose only its
 /// movement/Rest execution; Current/Previous content and MemberRng stay owned
 /// by the retained AI instance.
