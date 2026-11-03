@@ -201,6 +201,7 @@ pub mod site_move;
 pub mod site_object_dither;
 pub mod sitemap;
 pub mod sitemap_phenomena;
+pub mod stage_set;
 pub mod stamina_recover_dialog;
 pub mod weather_dialog;
 

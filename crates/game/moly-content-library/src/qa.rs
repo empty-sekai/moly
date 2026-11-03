@@ -51,6 +51,7 @@ pub struct QaDiagnostics<'w, 's> {
     fixture_scenes: Option<Res<'w, moly_features::fixture::FixtureScenesReady>>,
     fixture_materials: Option<Res<'w, moly_features::fixture_material::FixtureMaterialsSwapped>>,
     independent: Option<Res<'w, staging::IndependentSession>>,
+    set: Option<Res<'w, moly_features::stage_set::SetState>>,
     temporary_layout: Option<Res<'w, moly_features::fixture::TemporaryFixtureLayout>>,
     player: Query<
         'w,
@@ -121,15 +122,22 @@ pub fn qa_open(
     }
     qa.elapsed = 0.;
     {
-        let independent = extra.independent.as_ref().map(|session| serde_json::json!({
-            "ticket":session.ticket, "phase":format!("{:?}",session.phase()),
-            "original_site":session.original_site(), "destination":session.destination(),
-            "required_units":session.required_units(), "required_fixtures":session.required_fixtures(),
-            "temporary_actors":session.temporary_actors().iter().map(|entity|format!("{entity:?}")).collect::<Vec<_>>(),
-            "original_player_position":session.original_player_position(),
-            "temporary_layout":extra.temporary_layout.is_some(),
-            "original_actor_count":session.original_actor_count(),
-        }));
+        let set = extra.set.as_deref().and_then(moly_features::stage_set::SetState::session);
+        let set_phase = set.map(|session| format!("{}", session.phase()));
+        let independent = extra.independent.as_ref().map(|session| {
+            serde_json::json!({
+                "ticket":session.ticket, "phase":format!("{:?}",session.phase()),
+                "original_site":set.map(moly_features::stage_set::SetSession::original_site),
+                "destination":set.map(moly_features::stage_set::SetSession::destination),
+                "required_units":set.map(moly_features::stage_set::SetSession::units),
+                "required_fixtures":set.map(|set| set.rows().iter().map(|row|row.fixture_id).collect::<Vec<_>>()),
+                "set_phase":set_phase,
+                "temporary_actors":set.map(|set| set.temporary_actors().iter().map(|entity|format!("{entity:?}")).collect::<Vec<_>>()),
+                "original_player_position":set.and_then(moly_features::stage_set::SetSession::original_player_position),
+                "temporary_layout":extra.temporary_layout.is_some(),
+                "original_actor_count":set.map(moly_features::stage_set::SetSession::original_actor_count),
+            })
+        });
         let source = serde_json::json!({"region":catalog.source_region,"version":catalog.source_version,
             "viewable_furniture":catalog.fixtures.iter().filter(|row|row.source.as_ref().is_some_and(|source|source.exported)).count()});
         let transcript = serde_json::json!({"speaker":extra.window.transcript().0,

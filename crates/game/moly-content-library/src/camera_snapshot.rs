@@ -34,33 +34,6 @@ impl CameraSnapshot {
                 .collect(),
         }
     }
-    /// The temporary courtyard starts in the normal third-person view even
-    /// when the saved original scene was first person. The snapshot retains
-    /// the original lens, FPS memory and avatar visibility for return.
-    pub(super) fn prepare_temporary(world: &mut World) {
-        world.insert_resource(FieldCameraState(moly_features::camera::CameraStateType::Normal));
-        world.remove_resource::<CameraTween>();
-        world.remove_resource::<NormalCameraMemory>();
-        let fov = world
-            .get_resource::<moly_features::camera::CameraSetting>()
-            .map(|setting| setting.fov.to_radians());
-        if let Some(fov) = fov {
-            for mut projection in world
-                .query_filtered::<&mut Projection, With<Camera3d>>()
-                .iter_mut(world)
-            {
-                if let Projection::Perspective(projection) = &mut *projection {
-                    projection.fov = fov;
-                }
-            }
-        }
-        for mut visibility in world
-            .query_filtered::<&mut Visibility, With<moly_features::character::AvatarRoot>>()
-            .iter_mut(world)
-        {
-            visibility.set_if_neq(Visibility::Visible);
-        }
-    }
     pub(super) fn restore(&self, world: &mut World) {
         replace(world, self.model.clone());
         replace(world, self.state);
@@ -135,32 +108,5 @@ mod tests {
             panic!()
         };
         assert_eq!(projection.fov, PerspectiveProjection::default().fov);
-    }
-    #[test]
-    fn temporary_scene_normalizes_fps_without_losing_saved_first_person_return() {
-        let mut world = World::new();
-        world.insert_resource(FieldCameraState(moly_features::camera::CameraStateType::Fps));
-        let player = world
-            .spawn((moly_features::character::AvatarRoot, Visibility::Hidden))
-            .id();
-        let snapshot = CameraSnapshot::capture(&mut world);
-        CameraSnapshot::prepare_temporary(&mut world);
-        assert_eq!(
-            world.resource::<FieldCameraState>().0,
-            moly_features::camera::CameraStateType::Normal
-        );
-        assert_eq!(
-            *world.get::<Visibility>(player).unwrap(),
-            Visibility::Visible
-        );
-        snapshot.restore(&mut world);
-        assert_eq!(
-            world.resource::<FieldCameraState>().0,
-            moly_features::camera::CameraStateType::Fps
-        );
-        assert_eq!(
-            *world.get::<Visibility>(player).unwrap(),
-            Visibility::Hidden
-        );
     }
 }

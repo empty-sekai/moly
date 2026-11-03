@@ -66,7 +66,10 @@ pub use context::refresh_context;
 pub use input::input;
 pub use playback::{dispatch, observe_start, reap_preview_owners};
 pub use qa::qa_open;
-pub use staging::{stage_fixture_talk_observer, prepare_pending, retire_scene};
+pub use staging::{
+    IndependentPhase, IndependentSession, ScenePreview, prepare_pending, push_independent,
+    retire_scene, stage_fixture_talk_observer,
+};
 pub use view::{refresh, setup};
 
 const CHARACTERS: &str = "moly://characters.json";

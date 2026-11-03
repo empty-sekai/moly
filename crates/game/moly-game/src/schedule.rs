@@ -35,6 +35,7 @@ pub fn install(app: &mut App) {
         Update,
         crate::effect_show::anchor_places.before(TransformSystems::Propagate),
     );
+    moly_features::stage_set::install(app);
     content_library::install(app);
     app.add_systems(Startup, content_library::load_capabilities);
     app.add_systems(
@@ -72,6 +73,7 @@ pub fn install(app: &mut App) {
             content_library::build_activity_catalog,
             content_library::refresh_context,
             content_library::prepare_pending,
+            content_library::push_independent,
             content_library::dispatch.run_if(crate::audio_startup::can_play),
         )
             .chain()

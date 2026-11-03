@@ -1,23 +1,27 @@
 //! Scoped scene preparation for the two product modes.
 //!
 //! Current-scene mode borrows only live UID-checked entities. Independent
-//! mode changes to a different room, publishes a temporary layout through the
-//! ordinary fixture pipeline, adds exact cast members through the ordinary NPC
-//! pipeline, and returns through the ordinary site transition. No preview data
-//! is written to the editor or settings store.
+//! mode arranges a stage set in the hub (its room, temporary layout through
+//! the ordinary fixture pipeline, exact cast through the ordinary NPC
+//! pipeline, and way back), waits for the furniture and characters the choice
+//! needs, then stages them. No preview data is written to the editor or
+//! settings store.
 use super::*;
 #[path = "camera_snapshot.rs"]
 mod camera_snapshot;
 use moly_features::{
-    npc::WalkState, npc_objective::ObjectiveFace, player::PlayerControlled, site::GroundEpoch,
-    site::SiteScenesReady, talk::TalkHold,
+    lease::{Holder, Rank},
+    npc::WalkState,
+    npc_objective::ObjectiveFace,
+    player::PlayerControlled,
+    room_appearance::RoomAppearance,
+    site::GroundEpoch,
+    stage_set::{self, SetPhase, SetSite},
+    talk::TalkHold,
 };
 #[cfg(test)]
 use moly_law::fixture::position::layout_type;
 use moly_law::fixture::{Direction, GridPosition};
-
-const SITE_TIMEOUT: f32 = 90.;
-const ASSET_TIMEOUT: f32 = 120.;
 
 #[derive(Clone)]
 struct ActorPose {
@@ -25,11 +29,6 @@ struct ActorPose {
     before: Transform,
     after: Transform,
     npc: bool,
-}
-
-struct ParkedActor {
-    entity: Entity,
-    visibility: Visibility,
 }
 
 #[derive(Resource)]
@@ -40,6 +39,8 @@ pub struct ScenePreview {
     camera: camera_snapshot::CameraSnapshot,
 }
 impl ScenePreview {
+    /// Whether every staged actor stands at its staged pose: natively while
+    /// the choice's content stages, in the bridge before its scene starts.
     pub(super) fn ready(
         &self,
         choice: &PlaybackChoice,
@@ -55,6 +56,8 @@ impl ScenePreview {
     }
 }
 
+/// The library's side of an independent choice: the hub's stage set it is
+/// arranged on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IndependentPhase {
     SwitchingSite,
@@ -63,65 +66,33 @@ pub enum IndependentPhase {
     Experiencing,
     RequestingReturn,
     Returning,
+    Returned,
+    Failed,
 }
 
-#[derive(Resource)]
+#[derive(Resource, Clone)]
 pub struct IndependentSession {
+    /// The library choice the set is staged for.
     pub ticket: u64,
+    /// The hub's set this session asked for, numbered by the set itself.
+    set: u64,
     pub phase: IndependentPhase,
-    original_site: String,
-    destination: String,
-    departure_epoch: u64,
-    return_epoch: u64,
-    elapsed: f32,
-    required_units: Vec<u32>,
-    required_fixtures: Vec<i32>,
-    rows: Vec<moly_features::fixture::EditableFixture>,
-    temporary_actors: Vec<Entity>,
-    parked_actors: Vec<ParkedActor>,
-    original_player: Option<(Entity, Transform)>,
-    original_actors: Vec<(Entity, Transform)>,
-    original_cameras: Vec<(Entity, Transform)>,
-    original_camera_state: Option<camera_snapshot::CameraSnapshot>,
-    original_appearance: moly_features::room_appearance::RoomAppearance,
-    failure: Option<String>,
+    /// The hub's set answered its furniture and cast ready and took the
+    /// library's room surface.
+    set_ready: bool,
 }
+
 impl IndependentSession {
     pub(super) fn phase(&self) -> IndependentPhase {
         self.phase
     }
-    pub(super) fn required_units(&self) -> &[u32] {
-        &self.required_units
-    }
-    pub(super) fn required_fixtures(&self) -> &[i32] {
-        &self.required_fixtures
-    }
-    pub(super) fn temporary_actors(&self) -> &[Entity] {
-        &self.temporary_actors
-    }
-    pub(super) fn original_site(&self) -> &str {
-        &self.original_site
-    }
-    pub(super) fn destination(&self) -> &str {
-        &self.destination
-    }
-    pub(super) fn original_player_position(&self) -> Option<[f32; 3]> {
-        self.original_player
-            .map(|(_, pose)| pose.translation.to_array())
-    }
-    pub(super) fn original_actor_count(&self) -> usize {
-        self.original_actors.len()
-    }
 }
 
+/// Whether the shared owners a staging pass displaces are idle. The
+/// library's own staged preview is not one of them: it is what the library
+/// replaces or takes off itself.
 fn owners_idle(world: &World) -> bool {
-    !moly_features::npc_fixture_activity::preview::active(world)
-        && !world.contains_resource::<moly_features::player_talk::PlayerTalkSession>()
-        && !world.contains_resource::<moly_features::talk::ActiveTalk>()
-        && !world.resource::<PlayerFixtureRuntime>().active()
-        && !moly_features::fixture_gimmick::session::blocks_replacement(
-            world.resource::<moly_features::fixture_gimmick::Gimmicks>(),
-        )
+    stage_set::owners_idle(world, false)
 }
 
 fn viewing_position(
@@ -604,129 +575,41 @@ fn apply_preview(world: &mut World, choice: &PlaybackChoice, actors: Vec<ActorPo
     world.insert_resource(preview);
 }
 
-fn independent_origin(world: &World) -> (u64, bool) {
-    let current_epoch = world.get_resource::<GroundEpoch>().map(|epoch| epoch.0);
-    let settled = current_epoch.is_some() && world.contains_resource::<SiteScenesReady>();
-    (current_epoch.unwrap_or(0), settled)
+/// The holder the library arranges its sets as.
+fn set_requester() -> Holder {
+    Holder::new(CONTENT_LIBRARY, Rank::Human)
 }
 
-fn independent_generation_ready(
-    original_site: &str,
-    destination: &str,
-    departure_epoch: u64,
-    current_epoch: Option<u64>,
-) -> bool {
-    current_epoch.is_some_and(|current| {
-        if original_site == destination {
-            current >= departure_epoch.max(1)
-        } else {
-            current > departure_epoch
-        }
-    })
-}
-
-fn start_independent(world: &mut World, choice: &PlaybackChoice) -> Result<(), String> {
-    if world
-        .get_resource::<moly_features::field_modes::EditSessionActive>()
-        .is_some_and(|editor| editor.is_active())
-    {
-        return Err("请先退出家具布局编辑，再开始独立体验".into());
-    }
-    let (units, fixtures, _) = requirements(world, choice)?;
-    let rows = preview_rows(world.resource::<LibraryCatalog>(), &fixtures, choice.ticket)?;
-    // Independent mode may be requested while the initial site is still
-    // streaming. Do not spend a minute finishing a scene that will immediately
-    // be discarded: epoch 0 means "no settled origin yet" and the destination's
-    // first settled generation will advance to 1.
-    let (epoch, origin_settled) = independent_origin(world);
-    let original_site = world
-        .resource::<moly_features::site::SiteSelection>()
-        .site_type()
-        .to_owned();
-    // Furniture and character actions belong in a clean courtyard, not an
-    // unrelated indoor room. A wallpaper/floor swatch requires an actual room
-    // surface and is the only semantic exception, never a fabricated mesh.
-    let surface = matches!(choice.key, EntryKey::Fixture(id)
+/// Furniture and character actions belong in a clean courtyard, not an
+/// unrelated indoor room. A wallpaper or floor swatch needs an actual room
+/// surface and is the only semantic exception, never a fabricated mesh.
+fn set_site(world: &World, key: EntryKey) -> SetSite {
+    let surface = matches!(key, EntryKey::Fixture(id)
         if world.resource::<LibraryCatalog>().fixture(id)
             .is_some_and(|row| matches!(row.presentation, FixturePresentation::Surface { .. })));
-    let destination = if surface { "first_floor" } else { "home_site" }.to_owned();
-    // A half-loaded origin has no authoritative poses yet. In that case the
-    // normal site pipeline must reseed the player, actors and camera on return.
-    let original_player = origin_settled
-        .then(|| {
-            world
-                .query_filtered::<(Entity, &Transform), With<PlayerControlled>>()
-                .iter(world)
-                .next()
-                .map(|(entity, pose)| (entity, *pose))
-        })
-        .flatten();
-    let original_actors = if origin_settled {
-        world
-            .query_filtered::<(Entity, &Transform), (With<CharacterUnitId>, Without<PlayerControlled>)>()
-            .iter(world)
-            .map(|(entity, pose)| (entity, *pose))
-            .collect()
+    if surface {
+        SetSite::Room
     } else {
-        Vec::new()
-    };
-    let original_camera_state =
-        origin_settled.then(|| camera_snapshot::CameraSnapshot::capture(world));
-    let original_cameras = if origin_settled {
-        world
-            .query_filtered::<(Entity, &Transform), With<Camera3d>>()
-            .iter(world)
-            .map(|(entity, pose)| (entity, *pose))
-            .collect()
-    } else {
-        Vec::new()
-    };
-    camera_snapshot::CameraSnapshot::prepare_temporary(world);
-    if original_site != destination {
-        world.insert_resource(moly_features::site::TemporarySiteChangeRequest(destination.clone()));
-    } else {
-        info!(
-            "[content-library] independent ticket={} reuses current site {} while it settles",
-            choice.ticket, destination
-        );
+        SetSite::Courtyard
     }
-    let original_appearance = world
-        .resource::<moly_features::room_appearance::RoomAppearance>()
-        .clone();
-    let appearance = match choice.key {
-        EntryKey::Fixture(id) => world
-            .resource::<LibraryCatalog>()
-            .fixture(id)
-            .map(|row| row.presentation.clone()),
-        _ => None,
+}
+
+/// Arranges the hub's set for `choice`.
+fn start_independent(world: &mut World, choice: &PlaybackChoice) -> Result<(), String> {
+    let (units, fixtures, _) = requirements(world, choice)?;
+    let rows = preview_rows(world.resource::<LibraryCatalog>(), &fixtures, choice.ticket)?;
+    let request = stage_set::SetRequest {
+        requester: set_requester(),
+        site: set_site(world, choice.key),
+        units,
+        fixtures: rows,
     };
-    if let Some(FixturePresentation::Surface { skin, wall, .. }) = appearance {
-        let mut current = world.resource_mut::<moly_features::room_appearance::RoomAppearance>();
-        if wall {
-            current.wall = skin;
-        } else {
-            current.floor = skin;
-        }
-    }
+    let set = stage_set::StageSet::request(world, request)?;
     world.insert_resource(IndependentSession {
         ticket: choice.ticket,
+        set,
         phase: IndependentPhase::SwitchingSite,
-        original_site,
-        destination,
-        departure_epoch: epoch,
-        return_epoch: 0,
-        elapsed: 0.,
-        required_units: units,
-        required_fixtures: fixtures,
-        rows,
-        temporary_actors: Vec::new(),
-        parked_actors: Vec::new(),
-        original_player,
-        original_actors,
-        original_cameras,
-        original_camera_state,
-        original_appearance,
-        failure: None,
+        set_ready: false,
     });
     library_mut(world, |state| {
         state.scene_owned = true;
@@ -737,75 +620,35 @@ fn start_independent(world: &mut World, choice: &PlaybackChoice) -> Result<(), S
     Ok(())
 }
 
-fn park_background_actors(world: &mut World, required: &[u32]) -> Vec<ParkedActor> {
-    let actors: Vec<_> = world
-        .query_filtered::<(Entity, &CharacterUnitId, &Visibility), Without<PlayerControlled>>()
-        .iter(world)
-        .filter(|(_, unit, _)| !required.contains(&unit.0))
-        .map(|(entity, _, visibility)| (entity, *visibility))
-        .collect();
-    for (entity, _) in &actors {
-        moly_features::npc::stop_for_external_activity(world, *entity);
-        world
-            .entity_mut(*entity)
-            .insert((TalkHold, Visibility::Hidden));
+/// The room surface a wallpaper or floor swatch stages over the room's own.
+fn surface_appearance(world: &World, key: EntryKey) -> Option<RoomAppearance> {
+    let EntryKey::Fixture(id) = key else {
+        return None;
+    };
+    let presentation = world
+        .resource::<LibraryCatalog>()
+        .fixture(id)
+        .map(|row| row.presentation.clone());
+    let Some(FixturePresentation::Surface { skin, wall, .. }) = presentation else {
+        return None;
+    };
+    let mut current = world.resource::<RoomAppearance>().clone();
+    if wall {
+        current.wall = skin;
+    } else {
+        current.floor = skin;
     }
-    actors
-        .into_iter()
-        .map(|(entity, visibility)| ParkedActor { entity, visibility })
-        .collect()
+    Some(current)
 }
 
-fn restore_background_actors(world: &mut World, parked: &[ParkedActor]) {
-    for actor in parked {
-        if let Ok(mut entity) = world.get_entity_mut(actor.entity) {
-            entity.remove::<TalkHold>();
-            entity.insert(actor.visibility);
-        }
-    }
-}
-
-fn restore_original_poses(world: &mut World, session: &IndependentSession) {
-    if let Some(camera) = &session.original_camera_state {
-        camera.restore(world);
-    }
-    if let Some((entity, pose)) = session.original_player {
-        if let Ok(mut player) = world.get_entity_mut(entity) {
-            player.insert((
-                pose,
-                GlobalTransform::from(pose),
-                moly_features::player::PlayerInput::default(),
-                moly_features::npc::MotionPhase::Dwelling { remaining: None },
-            ));
-        }
-    }
-    for (entity, pose) in &session.original_actors {
-        if world.get_entity(*entity).is_err() {
-            continue;
-        }
-        world.entity_mut(*entity).insert(*pose);
-        if let Some(mut walk) = world.get_mut::<WalkState>(*entity) {
-            walk.0.position = pose.translation.to_array();
-            walk.0.forward = (pose.rotation * Vec3::Z).to_array();
-        }
-    }
-    for (entity, pose) in &session.original_cameras {
-        if let Ok(mut camera) = world.get_entity_mut(*entity) {
-            camera.insert(*pose);
-        }
-    }
-}
-
-fn fail_independent(
-    world: &mut World,
-    session: &mut IndependentSession,
-    reason: impl Into<String>,
-) {
-    let reason = reason.into();
-    session.failure = Some(playback::human_playback_failure(&reason));
-    session.phase = IndependentPhase::RequestingReturn;
-    session.elapsed = 0.;
-    library_mut(world, |state| playback::fail(state, &reason));
+/// The library's choice a set's ticket names, pending or active.
+fn choice_of(world: &World, ticket: u64) -> Option<PlaybackChoice> {
+    let state = world.resource::<ContentLibrary>();
+    state
+        .pending
+        .clone()
+        .or_else(|| state.active.as_ref().map(|active| active.choice.clone()))
+        .filter(|choice| choice.ticket == ticket)
 }
 
 fn matching_fixture_targets(world: &mut World, required: &[i32]) -> Option<Vec<FixtureTarget>> {
@@ -833,33 +676,77 @@ fn matching_fixture_targets(world: &mut World, required: &[i32]) -> Option<Vec<F
     Some(found)
 }
 
-fn actors_ready(world: &mut World, required: &[u32]) -> bool {
-    let rows: Vec<_> = world
-        .query::<(Entity, &CharacterUnitId, &NpcActions)>()
-        .iter(world)
-        .map(|(entity, unit, actions)| (entity, unit.0, actions.ready()))
-        .collect();
-    required.iter().all(|unit| {
-        rows.iter().any(|(entity, id, ready)| {
-            id == unit
-                && *ready
-                && world
-                    .get::<moly_features::character::MotionDriver>(*entity)
-                    .is_some()
-        })
-    })
+/// Stages the choice a set's ticket names on the set's published furniture:
+/// its target, then the planned cast and observer poses. `None` while the
+/// placed furniture is not there yet.
+fn stage_choice(world: &mut World, ticket: u64, set: u64) -> Option<bool> {
+    // A staged preview is placed once per set.
+    if world.contains_resource::<ScenePreview>() {
+        return None;
+    }
+    let mut choice = choice_of(world, ticket)?;
+    let (_, fixtures, _) = match requirements(world, &choice) {
+        Ok(required) => required,
+        Err(reason) => {
+            lose_independent(world, set, &reason);
+            return Some(false);
+        }
+    };
+    let targets = matching_fixture_targets(world, &fixtures)?;
+    choice.target = targets.first().cloned();
+    library_mut(world, |state| state.pending = Some(choice.clone()));
+    // Waiting for the content's own resources reports why it cannot go on.
+    let failed = world.resource::<ContentLibrary>().last_error.clone();
+    if let Some(reason) = failed {
+        lose_independent(world, set, &reason);
+        return Some(false);
+    }
+    match plan_choice(world, &choice) {
+        Ok(actors) => {
+            apply_preview(world, &choice, actors);
+            Some(true)
+        }
+        Err(reason) => {
+            lose_independent(world, set, &reason);
+            Some(false)
+        }
+    }
 }
 
-fn reserve_required_actors(world: &mut World, required: &[u32]) {
-    let actors: Vec<_> = world
-        .query::<(Entity, &CharacterUnitId)>()
-        .iter(world)
-        .filter(|(_, unit)| required.contains(&unit.0))
-        .map(|(entity, _)| entity)
-        .collect();
-    for entity in actors {
-        moly_features::npc::stop_for_external_activity(world, entity);
-    }
+/// Plans the choice's cast and observer poses on the set; a failure is
+/// reported to the caller by name, never failed here.
+fn plan_choice(world: &mut World, choice: &PlaybackChoice) -> Result<Vec<ActorPose>, String> {
+    plan_current(world, choice)
+}
+
+/// Ends an independent choice by name: the library fails it and the set
+/// returns and restores the original scene.
+fn lose_independent(world: &mut World, set: u64, reason: &str) {
+    library_mut(world, |state| playback::fail(state, reason));
+    stage_set::StageSet::fail(
+        world,
+        set,
+        playback::human_playback_failure(reason),
+    );
+}
+
+/// Ends the independent session once its set has ended and the library's
+/// staged poses come off. The status stays as published: before the way back,
+/// or the failure that ended the set.
+fn finish_independent(world: &mut World) {
+    world.remove_resource::<ScenePreview>();
+}
+
+/// Whether the library still holds a choice of its own on the set: the
+/// choice is waiting, running, or finished and kept for a replay or the next
+/// choice. A stop takes it off once its owners are idle.
+fn plays_choice(world: &World, ticket: u64) -> bool {
+    let state = world.resource::<ContentLibrary>();
+    state.pending.as_ref().is_some_and(|choice| choice.ticket == ticket)
+        || state
+            .active
+            .as_ref()
+            .is_some_and(|active| active.choice.ticket == ticket)
 }
 
 fn restore_preview(world: &mut World) {
@@ -896,369 +783,287 @@ fn restore_preview(world: &mut World) {
     );
 }
 
-fn drive_independent(world: &mut World) {
-    let Some(mut session) = world.remove_resource::<IndependentSession>() else {
-        return;
+/// The replacement path: a pending independent choice with a ticket of its
+/// own, while this set already stands, reuses it in place when it needs the
+/// same furniture and is not a surface. `true` hands the frame to the new
+/// choice, the session already put back.
+fn reuse_set(
+    world: &mut World,
+    session: &IndependentSession,
+    phase: &Option<SetPhase>,
+) -> bool {
+    let Some(plan) = replacement(world, session, phase) else {
+        return false;
     };
-    session.elapsed += world.resource::<Time>().delta_secs();
-    // Consecutive entries using the same fixture set need no site switch,
-    // layout rebuild or character reload. Wait for the old native owners to
-    // release, then transfer admission to the new generation in place.
-    let replacement = world
+    if !owners_idle(world) {
+        world.insert_resource(session.clone());
+        return true;
+    }
+    restore_preview(world);
+    // The cast is swapped before anything is staged, so a spawn that fails
+    // leaves the set to be restored rather than staged with the old cast.
+    if let Err(reason) = stage_set::StageSet::recast(world, session.set, plan.units) {
+        lose_independent(world, session.set, &reason);
+        // The session stays to drive the set back.
+        world.insert_resource(session.clone());
+        return true;
+    }
+    let mut next = plan.choice;
+    next.target = matching_fixture_targets(world, &plan.fixtures)
+        .and_then(|targets| targets.first().cloned());
+    library_mut(world, |state| {
+        state.active = None;
+        state.pending = Some(next.clone());
+        state.stopping = false;
+        state.status = "已复用独立场景，正在切换内容…".into();
+        state.changed();
+    });
+    let mut reused = session.clone();
+    reused.ticket = next.ticket;
+    // The re-cast set loads its new cast again before it stands.
+    reused.set_ready = false;
+    reused.phase = IndependentPhase::LoadingContent;
+    info!(
+        "[content-library] reused independent world ticket={} fixtures={:?}",
+        reused.ticket, plan.fixtures
+    );
+    world.insert_resource(reused);
+    true
+}
+
+/// What the replacement path swaps in, and the choice it stages.
+struct Replacement {
+    choice: PlaybackChoice,
+    units: Vec<u32>,
+    fixtures: Vec<i32>,
+}
+
+/// The pending independent choice this set can take in place: the same
+/// furniture, no surface, and a set standing, loading or playing. Its target
+/// is left to the caller, which is the first to see the new furniture.
+fn replacement(
+    world: &World,
+    session: &IndependentSession,
+    phase: &Option<SetPhase>,
+) -> Option<Replacement> {
+    if !matches!(
+        session.phase,
+        IndependentPhase::Staged
+            | IndependentPhase::Experiencing
+            | IndependentPhase::LoadingContent
+    ) {
+        return None;
+    }
+    if !phase
+        .as_ref()
+        .is_some_and(|phase| phase.is_running())
+    {
+        return None;
+    }
+    let choice = world
         .resource::<ContentLibrary>()
         .pending
         .clone()
         .filter(|choice| {
             choice.mode == ExperienceMode::Independent && choice.ticket != session.ticket
-        });
-    if let Some(mut choice) = replacement.filter(|_| {
-        matches!(
-            session.phase,
-            IndependentPhase::Staged
-                | IndependentPhase::Experiencing
-                | IndependentPhase::LoadingContent
-        )
-    }) {
-        if let Ok((units, fixtures, _)) = requirements(world, &choice) {
-            let compatible = fixtures.len() == session.required_fixtures.len()
-                && fixtures
-                    .iter()
-                    .all(|id| session.required_fixtures.contains(id))
-                && !matches!(choice.key, EntryKey::Fixture(id) if world.resource::<LibraryCatalog>().fixture(id)
-                    .is_some_and(|row|matches!(row.presentation, FixturePresentation::Surface { .. })));
-            if compatible {
-                if !owners_idle(world) {
-                    world.insert_resource(session);
-                    return;
-                }
-                restore_preview(world);
-                restore_background_actors(world, &session.parked_actors);
-                session.parked_actors = park_background_actors(world, &units);
-                match moly_features::npc::spawn_temporary_units(world, &units) {
-                    Ok(actors) => session.temporary_actors.extend(actors),
-                    Err(reason) => {
-                        fail_independent(world, &mut session, reason);
-                        world.insert_resource(session);
-                        return;
-                    }
-                }
-                choice.target = matching_fixture_targets(world, &fixtures)
-                    .and_then(|targets| targets.first().cloned());
-                session.ticket = choice.ticket;
-                session.required_units = units;
-                session.phase = IndependentPhase::LoadingContent;
-                session.elapsed = 0.;
-                session.failure = None;
-                library_mut(world, |state| {
-                    state.active = None;
-                    state.pending = Some(choice);
-                    state.stopping = false;
-                    state.status = "已复用独立场景，正在切换内容…".into();
-                    state.changed();
-                });
-                info!(
-                    "[content-library] reused independent world ticket={} fixtures={:?}",
-                    session.ticket, fixtures
-                );
-            }
-        }
+        })?;
+    let set = stage_set::StageSet::session(world)?;
+    if set.ticket() != session.set {
+        return None;
     }
-    let state_ticket = {
-        let state = world.resource::<ContentLibrary>();
-        state
-            .pending
-            .as_ref()
-            .or(state.active.as_ref().map(|active| &active.choice))
-            .map(|choice| choice.ticket)
+    let (units, fixtures, _) = requirements(world, &choice).ok()?;
+    let surface = matches!(choice.key, EntryKey::Fixture(id)
+        if world.resource::<LibraryCatalog>().fixture(id)
+            .is_some_and(|row| matches!(row.presentation, FixturePresentation::Surface { .. })));
+    let compatible = !surface
+        && fixtures.len() == set.rows().len()
+        && fixtures
+            .iter()
+            .all(|id| set.rows().iter().any(|row| row.fixture_id == *id));
+    if !compatible {
+        return None;
+    }
+    Some(Replacement {
+        choice,
+        units,
+        fixtures,
+    })
+}
+
+fn set_restore(world: &mut World, set: u64) {
+    stage_set::StageSet::restore(world, set);
+}
+
+fn set_drive(world: &mut World, set: u64) {
+    stage_set::StageSet::drive(
+        world,
+        set,
+        Some(stage_set::Content {
+            appearance: None,
+            held: world.contains_resource::<ScenePreview>(),
+        }),
+    );
+}
+
+/// The library's steps for an independent choice through the hub's set, run
+/// every frame whatever the pending choice is. The library waits for the
+/// furniture and characters the choice needs and places it; while the choice
+/// plays, the set keeps it. A new pending choice with the same furniture
+/// reuses the set in place. When the choice ends, or another program takes
+/// the set over, the library takes its staged poses off and hands the scene
+/// over; the set returns and restores the original scene.
+fn drive_independent(world: &mut World) {
+    let Some(mut session) = world.remove_resource::<IndependentSession>() else {
+        return;
     };
-    if !matches!(
-        session.phase,
-        IndependentPhase::RequestingReturn | IndependentPhase::Returning
-    ) && state_ticket != Some(session.ticket)
+    let ticket = session.ticket;
+    let set = session.set;
+    let phase = stage_set::StageSet::phase(world, set).cloned();
+    if let Some(SetPhase::Failed(reason)) = &phase {
+        // A set that lost itself fails the choice by name, unless the
+        // library failed it already.
+        if session.phase != IndependentPhase::RequestingReturn {
+            lose_independent(world, set, reason);
+        }
+        let reason = reason.clone();
+        library_mut(world, |state| {
+            state.stopping = false;
+            state.scene_owned = false;
+            state.status = format!("{reason}；已恢复原场景");
+            state.changed();
+        });
+        stage_set::StageSet::discard(world, set);
+        finish_independent(world);
+        return;
+    }
+    if phase == Some(SetPhase::Returned) {
+        library_mut(world, |state| {
+            state.stopping = false;
+            state.scene_owned = false;
+            state.status = "已返回原场景，位置与临时内容均已恢复".into();
+            state.changed();
+        });
+        info!("[content-library] independent ticket={ticket} returned with set {set}");
+        stage_set::StageSet::discard(world, set);
+        finish_independent(world);
+        return;
+    }
+    if reuse_set(world, &session, &phase) {
+        return;
+    }
+    if phase.is_some()
+        && !matches!(
+            session.phase,
+            IndependentPhase::RequestingReturn | IndependentPhase::Returning
+        )
+        && !plays_choice(world, ticket)
     {
         session.phase = IndependentPhase::RequestingReturn;
-        session.elapsed = 0.;
-    }
-    match session.phase {
-        IndependentPhase::SwitchingSite => {
-            let selection_ready = world
-                .get_resource::<moly_features::site::SiteSelection>()
-                .is_some_and(|selection| selection.site_type() == session.destination);
-            let epoch = world.get_resource::<GroundEpoch>().map(|epoch| epoch.0);
-            let site_ready = independent_generation_ready(
-                &session.original_site,
-                &session.destination,
-                session.departure_epoch,
-                epoch,
-            ) && world.contains_resource::<SiteScenesReady>()
-                && world.contains_resource::<moly_features::site_material::SiteMaterialsSwapped>()
-                && world
-                    .get_resource::<moly_features::fixture::FixturePlacements>()
-                    .is_some_and(|layout| layout.site_type() == session.destination);
-            if selection_ready && site_ready {
-                if let Err(reason) = moly_features::fixture::install_temporary_layout(world, &session.rows)
-                {
-                    fail_independent(world, &mut session, reason);
-                } else {
-                    session.parked_actors = park_background_actors(world, &session.required_units);
-                    session.phase = IndependentPhase::LoadingContent;
-                    session.elapsed = 0.;
-                    library_mut(world, |state| {
-                        state.status = "空场景已就绪，正在载入所需角色与家具…".into();
-                        state.changed();
-                    });
-                }
-            } else if session.elapsed >= SITE_TIMEOUT {
-                fail_independent(world, &mut session, "无法在限定时间内准备独立场景");
-            }
-        }
-        IndependentPhase::LoadingContent => {
-            if let Some(failure) = world.get_resource::<moly_features::fixture::FixtureLoadFailure>() {
-                let reason = failure.0.clone();
-                fail_independent(world, &mut session, reason);
-                world.insert_resource(session);
-                return;
-            }
-            let controller_ready = match moly_features::fixture_gimmick::catalog_stream::ready_for(
-                world,
-                &session.required_fixtures,
-            ) {
-                Ok(ready) => ready,
-                Err(reason) => {
-                    fail_independent(world, &mut session, reason);
-                    world.insert_resource(session);
-                    return;
-                }
-            };
-            let epoch = world.get_resource::<GroundEpoch>().map(|epoch| epoch.0);
-            let room_status = world.resource::<moly_features::room_appearance::RoomAppearanceState>();
-            if world.resource::<moly_features::site::SiteSelection>().is_room() {
-                if let Some(error) = &room_status.error {
-                    let reason = error.clone();
-                    fail_independent(world, &mut session, reason);
-                    world.insert_resource(session);
-                    return;
-                }
-            }
-            let room_ready = !world.resource::<moly_features::site::SiteSelection>().is_room()
-                || world
-                    .resource::<moly_features::room_appearance::RoomAppearanceState>()
-                    .ready;
-            let scene_ready = room_ready
-                && world.contains_resource::<moly_features::site_material::SiteMaterialsSwapped>()
-                && epoch.is_some_and(|epoch| {
-                    world.contains_resource::<moly_features::fixture::FixtureScenesReady>()
-                        && world
-                            .contains_resource::<moly_features::fixture_material::FixtureMaterialsSwapped>()
-                        && world.get_resource::<ObjectiveFace>().is_some_and(|face| {
-                            face.is_fresh(epoch)
-                                && world
-                                    .get_resource::<moly_features::walk_face::WalkFace>()
-                                    .is_some_and(|navigation| {
-                                        navigation.layout_revision()
-                                            == world
-                                                .resource::<moly_features::fixture::FixtureLayoutRevision>()
-                                                .0
-                                            && face.navigation_generation()
-                                                == navigation.generation()
-                                    })
-                        })
-                });
-            if scene_ready {
-                if session.temporary_actors.is_empty() {
-                    match moly_features::npc::spawn_temporary_units(world, &session.required_units) {
-                        Ok(actors) => session.temporary_actors = actors,
-                        Err(reason) => fail_independent(world, &mut session, reason),
-                    }
-                }
-                reserve_required_actors(world, &session.required_units);
-                if session.phase == IndependentPhase::LoadingContent
-                    && actors_ready(world, &session.required_units)
-                    && controller_ready
-                {
-                    if let Some(targets) =
-                        matching_fixture_targets(world, &session.required_fixtures)
-                    {
-                        let mut choice = world
-                            .resource::<ContentLibrary>()
-                            .pending
-                            .clone()
-                            .filter(|choice| choice.ticket == session.ticket);
-                        if let Some(choice) = &mut choice {
-                            choice.target = targets.first().cloned();
-                            library_mut(world, |state| state.pending = Some(choice.clone()));
-                            match plan_current(world, choice) {
-                                Ok(actors) => {
-                                    apply_preview(world, choice, actors);
-                                    session.phase = IndependentPhase::Staged;
-                                    session.elapsed = 0.;
-                                }
-                                Err(reason) => fail_independent(world, &mut session, reason),
-                            }
-                        }
-                    }
-                }
-            }
-            if session.phase == IndependentPhase::LoadingContent && session.elapsed >= ASSET_TIMEOUT
-            {
-                fail_independent(
-                    world,
-                    &mut session,
-                    "所需角色或家具没有在限定时间内准备完成",
-                );
-            }
-        }
-        IndependentPhase::Staged => {
-            let state = world.resource::<ContentLibrary>();
-            if state
-                .pending
-                .as_ref()
-                .is_none_or(|choice| choice.ticket != session.ticket)
-                && state
-                    .active
-                    .as_ref()
-                    .is_none_or(|active| active.choice.ticket != session.ticket)
-            {
-                if let Some(reason) = state.last_error.clone() {
-                    fail_independent(world, &mut session, reason);
-                } else {
-                    session.phase = IndependentPhase::RequestingReturn;
-                    session.elapsed = 0.;
-                }
-                world.insert_resource(session);
-                return;
-            }
-            if session.elapsed >= ASSET_TIMEOUT {
-                let reason = world
-                    .resource::<ContentLibrary>()
-                    .last_error
-                    .clone()
-                    .unwrap_or_else(|| "角色站位未能完成同步，已取消这次体验".into());
-                fail_independent(world, &mut session, reason);
-            }
-            let state = world.resource::<ContentLibrary>();
+        restore_preview(world);
+        library_mut(world, |state| {
             if state
                 .active
                 .as_ref()
-                .is_some_and(|active| active.choice.ticket == session.ticket)
+                .is_some_and(|active| active.choice.ticket == ticket)
             {
-                session.phase = IndependentPhase::Experiencing;
-                session.elapsed = 0.;
+                state.active = None;
             }
-        }
-        IndependentPhase::Experiencing => {
-            let state = world.resource::<ContentLibrary>();
-            if state
-                .pending
-                .as_ref()
-                .is_none_or(|choice| choice.ticket != session.ticket)
-                && state
-                    .active
-                    .as_ref()
-                    .is_none_or(|active| active.choice.ticket != session.ticket)
+            state.stopping = false;
+            // The scene stays the library's until the set is back: the
+            // way back to the same site reloads it only while it is owned.
+            state.status = "独立场景已结束，位置与临时内容均已恢复".into();
+            state.changed();
+        });
+    }
+    // Nothing below starts the way back: the returning phase only advances
+    // the set's own steps, without which it would never come back.
+    match session.phase {
+        IndependentPhase::SwitchingSite | IndependentPhase::LoadingContent => {
+            if !session.set_ready {
+                let content = stage_set::Content {
+                    appearance: choice_of(world, ticket)
+                        .and_then(|choice| surface_appearance(world, choice.key)),
+                    held: world.contains_resource::<ScenePreview>(),
+                };
+                session.set_ready = stage_set::StageSet::finish(world, set, content);
+            }
+            if session.set_ready {
+                match stage_choice(world, ticket, set) {
+                    Some(true) => session.phase = IndependentPhase::Staged,
+                    Some(false) => session.phase = IndependentPhase::RequestingReturn,
+                    None => {
+                        session.phase = IndependentPhase::LoadingContent;
+                        library_mut(world, |state| {
+                            state.status = "空场景已就绪，正在载入所需角色与家具…".into();
+                            state.changed();
+                        });
+                    }
+                }
+            } else if session.phase == IndependentPhase::SwitchingSite
+                && phase != Some(SetPhase::SwitchingSite)
             {
-                session.phase = IndependentPhase::RequestingReturn;
-                session.elapsed = 0.;
-            }
-        }
-        IndependentPhase::RequestingReturn => {
-            if session.failure.is_none() {
-                session.failure = world.resource::<ContentLibrary>().last_error.clone();
-            }
-            if owners_idle(world) {
-                if world
-                    .resource::<ContentLibrary>()
-                    .active
-                    .as_ref()
-                    .is_some_and(|active| active.choice.ticket == session.ticket)
-                {
-                    library_mut(world, |state| state.active = None);
-                }
-                restore_preview(world);
-                restore_background_actors(world, &session.parked_actors);
-                session.parked_actors.clear();
-                moly_features::npc::remove_temporary_units(world, &session.temporary_actors);
-                session.temporary_actors.clear();
-                // Withdraw an unconsumed preview before either rollback path.
-                // Otherwise cancellation before read_switch could switch later.
-                world.remove_resource::<moly_features::site::TemporarySiteChangeRequest>();
-                world.insert_resource(session.original_appearance.clone());
-                let never_left = world
-                    .get_resource::<moly_features::site::SiteSelection>()
-                    .is_some_and(|selection| selection.site_type() == session.original_site)
-                    && world
-                        .get_resource::<GroundEpoch>()
-                        .is_some_and(|epoch| epoch.0 == session.departure_epoch)
-                    && !world.contains_resource::<moly_features::site::TemporarySiteActive>()
-                    && !world.contains_resource::<moly_features::fixture::TemporaryFixtureLayout>();
-                if never_left {
-                    restore_original_poses(world, &session);
-                    library_mut(world, |state| {
-                        state.stopping = false;
-                        state.scene_owned = false;
-                        state.status = session
-                            .failure
-                            .as_ref()
-                            .map(|reason| format!("{reason}；原场景未被修改"))
-                            .unwrap_or_else(|| "已留在原场景，未保存任何临时内容".into());
-                        state.changed();
-                    });
-                    return;
-                }
-                session.return_epoch = world
-                    .get_resource::<GroundEpoch>()
-                    .map(|epoch| epoch.0)
-                    .unwrap_or(0);
-                world.remove_resource::<moly_features::site::TemporarySiteChangeRequest>();
-                world.insert_resource(moly_features::site::SiteChangeRequest(
-                    session.original_site.clone(),
-                ));
-                session.phase = IndependentPhase::Returning;
-                session.elapsed = 0.;
+                session.phase = IndependentPhase::LoadingContent;
                 library_mut(world, |state| {
-                    state.status = "正在返回原场景并恢复位置…".into();
+                    state.status = "空场景已就绪，正在载入所需角色与家具…".into();
                     state.changed();
                 });
+            }
+        }
+        IndependentPhase::Staged => {
+            if world
+                .resource::<ContentLibrary>()
+                .active
+                .as_ref()
+                .is_some_and(|active| active.choice.ticket == ticket && active.started)
+            {
+                session.phase = IndependentPhase::Experiencing;
+            }
+        }
+        IndependentPhase::Experiencing => {}
+        IndependentPhase::RequestingReturn => {
+            if owners_idle(world) {
+                let withdrawn = !world.resource::<ContentLibrary>().status.ends_with("已恢复原场景");
+                if withdrawn {
+                    library_mut(world, |state| {
+                        if state
+                            .active
+                            .as_ref()
+                            .is_some_and(|active| active.choice.ticket == ticket)
+                        {
+                            state.active = None;
+                        }
+                        state.status = "正在返回原场景并恢复位置…".into();
+                        state.changed();
+                    });
+                }
+                set_restore(world, set);
+                // The library's own content is done: the set's owners were
+                // idle as it was asked to go back.
+                session.phase = IndependentPhase::Returning;
             }
         }
         IndependentPhase::Returning => {
-            let epoch = world.get_resource::<GroundEpoch>().map(|epoch| epoch.0);
-            let restored = world
-                .get_resource::<moly_features::site::SiteSelection>()
-                .is_some_and(|selection| selection.site_type() == session.original_site)
-                && epoch.is_some_and(|epoch| epoch > session.return_epoch)
-                && world.contains_resource::<SiteScenesReady>()
-                && world
-                    .get_resource::<ObjectiveFace>()
-                    .is_some_and(|face| face.is_fresh(epoch.unwrap()));
-            if restored {
-                restore_original_poses(world, &session);
-                library_mut(world, |state| {
-                    state.stopping = false;
-                    state.scene_owned = false;
-                    state.status = session
-                        .failure
-                        .as_ref()
-                        .map(|reason| format!("{reason}；已恢复原场景"))
-                        .unwrap_or_else(|| "已返回原场景，位置与临时内容均已恢复".into());
-                    state.changed();
-                });
-                info!(
-                    "[content-library] independent ticket={} restored site={}",
-                    session.ticket, session.original_site
-                );
-                return;
-            }
-            if session.elapsed >= SITE_TIMEOUT && session.failure.is_none() {
-                session.failure = Some("返回原场景仍在等待资源；不会保存临时布局".into());
-            }
+            // The way back runs on the set's own steps, whatever the owners
+            // report: a set that stops being driven never ends.
+            set_drive(world, set);
         }
+        IndependentPhase::Returned | IndependentPhase::Failed => {}
     }
-    world.insert_resource(session);
+    if stage_set::StageSet::phase(world, set).is_some() {
+        world.insert_resource(session);
+    } else {
+        finish_independent(world);
+    }
+}
+
+/// The library's steps for an independent set, run every frame whatever the
+/// pending choice is: another program may finish with a set while the library
+/// owns it.
+pub fn push_independent(world: &mut World) {
+    drive_independent(world);
 }
 
 pub fn prepare_pending(world: &mut World) {
-    drive_independent(world);
     let state = world.resource::<ContentLibrary>();
     let Some(choice) = state.pending.clone().filter(|_| state.cleanup_frames == 0) else {
         return;
@@ -1268,7 +1073,12 @@ pub fn prepare_pending(world: &mut World) {
     }
     match choice.mode {
         ExperienceMode::Independent => {
-            if !world.contains_resource::<IndependentSession>() {
+            // A set still held for another ticket hands the choice over in
+            // its own steps; a new set is arranged only when none is held.
+            let held = world
+                .get_resource::<stage_set::SetState>()
+                .is_some_and(|set| set.session().is_some());
+            if !held {
                 if let Err(reason) = start_independent(world, &choice) {
                     library_mut(world, |state| playback::fail(state, &reason));
                 }
@@ -1294,6 +1104,7 @@ pub fn prepare_pending(world: &mut World) {
 }
 
 pub fn retire_scene(world: &mut World) {
+    // An independent session keeps its own preview until its set ends.
     if world.contains_resource::<IndependentSession>() {
         return;
     }
@@ -1439,59 +1250,6 @@ mod tests {
         assert!(viewing_position(Vec3::ZERO, yaw, &[], |_| None).is_none());
     }
     #[test]
-    fn independent_origin_allows_pre_settle_switch_without_snapshotting_partial_state() {
-        let mut world = World::new();
-        assert_eq!(independent_origin(&world), (0, false));
-
-        world.insert_resource(SiteScenesReady);
-        assert_eq!(independent_origin(&world), (0, false));
-
-        world.insert_resource(GroundEpoch(4));
-        assert_eq!(independent_origin(&world), (4, true));
-
-        world.remove_resource::<SiteScenesReady>();
-        assert_eq!(independent_origin(&world), (4, false));
-    }
-
-    #[test]
-    fn same_site_independent_preview_reuses_the_current_generation() {
-        assert!(independent_generation_ready(
-            "home_site",
-            "home_site",
-            4,
-            Some(4)
-        ));
-        assert!(independent_generation_ready(
-            "home_site",
-            "home_site",
-            0,
-            Some(1)
-        ));
-        assert!(!independent_generation_ready(
-            "home_site",
-            "home_site",
-            0,
-            None
-        ));
-    }
-
-    #[test]
-    fn cross_site_independent_preview_requires_a_new_generation() {
-        assert!(!independent_generation_ready(
-            "grassland",
-            "home_site",
-            4,
-            Some(4)
-        ));
-        assert!(independent_generation_ready(
-            "grassland",
-            "home_site",
-            4,
-            Some(5)
-        ));
-    }
-
-    #[test]
     fn blocked_navigation_never_fabricates_a_position() {
         assert!(viewing_position(Vec3::ZERO, Quat::IDENTITY, &[], |_| None).is_none());
     }
@@ -1574,11 +1332,11 @@ mod lifecycle_regressions {
     #[test]
     fn scene_readiness_is_not_the_consumed_camera_or_scene_event_latch() {
         let mut world = World::new();
-        world.insert_resource(SiteScenesReady);
+        world.insert_resource(moly_features::site::SiteScenesReady);
         world.insert_resource(GroundEpoch(2));
         assert!(!world.contains_resource::<moly_features::site::SiteReady>());
         assert!(!world.contains_resource::<moly_features::inactive_nodes::SiteSettled>());
-        assert!(world.contains_resource::<SiteScenesReady>());
+        assert!(world.contains_resource::<moly_features::site::SiteScenesReady>());
         assert_eq!(world.resource::<GroundEpoch>().0, 2);
     }
     #[test]

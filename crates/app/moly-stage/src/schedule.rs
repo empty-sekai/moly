@@ -39,6 +39,7 @@ pub fn install(app: &mut App) {
                 .before(player::advance)
                 .before(player_avatar::drive),
         );
+    moly_features::stage_set::install(app);
     content_library::install(app);
     app.add_systems(
         Update,
@@ -81,6 +82,7 @@ pub fn install(app: &mut App) {
             content_library::build_activity_catalog,
             content_library::refresh_context,
             content_library::prepare_pending,
+            content_library::push_independent,
             content_library::dispatch.run_if(crate::audio_startup::can_play),
         )
             .chain()
