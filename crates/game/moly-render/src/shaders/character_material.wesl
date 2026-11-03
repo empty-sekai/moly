@@ -152,6 +152,38 @@ fn vertex(mesh: Vertex) -> CharacterVertexOutput {
 
 // ---- 片元共用件 ----
 
+// Colour domain. The source program runs in the gamma colour space: every
+// texel and every colour uniform is used as its stored value. Here the
+// colour textures are loaded as sRGB (the hardware decodes them on sampling)
+// and the colour target is sRGB (the hardware encodes on writing). So each
+// sampled rgb, and each sampled mask channel, is encoded back to its stored
+// value first, the whole chain then computes on stored values like the
+// source, and the result is decoded once before it is written, which the
+// hardware's encoding undoes. The colour uniforms are stored values already
+// and are not converted. Alpha is never converted by the hardware, so it is
+// left as sampled.
+
+// Sampled value -> stored value (undoes the hardware's sRGB decoding).
+fn srgb_format_encode(linear: vec3<f32>) -> vec3<f32> {
+    let x = max(linear, vec3<f32>(0.0));
+    let hi = 1.055 * pow(x, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
+    return select(hi, x * 12.92, x <= vec3<f32>(0.0031308));
+}
+
+fn srgb_format_encode_scalar(linear: f32) -> f32 {
+    let x = max(linear, 0.0);
+    let hi = 1.055 * pow(x, 1.0 / 2.4) - 0.055;
+    return select(hi, x * 12.92, x <= 0.0031308);
+}
+
+// Stored value -> the value handed to the sRGB target. The target cannot
+// hold values outside 0..1, so clamping first equals the hardware's clamp.
+fn srgb_format_decode(stored: vec3<f32>) -> vec3<f32> {
+    let e = clamp(stored, vec3<f32>(0.0), vec3<f32>(1.0));
+    let hi = pow((e + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return select(hi, e / 12.92, e <= vec3<f32>(0.04045));
+}
+
 // 平滑支共用的 x²(3 − 2x)，按源的两步乘加次序。
 fn smoothstep_poly(x: f32) -> f32 {
     let t = x * -2.0 + 3.0;
@@ -195,7 +227,8 @@ fn apply_fog(rgb: vec3<f32>, world_y: f32, fog_ramp: f32) -> vec3<f32> {
 fn fragment(in: CharacterVertexOutput) -> @location(0) vec4<f32> {
     // 主贴图带全局 mip 偏置采样（源的全局量，整支管线的采样都偏置）。
     let bias = env.mip_bias.x;
-    let albedo = textureSampleBias(main_tex, main_sampler, in.uv, bias);
+    let sampled = textureSampleBias(main_tex, main_sampler, in.uv, bias);
+    let albedo = vec4<f32>(srgb_format_encode(sampled.rgb), sampled.a);
 
     // 抖动 discard：先 _UseDither 门，再 _DitherAlpha 减阈值低于零丢弃。
     if params.usage_and_eyebrow.w > 0.0 {
@@ -209,14 +242,20 @@ fn fragment(in: CharacterVertexOutput) -> @location(0) vec4<f32> {
     }
 
     // 眉纹理 r；discard 门槛低于零丢弃，恰等于门槛不丢。
-    @if(CHARACTER_EYEBROW) let eyebrow_r = textureSampleBias(eyebrow_tex, eyebrow_sampler, in.uv, bias).r;
+    @if(CHARACTER_EYEBROW) let eyebrow_r = srgb_format_encode_scalar(
+        textureSampleBias(eyebrow_tex, eyebrow_sampler, in.uv, bias).r,
+    );
     @if(CHARACTER_EYEBROW) if eyebrow_r - params.usage_and_eyebrow.y < 0.0 {
         discard;
     }
 
     // body 遮罩采样无条件执行（源同形）；face 槽的采样值被 switch 钉死、
     // 不进有效支路。
-    let body_mask = textureSampleBias(body_mask_tex, body_mask_sampler, in.uv, bias).xy;
+    let body_mask_sample = textureSampleBias(body_mask_tex, body_mask_sampler, in.uv, bias);
+    let body_mask = vec2<f32>(
+        srgb_format_encode_scalar(body_mask_sample.x),
+        srgb_format_encode_scalar(body_mask_sample.y),
+    );
 
     // mask 的槽 switch：1 = body 槽透传遮罩、0 = face 槽钉成 (1, 0)、
     // 其余值落默认 (0, 0)。
@@ -290,5 +329,5 @@ fn fragment(in: CharacterVertexOutput) -> @location(0) vec4<f32> {
 
     // brightness 统一乘 rgb 与 alpha 两边。
     let brightness = params.brightness.x;
-    return vec4<f32>(rgb * brightness, alpha * brightness);
+    return vec4<f32>(srgb_format_decode(rgb * brightness), alpha * brightness);
 }
