@@ -186,7 +186,7 @@ fn advance_social(world: &mut World, mut plan: SocialPlan, dt: f32, now: f32, ca
         return;
     }
     for turn in &mut plan.turns {
-        if world.get::<NpcActions>(turn.entity).is_some_and(|s|s.current == NpcAction::Talk) { continue; }
+        if world.get::<NpcActions>(turn.entity).is_some_and(|s|s.current == NpcAction::Talk) || !same_plan(world, turn.entity, plan.id) { continue; }
         turn.elapsed += dt;
         if let Some(mut transform) = world.get_mut::<Transform>(turn.entity) { transform.rotation = crate::npc::sample_turn_rotation(turn.from, turn.to, (turn.elapsed / turn.duration).min(1.0)); }
     }
@@ -382,6 +382,18 @@ fn facial(world: &mut World, entity: Entity, tweet: Option<&moly_law::talk::Twee
     if let (Some(mouth), Some(pattern)) = (mouth, mouth_pattern) { crate::alone_action_runtime::apply_mouth_pattern(&mut materials, &mouth, pattern); }
 }
 
+/// Takes `entity` out of the conversation it is in or gathering for: its
+/// membership, its reservation and its conversation loop go. The plan sees
+/// the member gone on its next pass and ends, or goes on without it, the way
+/// it does for any member that leaves; its end then leaves this character
+/// as it is.
+pub fn leave(world: &mut World, entity: Entity) {
+    let mut actor = world.entity_mut(entity);
+    actor.remove::<CommonMember>();
+    actor.remove::<TalkReservation>();
+    actor.remove::<crate::communication_runtime::CommunicationPlayback>();
+}
+
 fn cleanup(world: &mut World, mut plan: CommonPlan) {
     hide_tweet(world, &mut plan);
     if let Some(entity) = plan.expression_actor.take() {
@@ -431,7 +443,7 @@ fn advance_plan(world: &mut World, plan: &mut CommonPlan, dt: f32, now: f32) {
         plan.phase = law::CommonPhase::Complete; return;
     }
     for turn in &mut plan.turns {
-        if world.get::<NpcActions>(turn.entity).is_some_and(|s| s.current == NpcAction::Talk) { continue; }
+        if world.get::<NpcActions>(turn.entity).is_some_and(|s| s.current == NpcAction::Talk) || !same_plan(world, turn.entity, plan.id) { continue; }
         turn.elapsed += dt;
         if let Some(mut transform) = world.get_mut::<Transform>(turn.entity) {
             transform.rotation = crate::npc::sample_turn_rotation(turn.from, turn.to, (turn.elapsed / turn.duration).min(1.0));

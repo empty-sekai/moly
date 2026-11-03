@@ -2,9 +2,10 @@
 //! and show a tweet with it, and its own AI makes no decision until it is
 //! given back.
 //!
-//! Taking a character cancels its current objective, stops its walk and ends
-//! its AI loop's decisions the way an ended loop is marked, so neither the
-//! decision loop nor the presenter's greeting and overlap calls drive it.
+//! Taking a character cancels its current objective, stops its walk, takes
+//! it out of any conversation it is in or gathering for, and ends its AI
+//! loop's decisions the way an ended loop is marked, so neither the decision
+//! loop nor the presenter's greeting and overlap calls drive it.
 //! Giving it back reopens the loop and owes it a forced objective update, so
 //! it decides afresh.
 //!
@@ -45,6 +46,7 @@ pub fn take(world: &mut World, unit: u32) -> Result<Entity, String> {
         mind.ai_stopped = Some(OWNED.into());
     }
     world.entity_mut(entity).insert(DirectedOwned);
+    crate::npc_objective::common::leave(world, entity);
     info!("[director] character {unit} taken (its objective cancelled: {cancelled}); its AI makes no decision until released");
     Ok(entity)
 }

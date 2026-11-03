@@ -906,6 +906,7 @@ pub fn advance(
         &mut AloneRuntime,
         &mut MotionDriver,
         Option<&crate::talk::TalkHold>,
+        Has<crate::npc::DirectedOwned>,
     )>,
     mut players: Query<&mut AnimationPlayer>,
     mut transitions: Query<&mut AnimationTransitions>,
@@ -922,12 +923,15 @@ pub fn advance(
     hold.run(&STEP, now);
     let wall = wall_second();
     let delta_time = clock.delta();
-    for (npc, unit, rest, mut runtime, mut driver, talk) in &mut npcs {
+    for (npc, unit, rest, mut runtime, mut driver, talk, owned) in &mut npcs {
         let rt = &mut *runtime;
         let driver = &mut *driver;
+        // A character taken from its AI plays no Rest script: the take
+        // cancels its objective, and the Rest the objective's end may enter
+        // is not the taker's to play.
         let epoch = rest
             .active_epoch()
-            .filter(|_| emotes_ready.is_some() && talk.is_none());
+            .filter(|_| emotes_ready.is_some() && talk.is_none() && !owned);
         if rt.rest_epoch != epoch {
             if rt.script.take().is_some() {
                 emote_requests.hide(npc);
