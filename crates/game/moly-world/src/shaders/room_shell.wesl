@@ -92,14 +92,25 @@ struct SiteEnv {
     sky_bottom_color: vec4<f32>,
 }
 
-// Main-light shadow consumer block; slot order is the contract with
-// shadowmap.rs (the same struct as in site_material.wesl).
+// The main-light shadow consumer block; its field order is the contract with
+// `ShadowConsumer` in shadowmap.rs (the same block as in site_material.wesl).
 struct SiteShadow {
+    // World to the shadow map: xy is the map's uv (y flipped), z the
+    // depth compared against the map's ([0, 1], near 0 far 1).
     world_to_shadow: mat4x4<f32>,
-    // (width, height, 1/width, 1/height)
+    // (width, height, 1/width, 1/height).
     size: vec4<f32>,
-    // _MainLightShadowParams: .x strength, .z/.w distance fade.
+    // _MainLightShadowParams shape: .x main light intensity (0 =
+    // fully lit), .y soft shadows.
     params: vec4<f32>,
+    // (filter, fade start m, fade end m, strength); the filter is 0 hard, 1 tent,
+    // 2 Pcf, 3 Pcss.
+    filtering: vec4<f32>,
+    // (Pcf radius uv, Pcss light size uv per blocker metre, largest radius
+    // uv, 0).
+    kernel: vec4<f32>,
+    // (texel uv, 0, 0, 0).
+    depth: vec4<f32>,
 };
 
 @group(3) @binding(0) var<uniform> params: RoomParams;
@@ -236,7 +247,11 @@ fn drop_shadow_tint(colour: vec3<f32>) -> vec3<f32> {
     return env.drop_shadow_color.w * (colour * env.drop_shadow_color.rgb - colour) + colour;
 }
 
-// ---- main-light shadow (URP soft 9-tap, the same as site_material.wesl) ----
+// ---- Main-light shadow: the same lookup as site_material.wesl, on the
+// same block. Hard is one bilinear comparison, Tent is the source's nine-tap
+// tent, Pcf is a sixteen-tap Vogel disk of the setting's radius, and Pcss
+// searches the blockers texel by texel and then runs the disk of the penumbra
+// their distance gives; the distance fade and the strength follow. ----
 
 fn tent_weights(f: f32) -> array<f32, 6> {
     let below = min(f, 0.0);
@@ -301,19 +316,124 @@ fn pcf9(shadow_uv: vec2<f32>, compare_depth: f32) -> f32 {
     return sum;
 }
 
-// Both room programs: strength lerp, then `0 >= z || z >= 1` is unshadowed
-// (the test includes z == 0), then the squared distance fade toward 1.
-fn main_light_atten(world_position: vec4<f32>) -> f32 {
+// One bilinear comparison: the map's texel footprint under the fragment is
+// reduced by the hardware to a 0..1 visibility.
+fn hard_shadow(shadow_uv: vec2<f32>, compare_depth: f32) -> f32 {
+    return textureSampleCompareLevel(shadow_tex, shadow_cmp, shadow_uv, compare_depth);
+}
+
+// The Vogel disk: `rotation` turned offsets whose radius grows as the square
+// root of the tap index, so the taps spread evenly over the disk.
+const VOGEL_SPIRAL: f32 = 2.39996323;
+
+fn vogel_disk(index: u32, count: u32, rotation: f32) -> vec2<f32> {
+    let r = sqrt((f32(index) + 0.5) / f32(count));
+    let theta = rotation + f32(index) * VOGEL_SPIRAL;
+    return r * vec2<f32>(cos(theta), sin(theta));
+}
+
+// Interleaved gradient noise (Jimenez 2014): one rotation per pixel, the same
+// for every kernel tap, so the taps' walk is not visible as a pattern.
+fn interleaved_gradient_noise(position: vec2<f32>) -> f32 {
+    let p = position.yx;
+    return fract(52.9829189 * fract(dot(p, vec2<f32>(0.06711056, 0.00583715))));
+}
+
+// Pcf: a 16-tap Vogel disk of `radius_uv`, turned per pixel, each tap a
+// bilinear comparison; the average is the visibility.
+fn pcf_disk(shadow_uv: vec2<f32>, compare_depth: f32, radius_uv: f32, position: vec2<f32>) -> f32 {
+    let rotation = interleaved_gradient_noise(position) * 6.2831853;
+    var sum = 0.0;
+    for (var i = 0u; i < 16u; i += 1) {
+        let offset = vogel_disk(i, 16u, rotation) * radius_uv;
+        sum += textureSampleCompareLevel(shadow_tex, shadow_cmp, shadow_uv + offset, compare_depth);
+    }
+    return sum / 16.0;
+}
+
+// Pcss: the blockers around the receiver over the largest penumbra, then the
+// Pcf disk of the penumbra that the blockers' distance gives. Each blocker is
+// read with `textureLoad` at whole texel coordinates (a depth texture answers
+// the stored depth as a number; taps beyond the map's edge are skipped).
+fn pcss_shadow(shadow_uv: vec2<f32>, compare_depth: f32, screen: vec2<f32>) -> f32 {
+    let texel = shadow.depth.x;
+    let largest = shadow.kernel.z;
+    let light_size = shadow.kernel.y;
+    let size = vec2<i32>(textureDimensions(shadow_tex));
+    let search = min(largest * texel, 0.5);
+    let rotation = interleaved_gradient_noise(screen) * 6.2831853;
+    let receiver = vec2<i32>(round(shadow_uv / texel));
+    var blockers = 0.0;
+    var count = 0.0;
+    for (var i = 0u; i < 16u; i += 1) {
+        let offset = vec2<i32>(round(vogel_disk(i, 16u, rotation) * (search / texel)));
+        let tap = receiver + offset;
+        if all(tap >= vec2<i32>(0)) && all(tap < size) {
+            let depth = textureLoad(shadow_tex, tap, 0);
+            if depth < compare_depth {
+                blockers += depth;
+                count += 1.0;
+            }
+        }
+    }
+    if (count < 0.5) {
+        return 1.0;
+    }
+    let average = blockers / count;
+    let penumbra = clamp((compare_depth - average) * light_size, texel, largest * texel);
+    return pcf_disk(shadow_uv, compare_depth, penumbra, screen);
+}
+
+// The filter of the settings, applied to one receiver at `screen` (the
+// fragment's position in pixels, which turns the kernels per pixel).
+fn shadow_filter(shadow_uv: vec2<f32>, compare_depth: f32, screen: vec2<f32>) -> f32 {
+    switch u32(shadow.filtering.x + 0.5) {
+        case 0u: {
+            return hard_shadow(shadow_uv, compare_depth);
+        }
+        case 1u: {
+            return pcf9(shadow_uv, compare_depth);
+        }
+        case 2u: {
+            let largest = shadow.kernel.z;
+            let texel = shadow.depth.x;
+            let radius = clamp(shadow.kernel.x, texel, largest * texel);
+            return pcf_disk(shadow_uv, compare_depth, radius, screen);
+        }
+        default: {
+            return pcss_shadow(shadow_uv, compare_depth, screen);
+        }
+    }
+}
+
+// The distance fade: the shadow is full up to 90% of the main-light shadow
+// distance, fades out between 90% and 100% of it, and is gone at the distance
+// itself.
+fn shadow_fade(distance: f32) -> f32 {
+    let start = shadow.filtering.y;
+    let end = shadow.filtering.z;
+    return clamp((end - distance) / max(end - start, 0.001), 0.0, 1.0);
+}
+
+// Both room programs: the filter of the settings gives the visibility, the
+// strength lerps it from full light, the depth test `z <= 0 || z >= 1` is
+// unshadowed, the receiver's distance fades toward 1, and the setting's
+// strength mixes the whole shadow back toward full light, last.
+fn main_light_atten(world_position: vec4<f32>, screen: vec2<f32>) -> f32 {
+    if shadow.params.x <= 0.0 {
+        return 1.0;
+    }
     let projected = shadow.world_to_shadow * world_position;
-    let sum = pcf9(projected.xy, projected.z);
+    let sum = shadow_filter(projected.xy, projected.z, screen);
     var atten = sum * shadow.params.x + (1.0 - shadow.params.x);
     if projected.z <= 0.0 || projected.z >= 1.0 {
         atten = 1.0;
     }
-    let delta = world_position.xyz - env.camera_position.xyz;
-    var fade = clamp(dot(delta, delta) * shadow.params.z + shadow.params.w, 0.0, 1.0);
-    fade = fade * fade;
-    return fade * (1.0 - atten) + atten;
+    // The fade reads the receiver's distance from the camera.
+    let distance = length(world_position.xyz - env.camera_position.xyz);
+    let fade = shadow_fade(distance);
+    let shadowed = mix(1.0, atten, fade);
+    return mix(1.0, shadowed, shadow.filtering.w);
 }
 
 fn treasure_shadow(rgb: vec3<f32>, world_xz: vec2<f32>, treasure_xz: vec2<f32>, intensity: f32) -> vec3<f32> {
@@ -385,7 +505,7 @@ fn fragment(in: RoomVertexOutput, @builtin(front_facing) front: bool) -> @locati
         // _DebugShadowMask has no writer (the environment view writes the edge
         // pair and both mask edges, not the debug flag), so the debug arm is off.
         rgb = lit;
-        @if(ROOM_RECEIVE_SHADOWS) let atten = main_light_atten(in.world_position);
+        @if(ROOM_RECEIVE_SHADOWS) let atten = main_light_atten(in.world_position, in.position.xy);
         let shade = env.phenomena_shade_color;
         let use_local = 0.5 < params.shading.x;
         let intensity = select(1.0, params.shading.y, use_local);
@@ -464,7 +584,7 @@ fn fragment(in: RoomVertexOutput, @builtin(front_facing) front: bool) -> @locati
     @if(ROOM_FLOOR) let with_fresnel = fresnel * params.fresnel_color.rgb * params.fresnel_color.a + rgb;
     @if(ROOM_FLOOR) rgb = select(rgb, with_fresnel, 0.5 < params.lighting.x);
     @if(ROOM_FLOOR) if 0.5 < params.lighting.z {
-        let atten = main_light_atten(in.world_position);
+        let atten = main_light_atten(in.world_position, in.position.xy);
         let lit = phenomena_light_blend(rgb);
         let tinted = drop_shadow_tint(lit);
         rgb = atten * (lit - tinted) + tinted;

@@ -175,19 +175,30 @@ struct SiteEnv {
 @group(3) @binding(8) var leaf_mask_tex: texture_2d<f32>;
 @group(3) @binding(9) var leaf_mask_sampler: sampler;
 
-// ---- 主光阴影消费口（group 3 binding 10/11/12）：单图单矩阵（
-// 槽 [0..3] 之外不存在；深度图由 shadowmap.rs 的深度 pass 一次成图）。
-// 律五件套（moly_law::shading::fieldobject 的 tint/apply/atten/pcf9）是
-// 参考实现，这里按同式同序写；改式必须律与本文件同步。
-// 槽序与 shadowmap.rs 的 ShadowConsumer 摊平序是契约，两边同改。
+// ---- Main-light shadow consumer (group 3, bindings 10/11/12): one map,
+// one matrix (the depth pass of shadowmap.rs draws it once a frame). The
+// filter and its kernels are runtime settings (`shadow_settings.rs`) carried
+// by the block's last three fields. The field order and the block's layout
+// are the contract with `ShadowConsumer` in shadowmap.rs; both sides change
+// together.
 
 struct SiteShadow {
-    // 世界→阴影图：xy 图内 uv（含 y 翻转），z 比较深度（[0,1]，近 0 远 1）。
+    // World to the shadow map: xy is the map's uv (y flipped), z the
+    // depth compared against the map's ([0, 1], near 0 far 1).
     world_to_shadow: mat4x4<f32>,
-    // (宽, 高, 1/宽, 1/高)。
+    // (width, height, 1/width, 1/height).
     size: vec4<f32>,
-    // _MainLightShadowParams 形状：.x 强度，.z 距离平方系数，.w fade 起点。
+    // _MainLightShadowParams shape: .x main light intensity (0 =
+    // fully lit), .y soft shadows.
     params: vec4<f32>,
+    // (filter, fade start m, fade end m, strength); the filter is 0 hard, 1 tent,
+    // 2 Pcf, 3 Pcss.
+    filtering: vec4<f32>,
+    // (Pcf radius uv, Pcss light size uv per blocker metre, largest radius
+    // uv, 0).
+    kernel: vec4<f32>,
+    // (texel uv, 0, 0, 0).
+    depth: vec4<f32>,
 };
 
 @group(3) @binding(10) var<uniform> shadow: SiteShadow;
@@ -602,15 +613,27 @@ fn apply_drop_shadow(colour: vec3<f32>, atten: f32) -> vec3<f32> {
 }
 
 // 律 shadow_attenuate 的直线序三步：强度门 → 比较深度出 [0,1) 整段免影
-// （覆写前一步）→ 距离 fade 平方往无影插回。
-fn shadow_attenuate(shadow_sum: f32, dist_sq: f32, compare_depth: f32) -> f32 {
+// （覆写前一步）。The engine's distance fade is not applied here: the fade
+// follows the main-light shadow settings and runs on the receiver's distance
+// (see `shadow_fade`).
+fn shadow_attenuate(shadow_sum: f32, compare_depth: f32) -> f32 {
     var atten = shadow_sum * shadow.params.x + (1.0 - shadow.params.x);
     if compare_depth < 0.0 || compare_depth >= 1.0 {
         atten = 1.0;
     }
-    let fade = clamp(dist_sq * shadow.params.z + shadow.params.w, 0.0, 1.0);
-    let fade_sq = fade * fade;
-    return fade_sq * (1.0 - atten) + atten;
+    return atten;
+}
+
+// The filter fields (`consumer_block` in shadowmap.rs):
+// `filtering`: .x 0 hard, 1 tent, 2 Pcf, 3 Pcss; .y/.z the distances at which
+// the fade starts and ends (90% and 100% of the settings' distance), in
+// metres; .w the strength.
+// `kernel`: .x the Pcf radius in uv (a length across the frame over its
+// width), .y the light size per blocker metre in uv (`tan(angle)` times the
+// depth range over the width), .z the largest kernel radius in uv.
+// `depth`: .x the texel size in uv.
+fn filter_mode() -> u32 {
+    return u32(shadow.filtering.x + 0.5);
 }
 
 // 律 tent_weights：单轴六份 tent 权重，f 是该轴落在基准 texel 内的带符号
@@ -695,17 +718,137 @@ fn pcf9(shadow_uv: vec2<f32>, compare_depth: f32) -> f32 {
     return sum;
 }
 
-// 主光阴影衰减：采样坐标 = 单矩阵 × 世界坐标；距离平方用世界位到相机位。
+// One bilinear comparison: the map's texel footprint under the fragment is
+// reduced by the hardware to a 0..1 visibility.
+fn hard_shadow(shadow_uv: vec2<f32>, compare_depth: f32) -> f32 {
+    return textureSampleCompareLevel(shadow_tex, shadow_cmp, shadow_uv, compare_depth);
+}
+
+// The Vogel disk: `rotation` turned offsets whose radius grows as the square
+// root of the tap index, so the taps spread evenly over the disk (fifteenth
+// tap last, nearest the rim). One table for every kernel size.
+const VOGEL_SPIRAL: f32 = 2.39996323;
+
+fn vogel_disk(index: u32, count: u32, rotation: f32) -> vec2<f32> {
+    let r = sqrt((f32(index) + 0.5) / f32(count));
+    let theta = rotation + f32(index) * VOGEL_SPIRAL;
+    return r * vec2<f32>(cos(theta), sin(theta));
+}
+
+// Interleaved gradient noise (Jimenez 2014): one rotation per pixel, the same
+// for every kernel tap, so the taps' walk is not visible as a pattern.
+fn interleaved_gradient_noise(position: vec2<f32>) -> f32 {
+    let p = position.yx;
+    return fract(52.9829189 * fract(dot(p, vec2<f32>(0.06711056, 0.00583715))));
+}
+
+// Pcf: a 16-tap Vogel disk of `radius_uv`, turned per pixel, each tap a
+// bilinear comparison; the average is the visibility.
+fn pcf_disk(shadow_uv: vec2<f32>, compare_depth: f32, radius_uv: f32, position: vec2<f32>) -> f32 {
+    let rotation = interleaved_gradient_noise(position) * 6.2831853;
+    var sum = 0.0;
+    for (var i = 0u; i < 16u; i += 1) {
+        let offset = vogel_disk(i, 16u, rotation) * radius_uv;
+        sum += textureSampleCompareLevel(shadow_tex, shadow_cmp, shadow_uv + offset, compare_depth);
+    }
+    return sum / 16.0;
+}
+
+// Pcss: the blockers around the receiver over the largest penumbra, then the
+// Pcf disk of the penumbra that the blockers' distance gives.
+//
+// The blocker search reads each tap's stored depth directly: a depth texture
+// is read with `textureLoad` at whole texel coordinates (no sampler, no
+// comparison) and answers the stored depth as a number. A tap's texel is its
+// Vogel offset in texels, rounded, from the receiver's texel; taps beyond the
+// map's edge are skipped.
+fn pcss_shadow(shadow_uv: vec2<f32>, compare_depth: f32, screen: vec2<f32>) -> f32 {
+    let texel = shadow.depth.x;
+    let largest = shadow.kernel.z;
+    let light_size = shadow.kernel.y;
+    let size = vec2<i32>(textureDimensions(shadow_tex));
+    let search = min(largest * texel, 0.5);
+    let rotation = interleaved_gradient_noise(screen) * 6.2831853;
+    let receiver = vec2<i32>(round(shadow_uv / texel));
+    // The blockers: the depths of the taps in front of the receiver (none:
+    // the receiver is lit); the receiver's depth minus that average, times
+    // the light size, is the penumbra in uv, never narrower than a texel and
+    // never wider than the largest radius.
+    var blockers = 0.0;
+    var count = 0.0;
+    for (var i = 0u; i < 16u; i += 1) {
+        let offset = vec2<i32>(round(vogel_disk(i, 16u, rotation) * (search / texel)));
+        let tap = receiver + offset;
+        if all(tap >= vec2<i32>(0)) && all(tap < size) {
+            let depth = textureLoad(shadow_tex, tap, 0);
+            if depth < compare_depth {
+                blockers += depth;
+                count += 1.0;
+            }
+        }
+    }
+    if (count < 0.5) {
+        return 1.0;
+    }
+    let average = blockers / count;
+    let penumbra = clamp((compare_depth - average) * light_size, texel, largest * texel);
+    return pcf_disk(shadow_uv, compare_depth, penumbra, screen);
+}
+
+// The filter of the settings, applied to one receiver at `screen` (the
+// fragment's position in pixels, which turns the kernels per pixel).
+fn shadow_filter(shadow_uv: vec2<f32>, compare_depth: f32, screen: vec2<f32>) -> f32 {
+    switch filter_mode() {
+        case 0u: {
+            return hard_shadow(shadow_uv, compare_depth);
+        }
+        case 1u: {
+            return pcf9(shadow_uv, compare_depth);
+        }
+        case 2u: {
+            let largest = shadow.kernel.z;
+            let texel = shadow.depth.x;
+            let radius = clamp(shadow.kernel.x, texel, largest * texel);
+            return pcf_disk(shadow_uv, compare_depth, radius, screen);
+        }
+        default: {
+            return pcss_shadow(shadow_uv, compare_depth, screen);
+        }
+    }
+}
+
+// The distance fade: the shadow is full up to 90% of the main-light shadow
+// distance, fades out between 90% and 100% of it, and is gone at the distance
+// itself. `distance` is the receiver's distance from the camera.
+fn shadow_fade(distance: f32) -> f32 {
+    let start = shadow.filtering.y;
+    let end = shadow.filtering.z;
+    return clamp((end - distance) / max(end - start, 0.001), 0.0, 1.0);
+}
+
+// Main-light shadow attenuation: the lookup is the single matrix times the
+// world position; the filter of the settings gives the visibility, which the
+// receiver's distance fades towards no shadow, and the strength of the
+// settings mixes the whole shadow back towards full light, last.
 // 收影轴是材质上的显式槽（游戏 _RECEIVE_SHADOWS_OFF 轴：带该 keyword 的
 // 变体在游戏里整族无影针，解析层按 keyword 定 0）。
-fn main_light_shadow_atten(world_position: vec4<f32>) -> f32 {
+fn main_light_shadow_atten(world_position: vec4<f32>, screen: vec2<f32>) -> f32 {
     if params.receive_shadow.x < 0.5 {
         return 1.0;
     }
+    // No map this frame (the shadows are switched off, no light, no caster):
+    // the block carries intensity 0, and the receiver is fully lit.
+    if shadow.params.x <= 0.0 {
+        return 1.0;
+    }
     let projected = shadow.world_to_shadow * world_position;
-    let shadow_sum = pcf9(projected.xy, projected.z);
-    let delta = world_position.xyz - env.camera_position.xyz;
-    return shadow_attenuate(shadow_sum, dot(delta, delta), projected.z);
+    let shadow_sum = shadow_filter(projected.xy, projected.z, screen);
+    let atten = shadow_attenuate(shadow_sum, projected.z);
+    // The fade reads the receiver's distance from the camera.
+    let distance = length(world_position.xyz - env.camera_position.xyz);
+    let facing = shadow_fade(distance);
+    let shadowed = mix(1.0, atten, facing);
+    return mix(1.0, shadowed, shadow.filtering.w);
 }
 
 // toon 斜坡：half-Lambert 在 [lower, upper] 上的归一化斜坡（各族的
@@ -769,7 +912,7 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
 
     // 落影针一（律链序：toon 阴影之后、宝藏影之前）。全族带 _RSO：
     // receive_shadow=0 早退 1、apply 是恒等插值——源里该族零影针，数值一致。
-    @if(SITE_FIELDOBJECT) let shadow_atten_value = main_light_shadow_atten(in.world_position);
+    @if(SITE_FIELDOBJECT) let shadow_atten_value = main_light_shadow_atten(in.world_position, in.position.xy);
     @if(SITE_FIELDOBJECT) rgb = apply_drop_shadow(rgb, shadow_atten_value);
 
     // 宝藏阴影两项。
@@ -880,7 +1023,7 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
         rgb = rgb + factor * (env.phenomena_shade_color.rgb * rgb - rgb);
 
         // 落影针一（恒等：全族带 _RSO，见 FO 臂注）。源里该族零影针。
-        let shadow_atten_value = main_light_shadow_atten(in.world_position);
+        let shadow_atten_value = main_light_shadow_atten(in.world_position, in.position.xy);
         rgb = apply_drop_shadow(rgb, shadow_atten_value);
 
         rgb = treasure_shadow(rgb, in.world_position.xz, env.treasure_position_0.xz, env.treasure_shadow_intensity.x);
@@ -1079,7 +1222,7 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
     @if(SITE_TREASUREBOX) let normal = normalize(in.world_normal);
     // Main-light shadow first (strength, [0,1) depth range, distance fade),
     // then the mask ramp on the clamped N.L: atten' = r * (atten - 1) + 1.
-    @if(SITE_TREASUREBOX) let shadow_atten_value = main_light_shadow_atten(in.world_position);
+    @if(SITE_TREASUREBOX) let shadow_atten_value = main_light_shadow_atten(in.world_position, in.position.xy);
     @if(SITE_TREASUREBOX) let ndotl = dot(env.light_vector.xyz, normal);
     @if(SITE_TREASUREBOX) let ndotl_clamped = clamp(ndotl, 0.0, 1.0);
     @if(SITE_TREASUREBOX) let mask_r = clamp(
@@ -1216,7 +1359,7 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
     rgb = rgb + factor * (env.phenomena_shade_color.rgb * rgb - rgb);
 
     // 落影：衰减先过 maskramp（atten' = r·(atten−1)+1）再进恒等插值。
-    let shadow_atten_value = main_light_shadow_atten(in.world_position);
+    let shadow_atten_value = main_light_shadow_atten(in.world_position, in.position.xy);
     let atten_prime = mask_r * (shadow_atten_value + -1.0) + 1.0;
     rgb = apply_drop_shadow(rgb, atten_prime);
 

@@ -51,6 +51,7 @@ pub mod render_inputs;
 pub mod source_billboard;
 pub mod particle_mesh_emission;
 pub mod shadowmap;
+pub mod shadow_settings;
 pub mod site_material;
 pub mod sky;
 pub mod site_extension;

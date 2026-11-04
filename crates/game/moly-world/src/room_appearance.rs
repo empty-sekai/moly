@@ -842,6 +842,7 @@ pub fn install(app: &mut App) {
         .init_resource::<RoomAppearance>()
         .init_resource::<RoomAppearanceState>()
         .add_systems(Startup, load_master)
+        .add_systems(Last, moly_render::shadowmap::mark_materials_on_resolution::<RoomShellMaterial>)
         .add_systems(
             Update,
             (resolve, apply)

@@ -171,6 +171,28 @@ keys! {
         "Hides every HUD, button and dialog view; the scene, the balloons and the talk window remain.";
     HIDE_PLAYER = "display.hide_player", Some("MOLY_HIDE_PLAYER"), Flag, "game, developer window, stage",
         "Hides the player's own body.";
+    SHADOW_ENABLED = "graphics.shadow_enabled", Some("MOLY_SHADOW_ENABLED"), Flag, "game, stage",
+        "Whether the main light casts a shadow (a depth map drawn before the scene and read by the site and room materials). `false` draws no depth map and leaves every receiver fully lit.";
+    SHADOW_RESOLUTION = "graphics.shadow_resolution", Some("MOLY_SHADOW_RESOLUTION"), Integer, "game, stage",
+        "The side of the main-light shadow depth maps, in texels: 512 to 8192, a power of two or a multiple of 512. Default: 2560 in the game, 2048 in the browser.";
+    SHADOW_FIT = "graphics.shadow_fit", Some("MOLY_SHADOW_FIT"), Text, "game, stage",
+        "What the shadow frame covers: `camera` (a sphere around the camera's view out to `graphics.shadow_distance`, dense near the camera) or `site` (one frame around every caster of the site). Default: `camera`.";
+    SHADOW_DISTANCE = "graphics.shadow_distance", Some("MOLY_SHADOW_DISTANCE"), Text, "game, stage",
+        "How far in front of the camera (`camera` fit) the shadow map reaches and where the shadow fades out, in metres; the fade starts at 90% of it. Default: 30.";
+    SHADOW_FILTER = "graphics.shadow_filter", Some("MOLY_SHADOW_FILTER"), Text, "game, stage",
+        "How a receiver reads the shadow map: `hard` (one bilinear comparison), `tent` (a nine-tap tent), `pcf` (a sixteen-tap disk of `graphics.shadow_pcf_radius`) or `pcss` (contact hardening from `graphics.shadow_light_angle`). Default: `pcss`.";
+    SHADOW_PCF_RADIUS = "graphics.shadow_pcf_radius", Some("MOLY_SHADOW_PCF_RADIUS"), Text, "game, stage",
+        "The radius of the `pcf` filter's disk, in metres (0 or more); capped at `graphics.shadow_max_radius_texels`. Default: 0.02.";
+    SHADOW_LIGHT_ANGLE = "graphics.shadow_light_angle", Some("MOLY_SHADOW_LIGHT_ANGLE"), Text, "game, stage",
+        "The sun's angular diameter for the `pcss` filter, in degrees from 0 up to 90: the penumbra is the blocker-to-receiver distance times its tangent. Default: 2.5.";
+    SHADOW_MAX_RADIUS_TEXELS = "graphics.shadow_max_radius_texels", Some("MOLY_SHADOW_MAX_RADIUS_TEXELS"), Text, "game, stage",
+        "The largest radius any shadow filter reaches, in map texels (1 or more). Default: 24.";
+    SHADOW_STRENGTH = "graphics.shadow_strength", Some("MOLY_SHADOW_STRENGTH"), Text, "game, stage",
+        "The shadow's opacity: the final attenuation is mixed from full light to the shadow by this value, 0 to 1. Default: 1.";
+    SHADOW_DEPTH_BIAS = "graphics.shadow_depth_bias", Some("MOLY_SHADOW_DEPTH_BIAS"), Text, "game, stage",
+        "A multiplier on the casters' depth bias, which keeps a lit surface from shadowing itself; 0 or more. Lower values keep contact shadows tight, higher values hide acne. Default: 1.";
+    SHADOW_NORMAL_BIAS = "graphics.shadow_normal_bias", Some("MOLY_SHADOW_NORMAL_BIAS"), Text, "game, stage",
+        "A multiplier on the casters' normal bias, which moves casters along their normals by map texels; 0 or more. Default: 1.";
     TEXT_SOURCE = "text.source", Some("MOLY_TEXT_SOURCE"), Path, "developer window",
         "The source text catalogue file the display translation reads. Unset: the original text is shown.";
     TEXT_OFFICIAL = "text.official", Some("MOLY_TEXT_OFFICIAL"), Path, "developer window",

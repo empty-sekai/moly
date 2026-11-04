@@ -22,6 +22,7 @@ use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
 use bevy_remote::{error_codes, BrpError, BrpMessage, BrpResult, BrpSender, RemoteMethods, RemotePlugin};
 use moly_features::camera_hold::{CameraHold, HeldPose};
 use moly_features::lease::{Holder, Leases, Rank};
+use moly_render::shadow_settings;
 use serde_json::{json, Map, Value};
 
 /// The holder the control surface's own camera takes its lease as.
@@ -164,6 +165,16 @@ const METHODS: &[(&str, &str, &str)] = &[
         NONE,
     ),
     (
+        "moly.graphics.get",
+        "The runtime graphics settings as they are now, under `shadow`: enabled, resolution, fit, distance, filter, pcf_radius, light_angle, max_radius_texels, strength, depth_bias and normal_bias (see the `[graphics]` keys of moly.toml).",
+        NONE,
+    ),
+    (
+        "moly.graphics.set",
+        "Changes the main-light shadow settings while the game runs: `shadow` holds any of the fields moly.graphics.get answers or takes under `shadow` (all of it is validated before any of it is applied). Answers the settings as they are after the change, or a named refusal that says which field broke which rule.",
+        SHADOW_PARAMS,
+    ),
+    (
         "moly.capture",
         "Captures the next rendered frame of the window; answers {id} for moly.capture.take.",
         NONE,
@@ -176,6 +187,9 @@ const METHODS: &[(&str, &str, &str)] = &[
 ];
 
 const NONE: &str = r#"{"type":"object","additionalProperties":false}"#;
+
+/// The params of `moly.graphics.set`: the shadow settings, any of them.
+const SHADOW_PARAMS: &str = r#"{"type":"object","properties":{"shadow":{"type":"object","properties":{"enabled":{"type":"boolean"},"resolution":{"type":"integer"},"fit":{"enum":["camera","site"]},"distance":{"type":"number"},"filter":{"enum":["hard","tent","pcf","pcss"]},"pcf_radius":{"type":"number"},"light_angle":{"type":"number"},"max_radius_texels":{"type":"number"},"strength":{"type":"number"},"depth_bias":{"type":"number"},"normal_bias":{"type":"number"}},"additionalProperties":false}},"additionalProperties":false}"#;
 
 /// Captured frames kept for `moly.capture.take`; older ones are dropped.
 const KEPT_CAPTURES: usize = 4;
@@ -213,6 +227,8 @@ pub fn install(app: &mut App) {
         .with_method_main("moly.perf.snapshot", perf_snapshot)
         .with_method_main("moly.camera.free", camera_free)
         .with_method_main("moly.camera.reset", camera_reset)
+        .with_method_main("moly.graphics.get", graphics_get)
+        .with_method_main("moly.graphics.set", graphics_set)
         .with_method_main("moly.capture", capture)
         .with_method_main("moly.capture.take", capture_take);
     // The plugins' report is read where the plugin host lives, in native runs.
@@ -765,6 +781,72 @@ fn camera_reset(In(_): In<Option<Value>>, world: &mut World) -> BrpResult {
     hold.release(&mut world.resource_mut::<Leases>(), CONTROL);
     world.insert_resource(hold);
     Ok(json!({"free": false}))
+}
+
+/// The shadow settings' field names, as `moly.graphics.set` takes them.
+const SHADOW_FIELDS: [&str; 11] = [
+    "enabled",
+    "resolution",
+    "fit",
+    "distance",
+    "filter",
+    "pcf_radius",
+    "light_angle",
+    "max_radius_texels",
+    "strength",
+    "depth_bias",
+    "normal_bias",
+];
+
+/// One shadow setting of a JSON value as the text the settings parse: a flag
+/// as `true`/`false`, a whole number without a fraction, a number as its text,
+/// a name as itself; the settings decide whether the value holds.
+fn shadow_value(field: &str, value: &Value) -> Result<String, BrpError> {
+    let wrong = || refuse(format!("moly.graphics.set: shadow.{field} needs a flag, a number or a name, not {value}"));
+    match value {
+        Value::Bool(flag) => Ok(flag.to_string()),
+        Value::Number(number) if field == "resolution" => number.as_u64().map(|number| number.to_string()).ok_or_else(wrong),
+        Value::Number(number) => number.as_f64().map(|number| number.to_string()).ok_or_else(wrong),
+        // A name (the fit, the filter) is checked by the settings themselves,
+        // which list the names they take.
+        Value::String(text) => Ok(text.clone()),
+        _ => Err(wrong()),
+    }
+}
+
+/// `moly.graphics.get`: the shadow settings as they are.
+fn graphics_get(In(_): In<Option<Value>>, settings: Option<Res<shadow_settings::ShadowSettings>>) -> BrpResult {
+    let settings = settings.ok_or_else(|| refusal("moly.graphics.get: the graphics settings are not installed"))?;
+    Ok(json!({ "shadow": shadow_settings::to_json(&settings) }))
+}
+
+/// `moly.graphics.set`: changes the shadow settings, all of the values or
+/// none, and answers them as they are afterwards.
+fn graphics_set(In(params): In<Option<Value>>, settings: Option<ResMut<shadow_settings::ShadowSettings>>) -> BrpResult {
+    let params = object(params, "moly.graphics.set")?;
+    let Some(mut settings) = settings else {
+        return Err(refusal("moly.graphics.set: the graphics settings are not installed"));
+    };
+    let mut values: Vec<(String, String)> = Vec::new();
+    match params.get("shadow") {
+        None => {}
+        Some(Value::Object(shadow)) => {
+            for (field, value) in shadow {
+                if !SHADOW_FIELDS.contains(&field.as_str()) {
+                    return Err(refuse(format!(
+                        "moly.graphics.set: shadow.{field} is not a shadow setting; it takes {}",
+                        SHADOW_FIELDS.join(", ")
+                    )));
+                }
+                values.push((field.clone(), shadow_value(field, value)?));
+            }
+        }
+        Some(_) => return Err(refuse("moly.graphics.set: shadow must be an object")),
+    }
+    if let Err(shadow_refusal) = shadow_settings::apply(&mut settings, &values) {
+        return Err(refuse(format!("moly.graphics.set: shadow: {shadow_refusal}")));
+    }
+    Ok(json!({ "shadow": shadow_settings::to_json(&settings) }))
 }
 
 /// Frames captured for `moly.capture.take`, by id; `None` while the frame

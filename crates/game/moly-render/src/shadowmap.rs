@@ -3,21 +3,37 @@
 //!
 //! One light-facing orthographic depth map (one matrix for the whole map, no
 //! cascades, no atlas); a node built inside the Core3d graph draws every caster
-//! directly before the main pass. The consumers are the site materials
-//! (the DropShadow lookup in `shaders/site_material.wesl`, bound to group 3
-//! bindings 10/11/12). Node and draw pattern: the render graph node style of
+//! directly before the main pass. The consumers are the site materials and
+//! the room shell material (the same lookup in `shaders/site_material.wesl`
+//! and `shaders/room_shell.wesl`; group 3 bindings 10/11/12 for the site, 4/5/6
+//! for the room). Node and draw pattern: the render graph node style of
 //! weather.rs plus the manual MeshAllocator draw of bevy_pbr volumetric_fog
-//! (checked one by one against the 0.18 registry).
+//! (checked one by one against the 0.20 registry).
+//!
+//! # Settings
+//!
+//! Everything that shapes the map or the lookup is a runtime setting
+//! (`shadow_settings.rs`): whether there is a map, its side in texels, the
+//! frame (a sphere around the camera's frustum slice, or around every caster of
+//! the site), the filter, the kernel radii, the sun's angular diameter, the
+//! strength and the caster bias multipliers. The settings reach this module as
+//! the render world's [`ShadowSettingsGlobals`], extracted on the frame they
+//! change. A change of the resolution re-creates the depth maps during that
+//! extraction ([`apply_shadow_resolution`]); on the same frame the main world
+//! marks every material that binds the maps changed
+//! ([`mark_materials_on_resolution`]), so their bind groups, prepared after
+//! extraction, hold the new views.
 //!
 //! # Caster set
 //!
 //! Every entity in the main world that has [`Mesh3d`] and is hierarchy-enabled,
 //! except: the sky shell (a huge camera-following sphere that is a full circle
-//! of occluders seen from the light), emote draw sites (world-space billboards
-//! rebuilt every frame whose vertex attributes are world coordinates and carry
-//! no projection semantics),
-//! rain particles ([`NoShadowCast`]: particles are not in the main light
-//! shadow map).
+//! of occluders seen from the light; it is kept in the list and marked, so the
+//! light frame is derived from every caster while it has not settled, and the
+//! prepare leaves it out of a camera frame), emote draw sites (world-space
+//! billboards rebuilt every frame whose vertex attributes are world
+//! coordinates and carry no projection semantics), and rain particles
+//! ([`NoShadowCast`]: particles are not in the main light shadow map).
 //!
 //! Skinned meshes take a second route. A skinned mesh casts only when it is a
 //! character renderer: an NPC mesh with the character material or a mesh of
@@ -47,30 +63,41 @@
 //! shadow slice. A rigid mesh without a normal stream gets the bias along
 //! the light only, and is counted in the account line.
 //!
+//! # Light frame
+//!
+//! The light view looks at the frame's centre from the light's direction
+//! (the same axes whatever the fit: right = up × towards the light). With
+//! [`ShadowFit::Site`] the frame is the bounding box of every caster's
+//! world-space corners and the orthographic box its light-space extent
+//! (square, centred). With [`ShadowFit::Camera`] the frame is the bounding
+//! sphere of the camera's frustum slice, from its near plane to the settings'
+//! distance, of the main 3D camera (the camera the site globals follow); the
+//! orthographic box is the sphere's square, and its centre is snapped to whole
+//! texels in the light's plane, so camera motion moves the sampled grid by
+//! whole texels only. The depth range is, in both cases, the light-space
+//! extent of every caster along the light plus [`DEPTH_PAD`] at both ends:
+//! casters outside the view still cast into it. The sphere is never smaller
+//! than [`MIN_FRAME_RADIUS`].
+//!
+//! From one frame's frame the extraction derives the planes a draw is tested
+//! against (module comment on [`LightPlane`]): a draw inside them cannot reach
+//! the map, so it keeps its static-map place and pipeline. A draw outside them
+//! is queued again, and a [`ShadowFit::Camera`] frame also leaves out a draw
+//! that lies wholly behind the camera or beyond the fade.
+//!
 //! # Numeric values
 //!
 //! Sites run on the site pipeline asset among the engine resources (the one
 //! installed when the game switches into a site, not the global default
 //! pipeline asset, which disables main-light rendering entirely). The values
-//! below are read from the engine's serialized settings: main-light shadow map
-//! 1024², shadow distance 25 m, cascade margin 0.1, main light m_Shadows
-//! strength 1 (soft shadows). Each component of `_MainLightShadowParams`
-//! follows from the engine assembly: x = main light intensity 1, y = soft
-//! shadows on 1 (the consumer formula does not read that lane, but the value
-//! is written to match the engine), and z/w = the two distance-fade
-//! coefficients, computed from the distance and the margin with the engine's
-//! linear distance-fade formula (see the derivation comment on
-//! `SHADOW_FADE_SCALE`). The caster bias comes from the same settings: the
-//! pipeline asset's depth/normal bias 1.0/1.0 × texel × soft-shadow kernel 2.5
-//! (vertex side, along the light and along the normal), together with the
-//! shadow slice's global raster bias 1 / 2.5 (`SHADOW_SLICE_RASTER_BIAS`).
-//! Chosen here rather than read: the light's orthographic frame itself. The
-//! engine fits its frame to a segment of the camera frustum (with the
-//! environment directional light's shadow near plane 0.2 as the near-plane
-//! offset); this module frames the bounding box of every caster in the site,
-//! so the front and back padding (see `DEPTH_PAD`) and the texel size (this
-//! map's light-frame width / 1024, not the width of the engine's cascade
-//! projection) are chosen here as well.
+//! read from the engine's serialized settings: the pipeline asset's depth and
+//! normal bias 1.0/1.0, both scaled here by texel × soft-shadow kernel 2.5
+//! (vertex side, along the light and along the normal), and the shadow slice's
+//! global raster bias 1 / 2.5 (`SHADOW_SLICE_RASTER_BIAS`). The caster bias is
+//! taken in texels, so a finer map biases less in metres. The source's own
+//! map (1024², shadow distance 25 m, margin 0.1) and the frame it fitted are
+//! not reproduced: this module draws a map sized by the settings and framed as
+//! the settings ask, and the distance fade follows the settings too.
 //!
 //! # Shadow account
 //!
@@ -87,10 +114,11 @@
 //! # In-frame sequence
 //!
 //! Extract pulls the casters (with precomputed bounds for main-world meshes)
-//! → PrepareResources resolves the light's orthographic frame, writes three
-//! uniform blocks and specializes pipelines by vertex layout → the node runs
-//! the depth pass between EndPrepasses and StartMainPass (a frame whose
-//! pipelines are not compiled yet or whose caster set is empty is skipped
+//! → PrepareResources re-creates the maps when the resolution changed, resolves
+//! the light's orthographic frame, writes three uniform blocks and specializes
+//! pipelines by vertex layout → the node runs the depth pass between
+//! EndPrepasses and StartMainPass (a frame whose pipelines are not compiled yet,
+//! whose caster set is empty, or where the shadows are switched off is skipped
 //! entirely).
 //!
 //! # Static map
@@ -101,9 +129,9 @@
 //! texel for texel before it draws the other rigid casters and the skinned
 //! ones. The map is drawn again whenever its content would differ: a baked
 //! caster changed, left the list or had its mesh modified, the light frame
-//! block changed, or another caster became stable. The depth test keeps the
-//! nearest depth per texel either way, so the frame's map holds the same
-//! values as one pass over every caster.
+//! block changed, the resolution changed (the maps are new), or another caster
+//! became stable. The depth test keeps the nearest depth per texel either way,
+//! so the frame's map holds the same values as one pass over every caster.
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -111,7 +139,6 @@ use std::sync::Mutex;
 
 use bevy::asset::uuid::Uuid;
 use bevy::core_pipeline::{Core3d, Core3dSystems};
-use bevy::shape::Aabb3d;
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 use bevy::mesh::{Mesh, MeshVertexBufferLayoutRef};
 use bevy::prelude::*;
@@ -122,18 +149,24 @@ use bevy::render::render_resource::binding_types::{uniform_buffer, uniform_buffe
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
+use bevy::shape::Aabb3d;
 
 use crate::character_material::CharacterMaterial;
-use crate::markers::EmoteDraw;
 use crate::env::SiteEnv;
-use crate::render::gpu::{Bound, SharedBindGroupCache};
 use crate::fixture_material::WallLayoutShadowCasterOff;
+use crate::markers::EmoteDraw;
+use crate::render::gpu::{Bound, SharedBindGroupCache};
+use crate::shadow_settings::{
+    ShadowFilter, ShadowFit, ShadowSettings, ShadowSettingsGlobals, ShadowSettingsPlugin,
+};
+use crate::site_material::SiteMaterial;
 use crate::sky::SkyDome;
 use moly_assets::material_passes::SourceMaterialPasses;
 use moly_assets::scene_state::{SourceRenderer, SourceShadowCastingMode};
 
-/// 阴影链着色程序的稳定句柄：Startup 直接插入 `Assets<Shader>`（weather
-/// 同款形状——仓内没有默认资产源目录）。
+/// The depth pass's vertex program, inserted by [`load`] under this id (the
+/// repository has no default asset source directory, so the handle is made
+/// here, as weather.rs does it).
 const SHADOW_DEPTH_SHADER: Handle<Shader> = Handle::Uuid(
     Uuid::from_u128(0x6271_62d3_a2e2_4f19_b6c6_9f3e_51c8_0d44),
     PhantomData,
@@ -149,42 +182,43 @@ const SHADOW_COPY_SHADER: Handle<Shader> = Handle::Uuid(
 /// the static map (module comment, "Static map").
 const STATIC_AFTER_FRAMES: u32 = 30;
 
-/// 深度图边长：站点管线资产的主光影图档 1024²（单级联单图，模块注释
-/// 「数值口径」）。
-pub const SHADOWMAP_SIZE: u32 = 1024;
+/// Written prepares of a settings run before the readiness line is reported.
+const READY_FRAMES: u64 = 2;
+
+/// Extractions that pass under a set of settings before the rigid casters a
+/// camera frame never shows are left out of the list (a camera report and its
+/// slice take a few frames to describe the view, so the first ones leave
+/// every caster in; see [`uses_camera_frame`]).
+const CASTER_HOLD_FRAMES: u32 = 120;
+
+/// The smallest radius of the camera frame, in metres (the settings' 30 m
+/// default sits well above it). With [`ShadowFit::Camera`] the map is as fine
+/// as the view it covers: its texel is `2 × radius / resolution` wide (about
+/// 1.9 cm at 2560² and a 38.5 m sphere, the default 30 m distance at 60°). With
+/// [`ShadowFit::Site`] a texel is the site's width over the resolution.
+const MIN_FRAME_RADIUS: f32 = 1.0;
+
+/// How far behind the near plane the camera frame keeps its volume (world
+/// units): between the camera and the near plane nothing is framed. The
+/// source's light carries a shadow near plane of 0.2, which serves its own
+/// cascade fit; the same figure pads the frustum slice here.
+const CAMERA_FRAME_BEHIND: f32 = 0.2;
 
 /// Depth safety padding of the light's orthographic frame (world units): the
-/// near and far planes each extend by this amount so casters at the edge are
-/// not clipped. Chosen by this crate.
-///
-/// The engine's value at this position serves a different layout: the only
-/// directional light in the environment prefab (the site environment package,
-/// soft shadows, intensity 1) serializes a shadow near plane of 0.2 (bit
-/// pattern `0x3e4ccccd`), which the pipeline's main-light shadow pass passes to
-/// the engine's directional shadow fitting as that fit's near-plane offset.
-/// The engine fits a segment of the camera frustum within the 25 m shadow
-/// distance (one cascade, margin 0.1, no conservative bounding sphere, 64
-/// iterations), not this module's site-wide caster bounding box, and that fit
-/// is not modelled here. So 0.2 cannot be substituted here directly: the two
-/// frames are not the same quantity.
+/// depth range extends by this amount at both ends so casters at the edge are
+/// not clipped.
 const DEPTH_PAD: f32 = 1.0;
 
-/// 阴影强度（`SiteShadow.params.x`）：站点环境主光的序列化 m_Shadows
-/// 强度 1.0，软影档。
-const SHADOW_STRENGTH: f32 = 1.0;
+/// The distance fade: from 90% of the settings' distance the shadow fades out
+/// and is gone at the distance itself.
+const FADE_START: f32 = 0.9;
 
-/// 软影槽（`params.y`）：站点管线资产开软影、环境主光同为软影，源装配
-/// 值 1。律的 fade 式不读此槽，写 1 是账面与源一致。
+/// The shadow parameters the consumer block's second slot carries (the
+/// `_MainLightShadowParams` shape): the main light intensity (1) and the soft
+/// shadow flag. Neither is a lane the lookup reads; they carry the fixed
+/// values of the site's main light so a line can be recomputed.
+const SHADOW_MAIN_LIGHT_INTENSITY: f32 = 1.0;
 const SHADOW_SOFT: f32 = 1.0;
-
-/// 距离 fade 两系数（`params.z` / `params.w`）。按引擎线性距离 fade
-/// 算式从两档现算：阴影距离 25 m（取平方 625）× 级联边距 0.1 →
-/// 边带 (1−0.1)² = 0.81 → 近点 0.81·625 = 506.25、分母 625−506.25 =
-/// 118.75，故 z = 1/118.75、w = −506.25/118.75。fade 在距相机
-/// 22.5–25 m 间从 0 升到 1——站点相机钳在个位数米，恒不触发，两数
-/// 是保真值不是病灶。
-const SHADOW_FADE_SCALE: f32 = 1.0 / 118.75;
-const SHADOW_FADE_BIAS: f32 = -506.25 / 118.75;
 
 /// The shadow account: the node's first read-back waits until the 60th
 /// rendered frame (scene assembly and pipeline compilation have settled).
@@ -214,13 +248,15 @@ fn probe_interval() -> Option<u64> {
     }
 }
 
-/// 深度图读回里判「非空」的阈值：clear 是 1.0，光栅深度只会更小。
-/// 只在 native 读回路径用（wasm 只落计数行，不读图）。
+/// The threshold at which a read-back texel counts as holding a depth (the
+/// cleared map is 1.0, and rasterised depth is only smaller). Used by the
+/// native read-back only (the browser build logs counts, not the map).
 #[cfg(not(target_arch = "wasm32"))]
 const PROBE_CLEAR_EPS: f32 = 0.9999;
 
-/// 深度 pass 帧块的 GPU 字节数：两个 4×4（裁剪矩阵 + 采样矩阵）+ 两个
-/// vec4（caster 偏置 + 向光方向）。
+/// The byte size of the depth pass's frame block: two 4×4 matrices (the clip
+/// matrix and the sampling matrix) and two vec4 (the caster bias and the
+/// direction towards the light).
 const FRAME_BYTES: usize = 160;
 
 /// The site pipeline asset's shadow depth bias and normal bias (both 1.0).
@@ -254,27 +290,49 @@ pub const PALETTE_WINDOW: u64 = (MAX_JOINTS * 64) as u64;
 /// device supports).
 pub const PALETTE_ALIGN: usize = 256;
 
-/// 消费块（`SiteShadow`）的 GPU 字节数：4×4 + 两个 vec4。
-const CONSUMER_BYTES: usize = 96;
+/// The consumer block's byte size: the matrix (64), then five vec4s: the map
+/// size, the shadow parameters and the three filter vectors of
+/// [`ShadowConsumer`]. The `SiteShadow` struct of `site_material.wesl` and
+/// `room_shell.wesl` declares the same fields in the same order.
+const CONSUMER_BYTES: usize = 64 + 5 * 16;
 
-/// 逐实体矩阵池的容量上限；超出的 caster 丢弃并告警一次（站点量级远
-/// 低于此，上限只是护栏）。
+/// The object matrix pool's capacity; casters beyond it are dropped and
+/// warned about once (a site holds far fewer, so this is only a guard).
 const OBJECT_CAPACITY: usize = 8192;
 
-/// 不进主光深度图的实体标记。
+/// The frame's depth map exceeds a mesh's vertex budget on the smallest GPUs
+/// only at the top of [`crate::shadow_settings::RESOLUTION_MAX`]; the maps are
+/// square and at most 8192 texels on a side.
+///
+/// The marker for entities that are not in the main light depth map.
 #[derive(Component)]
 pub struct NoShadowCast;
 
-/// 深度 pass 顶点着色器的帧块：槽序与 `shaders/shadow_depth.wgsl` 的
-/// `ShadowFrame` 是契约，两边同改。矩阵按列摊平（WGSL mat4x4 的内存序）。
+/// The camera fit's frustum slice of one render camera, written by
+/// [`fit_camera_frame`] in the render world's `Prepare` and read by
+/// [`prepare_shadow_draws`] in the same frame's `PrepareResources`: the
+/// frustum corners at the near plane and at the settings' distance
+/// ([`ShadowFit::Camera`]). A camera whose pose and projection did not change
+/// since the last frame keeps its corners.
+#[derive(Component, Clone, Copy)]
+struct ShadowCameraSlice {
+    near: [Vec3; 4],
+    far: [Vec3; 4],
+}
+
+/// The depth pass's vertex block: its slot order is the contract with
+/// `ShadowFrame` in `shaders/shadow_depth.wgsl`, and both change together.
+/// Matrices are laid out column by column (the memory order of a WGSL
+/// mat4x4).
 #[derive(ShaderType)]
 struct ShadowFrame {
-    /// 深度 pass 的裁剪矩阵（正交，z 近 0 远 1）。
+    /// The depth pass's clip matrix (orthographic, z from near 0 to far 1).
     light_view_proj: [Vec4; 4],
-    /// 采样矩阵：xy 图内 uv（含 y 翻转），z 比较深度。
+    /// The sampling matrix: xy is the map's uv (y flipped), z the depth
+    /// compared.
     world_to_shadow: [Vec4; 4],
-    /// The caster bias in world units: x along the light, y along
-    /// the normal (both negative, as the pipeline computes them).
+    /// The caster bias in world units: x along the light, y along the normal
+    /// (both negative, as the pipeline computes them).
     shadow_bias: Vec4,
     /// xyz: the direction towards the light.
     light_direction: Vec4,
@@ -296,15 +354,26 @@ fn mat4_bytes(matrix: Mat4, bytes: &mut Vec<u8>) {
     }
 }
 
-/// 消费块的 Rust 形：槽序与 `shaders/site_material.wesl` 的 `SiteShadow`
-/// 是契约，两边同改。摊平序 = 矩阵四列 + size + params。
+/// The consumer block's Rust form: its slot order is the contract with
+/// `SiteShadow` in `shaders/site_material.wesl` and `shaders/room_shell.wesl`,
+/// and both change together. The flat order is the matrix's four columns, the
+/// size, the parameters, then the filter constants.
 struct ShadowConsumer {
     world_to_shadow: Mat4,
-    /// (宽, 高, 1/宽, 1/高)。
+    /// (width, height, 1/width, 1/height).
     size: [f32; 4],
-    /// `_MainLightShadowParams` 形状：.x 强度，.z 距离平方系数，.w fade
-    /// 起点。强度 0 是恒等档（律的强度门把 atten 折成 1）。
+    /// `_MainLightShadowParams` shape: .x main light intensity, .y soft
+    /// shadows. An intensity of 0 reads as a fully lit receiver, which is how
+    /// a frame without a map is written.
     params: [f32; 4],
+    /// `(filter, fade start m, fade end m, strength)`; the filter is 0 hard,
+    /// 1 tent, 2 Pcf, 3 Pcss.
+    filtering: Vec4,
+    /// `(Pcf radius uv, Pcss light size uv per blocker metre, largest radius
+    /// uv, 0)`.
+    kernel: Vec4,
+    /// `(texel uv, 0, 0, 0)`.
+    depth: Vec4,
 }
 
 impl ShadowConsumer {
@@ -316,54 +385,106 @@ impl ShadowConsumer {
                 bytes.extend_from_slice(&component.to_le_bytes());
             }
         }
+        for slot in [self.filtering, self.kernel, self.depth] {
+            for component in slot.to_array() {
+                bytes.extend_from_slice(&component.to_le_bytes());
+            }
+        }
         debug_assert_eq!(bytes.len(), CONSUMER_BYTES);
         bytes
     }
+
+    /// The block of a frame with no usable light frame: no matrix and no
+    /// size, intensity 0, so the lookup reads a depth outside [0, 1) and the
+    /// receiver is fully lit.
+    fn unlit() -> Self {
+        Self {
+            world_to_shadow: Mat4::ZERO,
+            size: [0.0; 4],
+            params: [0.0; 4],
+            filtering: Vec4::ZERO,
+            kernel: Vec4::ZERO,
+            depth: Vec4::ZERO,
+        }
+    }
 }
 
-/// 渲染世界的共享阴影资源：一次建，逐帧只写 buffer。
+/// The render world's shared shadow resources: built once, then only the
+/// buffers are written each frame. The depth maps are re-created when the
+/// settings' resolution changes (see [`rebuild_shadow_maps`]).
 #[derive(Resource)]
 pub struct ShadowMapGpu {
-    /// 深度图本体：读回拷贝的源（账目行的覆盖率从这里量）。
+    /// The side of the depth maps, in texels (the settings' resolution the
+    /// maps of `depth_texture`, `static_view` and the read-back were created
+    /// for).
+    size: u32,
+    /// The depth map itself: the source of the read-back (the account measures
+    /// coverage from it).
     pub depth_texture: Texture,
-    /// 深度图视图：深度 pass 的 attachment，站点材质的采样源。
+    /// The depth map's view: the depth pass's attachment and the site and
+    /// room materials' sampling source.
     pub depth_view: TextureView,
-    /// 比较采样器：双线性比较，每个 tap 由硬件对相邻 2×2 texel 各比较一次
-    /// 再按小数位插值——引擎给主光阴影图的过滤方式就是双线性（只有强制点
-    /// 采样的平台例外），九 tap 帐篷滤波的小数偏移正是按这一点排的；
-    /// `LessEqual` = 存储深度 ≥ 片元深度时点亮（本图 z 从近到远递增，normal-Z）。
+    /// The comparison sampler: a bilinear compare, each tap compares the four
+    /// texels around its point and interpolates by the fraction between them;
+    /// `LessEqual` = a stored depth at or behind the fragment is lit (the
+    /// map's z grows with distance).
     pub cmp_sampler: Sampler,
-    /// 消费块 buffer：全族一份，绑站点材质 group 3 binding 10。
+    /// How many prepares the depth maps of `depth_texture` have served.
+    maps_frames: u32,
+    /// The consumer block's buffer: one for every material, bound at group 3
+    /// binding 10 (the room shell's binding 4).
     pub consumer_buffer: Buffer,
-    /// 深度 pass 帧块 buffer。
+    /// The depth pass's frame block.
     frame_buffer: Buffer,
-    /// 逐实体世界矩阵池：动态 offset 绑定，槽距 [`ShadowMapGpu::object_stride`]。
+    /// The per-caster world matrix pool: a dynamic-offset binding with the
+    /// slot size of `object_stride`.
     object_buffer: Buffer,
-    /// 深度管线的 group 0 布局（描述符经 PipelineCache 缓存）。
+    /// The depth pipelines' group 0 layout (descriptors are cached by the
+    /// `PipelineCache`).
     depth_layout: BindGroupLayoutDescriptor,
     /// The skinned entry point's group 1 layout: one palette window, bound at
     /// a dynamic offset.
     skin_layout: BindGroupLayoutDescriptor,
-    /// The static map (module comment, "Static map"): same size and format
-    /// as the frame's map, drawn as an attachment and read by the copy.
+    /// The static map (module comment, "Static map"): same size and format as
+    /// the frame's map, drawn as an attachment and read by the copy.
     static_view: TextureView,
     /// The copy's layout (the static map as a depth texture and a nearest,
     /// non-comparison sampler), its sampler and its pipeline.
     copy_layout: BindGroupLayoutDescriptor,
     copy_sampler: Sampler,
     copy_pipeline: CachedRenderPipelineId,
-    /// 动态 offset 槽距：按设备对齐取，≥ 64 字节。
+    /// The dynamic-offset slot stride, aligned by the device, at least 64
+    /// bytes.
     object_stride: u32,
-    /// 单个矩阵的绑定尺寸（动态 offset 校验用）。
+    /// One matrix's binding size (for the dynamic-offset check).
     object_binding_size: u64,
 }
 
-/// 一条深度 draw：网格句柄 + 世界矩阵 + 该网格布局特化出的管线。
+impl ShadowMapGpu {
+    /// Whether a camera frame that never shows a caster may leave it out.
+    /// Nothing is left out until [`CASTER_HOLD_FRAMES`] prepares after the
+    /// maps were rebuilt: the camera frame of the first frames may describe a
+    /// view that is still being set up.
+    fn frame_has_settled(&self) -> bool {
+        self.maps_frames >= CASTER_HOLD_FRAMES
+    }
+}
+
+/// One depth draw: a mesh handle, a world matrix and the pipeline specialised
+/// for that mesh's layout.
+#[derive(Clone, Copy)]
 struct ShadowDraw {
     mesh: AssetId<Mesh>,
     world: Mat4,
+    /// The world box of the mesh's bind-pose box, as the light frame and the
+    /// account measure it (the eight corners).
+    corners: [Vec3; 8],
     pipeline: CachedRenderPipelineId,
     two_sided: bool,
+    /// The sky shell: drawn into the map only while the frame is derived
+    /// from every caster (a camera frame around the view would have it cover
+    /// the whole map).
+    sky_shell: bool,
     /// Consecutive extractions this draw stayed the same.
     stable: u32,
     /// The draw is in the static map, not drawn per frame.
@@ -399,20 +520,264 @@ struct SkinnedTally {
     joints: usize,
 }
 
-/// 抽取与解算结果：本帧的 caster 名单 + 内容世界包围盒。
+/// The light-space planes of one frame's frame: a rigid caster inside them
+/// cannot reach the map, so its place and pipeline are kept; a caster outside
+/// them is queued again (and a camera frame also leaves out the casters that
+/// are wholly behind it). Evaluation works in light space, where a box is an
+/// interval per axis.
+#[derive(Clone, Copy, PartialEq)]
+struct LightPlane {
+    /// The direction towards the light (the light view's axes follow it).
+    to_light: Vec3,
+    /// The cross section of the map, along the light's right and up axes.
+    cross: Spans,
+    /// The depth range of the map, along the light: [min, max] of the
+    /// distance towards the light.
+    depth: Span,
+}
+
+impl Default for LightPlane {
+    /// No plane holds anything: every caster is queued again.
+    fn default() -> Self {
+        Self {
+            to_light: Vec3::Y,
+            cross: Spans::NONE,
+            depth: Span::NONE,
+        }
+    }
+}
+
+impl LightPlane {
+    /// A plane along `to_light` that holds nothing.
+    fn none(to_light: Vec3) -> Self {
+        Self {
+            to_light,
+            ..Self::default()
+        }
+    }
+
+    /// The light view of a world point.
+    fn light_space(&self, point: Vec3) -> LightPoint {
+        let (right, up, towards) = light_axes(self.to_light);
+        LightPoint {
+            across: Vec2::new(point.dot(right), point.dot(up)),
+            depth: point.dot(towards),
+        }
+    }
+
+    /// The light-space box of a box given its world corners.
+    fn boxed(&self, corners: &[Vec3; 8]) -> Box3 {
+        let mut boxed = Box3::NONE;
+        for corner in corners {
+            boxed.grow(self.light_space(*corner));
+        }
+        boxed
+    }
+
+    /// Whether the box is inside the cross section and the depth range: then
+    /// no part of it leaves the map.
+    fn holds(&self, corners: &[Vec3; 8]) -> bool {
+        let boxed = self.boxed(corners);
+        boxed.is_set()
+            && boxed.across.min.cmpge(self.cross.min).all()
+            && boxed.across.max.cmple(self.cross.max).all()
+            && boxed.depth.min >= self.depth.min
+            && boxed.depth.max <= self.depth.max
+    }
+
+    /// Whether the box lies wholly beyond one side of the map: beyond the
+    /// cross section across, or behind the nearest depth (a receiver inside
+    /// the map cannot stand behind it, so neither it nor its shadow reaches
+    /// the map).
+    fn outside(&self, corners: &[Vec3; 8]) -> bool {
+        let boxed = self.boxed(corners);
+        if !boxed.is_set() {
+            return false;
+        }
+        boxed.across.max.cmplt(self.cross.min).any()
+            || boxed.across.min.cmpgt(self.cross.max).any()
+            || boxed.depth.max < self.depth.min
+    }
+}
+
+/// A point in the light view.
+struct LightPoint {
+    /// Light x and y.
+    across: Vec2,
+    /// The distance along the direction towards the light.
+    depth: f32,
+}
+
+/// A box in the light view.
+#[derive(Clone, Copy, Default)]
+struct Box3 {
+    across: Spans,
+    depth: Span,
+}
+
+impl Box3 {
+    const NONE: Self = Self {
+        across: Spans::NONE,
+        depth: Span::NONE,
+    };
+
+    /// Whether the box holds a point.
+    fn is_set(&self) -> bool {
+        self.across.is_set() && self.depth.is_set()
+    }
+
+    /// The box grown to hold `point`.
+    fn grow(&mut self, point: LightPoint) {
+        self.across.grow(point.across);
+        self.depth.grow(point.depth);
+    }
+}
+
+/// An interval that starts empty: the first value it takes sets it.
+#[derive(Clone, Copy, Default, PartialEq)]
+struct Span {
+    min: f32,
+    max: f32,
+}
+
+impl Span {
+    const NONE: Self = Self {
+        min: f32::INFINITY,
+        max: f32::NEG_INFINITY,
+    };
+
+    /// Whether the interval holds a value.
+    fn is_set(&self) -> bool {
+        self.min <= self.max
+    }
+
+    /// The interval grown to hold `value`.
+    fn grow(&mut self, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        self.min = self.min.min(value);
+        self.max = self.max.max(value);
+    }
+}
+
+/// An interval in the light's x and y, starting empty.
+#[derive(Clone, Copy, Default, PartialEq)]
+struct Spans {
+    min: Vec2,
+    max: Vec2,
+}
+
+impl Spans {
+    const NONE: Self = Self {
+        min: Vec2::splat(f32::INFINITY),
+        max: Vec2::splat(f32::NEG_INFINITY),
+    };
+
+    /// Whether both axes hold a value.
+    fn is_set(&self) -> bool {
+        self.min.cmple(self.max).all()
+    }
+
+    /// The interval grown to hold `point`.
+    fn grow(&mut self, point: Vec2) {
+        if !point.is_finite() {
+            return;
+        }
+        self.min = self.min.min(point);
+        self.max = self.max.max(point);
+    }
+
+    /// The interval grown to hold `other`.
+    fn merge(&mut self, other: Self) {
+        if other.is_set() {
+            self.grow(other.min);
+            self.grow(other.max);
+        }
+    }
+}
+
+/// The axes of a light view looking along `to_light`: right, up and the
+/// direction towards the light. The up axis turns to Z for a light close to
+/// straight above so that the axes do not degenerate.
+fn light_axes(to_light: Vec3) -> (Vec3, Vec3, Vec3) {
+    let up = if to_light.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
+    let right = up.cross(to_light).normalize();
+    let up = to_light.cross(right);
+    (right, up, to_light)
+}
+
+/// The light-space box of a box given at two opposite corners.
+fn light_box(to_light: Vec3, low: Vec3, high: Vec3) -> Box3 {
+    let plane = LightPlane::none(to_light);
+    let mut corners = [Vec3::ZERO; 8];
+    let mut index = 0;
+    for sx in [low.x, high.x] {
+        for sy in [low.y, high.y] {
+            for sz in [low.z, high.z] {
+                corners[index] = Vec3::new(sx, sy, sz);
+                index += 1;
+            }
+        }
+    }
+    plane.boxed(&corners)
+}
+
+/// The light view of one frame's frame (module comment, "Light frame").
+struct LightFrame {
+    /// The axes of the light view (see [`light_axes`]).
+    axes: (Vec3, Vec3, Vec3),
+    /// Where the light view looks: the frame's centre.
+    center: Vec3,
+    /// The half side of the orthographic box (the light's x and y).
+    half: f32,
+    /// The near and far distances of the orthographic box along the light.
+    near: f32,
+    far: f32,
+    /// The planes an extraction tests its casters against.
+    plane: LightPlane,
+}
+
+/// How much one extraction saw and how many of the rigid casters the light
+/// frame keeps.
+#[derive(Default, Clone, Copy)]
+struct ShadowCasterTally {
+    seen: usize,
+    kept: usize,
+    /// Of the kept, the ones that are the sky shell.
+    sky_shells: usize,
+}
+
+/// 抽取与解算结果：本帧的 caster 名单与光源框。
 #[derive(Resource, Default)]
 struct ShadowDrawList {
     draws: Vec<ShadowDraw>,
-    bounds: Option<(Vec3, Vec3)>,
-    /// Whether this extraction's draws differ from the previous one's in any
-    /// mesh, world matrix bit, winding flag or count. The object matrix pool
-    /// holds the previous draws' matrices, so it is rewritten only then.
-    changed: bool,
+    /// The planes of the light frame the last prepare wrote: a caster inside
+    /// them cannot reach the map and keeps its place and pipeline.
+    plane: LightPlane,
+    /// The settings the last prepare drew with.
+    settings: Option<ShadowSettings>,
+    /// How many extractions have drawn under those settings (the casters that
+    /// never reach a camera frame are left out once the frame has settled,
+    /// [`CASTER_HOLD_FRAMES`] later).
+    planes_from: u32,
+    casters: ShadowCasterTally,
+    /// Rigid casters outside a camera frame's planes, wholly behind it or
+    /// beyond the fade, left out of the list.
+    left_out: usize,
     /// The skinned character casters of this extraction.
     skinned: Vec<SkinnedShadowDraw>,
+    /// The world box of every skinned caster, merged: the depth range takes
+    /// it in, so a character does not move the cross section.
+    skinned_extent: Option<(Vec3, Vec3)>,
     /// Their joint palettes, each at a [`PALETTE_ALIGN`]-aligned offset.
     palette_bytes: Vec<u8>,
     skinned_tally: SkinnedTally,
+    /// Whether this extraction's draw list differs from the previous one's in
+    /// any mesh, world matrix bit, winding flag or count (the object pool and
+    /// the static map follow it).
+    changed: bool,
+
     /// The static map no longer holds exactly the baked draws as they are
     /// now; set by every change, turned into a bake request by
     /// [`plan_static_bake`].
@@ -423,6 +788,9 @@ struct ShadowDrawList {
     static_generation: u64,
     /// Baked draws in the list.
     baked_count: usize,
+    /// Total casters truncated by [`OBJECT_CAPACITY`] (the account reports it
+    /// once).
+    overflow: usize,
 }
 
 /// What the node's last bake of the static map drew: the generation it
@@ -451,44 +819,70 @@ struct ShadowAccount(Mutex<AccountInner>);
 
 #[derive(Default)]
 struct AccountInner {
-    /// prepare 解出光源框（参数行有强度）的帧数。
+    /// Prepares that resolved a light frame (the parameters have an
+    /// intensity).
     frames_prepared: u64,
-    /// 节点实际录过 draw 的帧数。
+    /// Node runs that recorded at least one draw.
     frames_drawn: u64,
-    /// 因管线未编好整帧静默跳过的次数。
+    /// Whole frames skipped because a pipeline was not compiled yet.
     frames_skipped_not_ready: u64,
-    /// 节点跑了但一条 draw 都没录的帧数。
+    /// Node runs that recorded nothing.
     frames_empty_pass: u64,
-    /// 最近一帧 prepare 的 caster 名单数 / 其中布局取不出（INVALID）数。
+    /// The latest prepare's caster list, and how many of them have no layout
+    /// that can be drawn (INVALID).
     casters: usize,
     casters_invalid: usize,
-    /// 最近一帧节点实际录进 pass 的 draw 数。
+    /// The latest node run's recorded draws.
     draws_recorded: usize,
     /// Of those, the draws in the static map (as of its last bake) and the
     /// rigid draws recorded in the frame's own pass; bakes of the static map.
     static_recorded: usize,
     per_frame_rigid: usize,
     static_bakes: u64,
+    /// Since the settings last changed: the prepares run, and the ones whose
+    /// light frame block and consumer block were written.
+    prepares_since: u64,
+    frames_written: u64,
     /// The latest prepare's skinned casters, those whose layout has no
     /// position/normal/joint streams, and the skinned draws last recorded.
     skinned_casters: usize,
     skinned_invalid: usize,
     skinned_recorded: usize,
     skinned_tally: SkinnedTally,
-    /// 最近一次解出的光框几何与消费矩阵。
+    /// The latest frame's light box geometry and consumer matrix.
     light_box: Option<(f32, f32, f32)>,
     /// The latest caster bias written: texel size, depth bias and normal
     /// bias, in metres.
     caster_bias: Option<(f32, f32, f32)>,
+    /// The settings the latest prepare drew with.
+    settings: Option<ShadowSettings>,
+    /// The rigid casters the last extraction saw, kept and left out, and
+    /// whether a sky shell was among them.
+    casters_seen: usize,
+    casters_kept: usize,
+    casters_left_out: usize,
+    sky_shell_in_frame: bool,
+    /// Total casters truncated by the object capacity.
+    casters_overflow: usize,
+    /// The depth range, the sun's penumbra per metre and the map's side of
+    /// the latest frame.
+    depth_range: f32,
+    penumbra_per_metre: f32,
+    resolution: u32,
     /// The latest prepare's rigid casters whose mesh has no normal stream.
     rigid_without_normals: usize,
     world_to_shadow: Option<Mat4>,
-    /// 深度图读回缓冲（复用；native 侧诊断，wasm 不建）。
+    /// The depth-map read-back buffer (reused; native diagnosis only, the
+    /// browser build has none). The maps of another side replace it with the
+    /// previous read-back.
     #[cfg(not(target_arch = "wasm32"))]
     probe_buffer: Option<Buffer>,
-    /// 有拷贝已录、下一帧节点头读回。
+    /// The read-back buffer's size, in bytes (0: none).
+    #[cfg(not(target_arch = "wasm32"))]
+    probe_bytes: u64,
+    /// A copy is recorded and the node's next head reads it back.
     probe_pending: bool,
-    /// 下一次读回的帧序（frames_drawn 口径）。
+    /// The frame order of the next read-back (in frames drawn).
     next_probe_frame: u64,
     /// The previous read-back's texels and player window (native diagnosis).
     #[cfg(not(target_arch = "wasm32"))]
@@ -534,27 +928,35 @@ struct DepthPipelines {
     queued: HashMap<DepthPipelineKey, CachedRenderPipelineId>,
 }
 
-/// Extract：抽本帧 caster（含预计算包围盒）。蒙皮/天空/表情/雨在查询里
-/// 排除（模块注释「Caster 集」）；包围盒按网格 id 缓存，首帧后零开销。
-/// The list is updated in place. A draw's corners depend only on its world
-/// matrix and its mesh's cached local bounds; when the previous extraction's
-/// draw at the same index had the same mesh and world matrix bits, and those
-/// bounds were not dropped since, its corners are taken as they are. The
-/// total bounds are folded over every caster's corners in query order, as
-/// before, so the list and the bounds come out bit for bit the same.
+/// Extract：抽本帧 caster（含预计算包围盒）。The rigid casters are the meshes
+/// without a skin, except emote draws, rain and whatever is marked
+/// [`NoShadowCast`] (the query) or fails the renderer, visibility and
+/// source-pass tests below (module comment, "Caster set"). The sky shell is
+/// taken too and marked: the light frame is derived from every caster while it
+/// has not settled (the draw keeps its static-map place when nothing but the
+/// sky shell changes), and the prepare leaves it out of a camera frame, which
+/// would otherwise have it cover the whole map.
 ///
-/// 层级显隐与取景剔除是两件事：光源能照到的物体即使在主相机画外，
-/// 仍可能把影子投进画内。不能用 ViewVisibility 筛本名单，否则旋转相机
-/// 会同时删改 caster 与光源正交框，使整张深度图的尺度、采样格和影子跳变。
-/// InheritedVisibility 保留显式隐藏和父级显隐，不把相机视锥变成光源视锥。
+/// A caster in the same place as the preceding extraction's, whose corners
+/// the last frame's planes still hold, keeps its draw (pipeline, static-map
+/// place, stability); every other one is queued again. A draw outside the
+/// planes of a camera frame is left out once the frame has settled
+/// ([`CASTER_HOLD_FRAMES`]).
 fn extract_shadow_casters(
     mut list: ResMut<ShadowDrawList>,
+    gpu: Option<Res<ShadowMapGpu>>,
     casters: Extract<
         Query<
-            (&Mesh3d, &GlobalTransform, &InheritedVisibility, Option<&SourceMaterialPasses>,
-             Option<&SourceRenderer>, Option<&ChildOf>),
             (
-                Without<SkyDome>,
+                &Mesh3d,
+                &GlobalTransform,
+                &InheritedVisibility,
+                Option<&ChildOf>,
+                Option<&SourceRenderer>,
+                Option<&SourceMaterialPasses>,
+                Has<SkyDome>,
+            ),
+            (
                 Without<EmoteDraw>,
                 Without<SkinnedMesh>,
                 Without<NoShadowCast>,
@@ -573,6 +975,9 @@ fn extract_shadow_casters(
     let list = &mut *list;
     let stored = &mut corners_of.0;
     let previous = list.draws.len();
+    // The list is built here and written back below: the corners' place and
+    // the draws' place go together.
+    stored.clear();
     // Bounds of meshes that left the asset store are dropped; a draw of such
     // a mesh is recomputed from the bounds its first sighting now caches.
     let mut dropped: Vec<AssetId<Mesh>> = Vec::new();
@@ -583,13 +988,28 @@ fn extract_shadow_casters(
         }
         keep
     });
+    let mut plane = list.plane;
+    let to_light = Vec3::from_array(SiteEnv::neutral().globals.light_vector);
+    if let Some(direction) = to_light.try_normalize() {
+        plane.to_light = direction;
+    }
+    // The camera frame of the frames just after the maps were rebuilt may
+    // describe a view still being set up, so nothing is left out until it has
+    // settled.
+    let leaves_out_hidden = gpu.is_some_and(|gpu| gpu.frame_has_settled())
+        && list
+            .settings
+            .is_some_and(|settings| list.planes_from >= CASTER_HOLD_FRAMES && uses_camera_frame(settings));
+
     let mut changed = false;
     // A baked draw that changes or leaves the list makes the static map
     // stale.
     let mut static_dirty = false;
-    let mut count = 0usize;
-    let mut bounds: Option<(Vec3, Vec3)> = None;
-    for (mesh, transform, visibility, passes, renderer, parent) in &casters {
+    let mut draws: Vec<ShadowDraw> = Vec::with_capacity(list.draws.capacity().min(OBJECT_CAPACITY));
+    let mut seen = 0usize;
+    let mut sky_shells = 0usize;
+    let mut left_out = 0usize;
+    for (mesh, transform, visibility, parent, renderer, passes, sky_shell) in &casters {
         if renderer.is_some_and(|renderer| !renderer.casts_shadows()) {
             continue;
         }
@@ -597,9 +1017,12 @@ fn extract_shadow_casters(
         // hierarchy. Honour that object's inherited visibility and source
         // activity, without reviving disabled renderers or hidden ancestors.
         let visible_to_light = if renderer.is_some_and(SourceRenderer::shadows_only) {
-            parent.and_then(|parent| parent_visibility.get(parent.parent()).ok())
+            parent
+                .and_then(|parent| parent_visibility.get(parent.parent()).ok())
                 .is_some_and(|visibility| visibility.get())
-        } else { visibility.get() };
+        } else {
+            visibility.get()
+        };
         if !visible_to_light {
             continue;
         }
@@ -611,31 +1034,28 @@ fn extract_shadow_casters(
         if passes.is_some_and(|passes| !passes.has_shadow_caster()) {
             continue;
         }
+        seen += 1;
+        if draws.len() >= OBJECT_CAPACITY {
+            continue;
+        }
         let id = mesh.0.id();
-        let two_sided = renderer.is_some_and(|renderer|
-            renderer.shadow_casting() == Some(SourceShadowCastingMode::TwoSided));
-        let world = transform.to_matrix();
-        let slot = count;
-        count += 1;
-        let before = list.draws.get_mut(slot).filter(|_| slot < stored.len());
-        let same_world = before.as_ref().is_some_and(|draw| {
-            draw.world.to_cols_array().map(f32::to_bits) == world.to_cols_array().map(f32::to_bits)
+        // ShadowsOnly draws its casters two-sided (there is no front to face
+        // the light), as the source's cast mode does.
+        let two_sided = renderer.is_some_and(|renderer| {
+            matches!(
+                renderer.shadow_casting(),
+                Some(SourceShadowCastingMode::TwoSided | SourceShadowCastingMode::ShadowsOnly)
+            )
         });
-        let reused = same_world
-            && before.as_ref().is_some_and(|draw| draw.mesh == id)
-            && !dropped.contains(&id);
+        let world = transform.to_matrix();
+        let slot = draws.len();
+        let before = list.draws.get(slot).filter(|_| slot < stored.len());
+        let reused = before.is_some_and(|draw| {
+            draw.mesh == id
+                && draw.world.to_cols_array().map(f32::to_bits) == world.to_cols_array().map(f32::to_bits)
+                && !dropped.contains(&id)
+        });
         let corners = if reused {
-            let draw = before.expect("reused draw exists");
-            if draw.two_sided != two_sided {
-                draw.two_sided = two_sided;
-                draw.pipeline = CachedRenderPipelineId::INVALID;
-                changed = true;
-                static_dirty |= draw.baked;
-                draw.baked = false;
-                draw.stable = 0;
-            } else {
-                draw.stable = draw.stable.saturating_add(1);
-            }
             stored[slot]
         } else {
             let local = local_bounds.entry(id).or_insert_with(|| {
@@ -654,71 +1074,93 @@ fn extract_shadow_casters(
                     }
                 }
             }
-            if slot < OBJECT_CAPACITY {
-                let draw = ShadowDraw {
-                    mesh: id,
-                    world,
-                    pipeline: CachedRenderPipelineId::INVALID,
-                    two_sided,
-                    stable: 0,
-                    baked: false,
-                };
-                match before {
-                    Some(old) => {
-                        changed |= !same_world || old.mesh != id || old.two_sided != two_sided;
-                        static_dirty |= old.baked;
-                        *old = draw;
-                        stored[slot] = corners;
-                    }
-                    None => {
-                        changed = true;
-                        static_dirty |= list.draws[slot.min(list.draws.len())..]
-                            .iter()
-                            .any(|draw| draw.baked);
-                        list.draws.truncate(slot);
-                        stored.truncate(slot);
-                        list.draws.push(draw);
-                        stored.push(corners);
-                    }
-                }
-            }
             corners
         };
-        // 8 个角换到世界系并入总包围盒：光源正交框从这里解出，不发明场地尺寸。
-        for corner in corners {
-            bounds = Some(match bounds {
-                Some((min, max)) => (min.min(corner), max.max(corner)),
-                None => (corner, corner),
-            });
+        // The future planes: the last frame's moved by the direction change
+        // and already covering this frame's corners (which the new ones,
+        // once derived, hold as well).
+        if reused && plane.holds(&corners) {
+            changed |= list.draws[slot].two_sided != two_sided || list.draws[slot].sky_shell != sky_shell;
+            let mut draw = list.draws[slot];
+            if draw.two_sided != two_sided {
+                static_dirty |= draw.baked;
+                draw.two_sided = two_sided;
+                draw.pipeline = CachedRenderPipelineId::INVALID;
+                draw.baked = false;
+                draw.stable = 0;
+            } else {
+                draw.stable = draw.stable.saturating_add(1);
+            }
+            // A camera frame never bakes the sky shell: it is drawn into the
+            // frame's own pass.
+            draw.sky_shell = sky_shell;
+            sky_shells += sky_shell as usize;
+            draws.push(draw);
+            stored.push(corners);
+            continue;
         }
+        // A new box, or one outside the planes: left out when the view can
+        // never show it, otherwise taken again (the static map must not keep
+        // drawing a box that moved).
+        if !sky_shell && leaves_out_hidden && plane.outside(&corners) {
+            left_out += 1;
+            continue;
+        }
+        changed = true;
+        static_dirty |= before.is_some_and(|draw| draw.baked);
+        sky_shells += sky_shell as usize;
+        draws.push(ShadowDraw {
+            mesh: id,
+            world,
+            corners,
+            pipeline: CachedRenderPipelineId::INVALID,
+            two_sided,
+            sky_shell,
+            stable: 0,
+            baked: false,
+        });
+        stored.push(corners);
     }
-    if count > OBJECT_CAPACITY && !*overflow_warned {
+    let overflow = seen.saturating_sub(OBJECT_CAPACITY);
+    if overflow > 0 && !*overflow_warned {
         *overflow_warned = true;
-        warn!(
-            "主光阴影 caster 超过容量上限 {OBJECT_CAPACITY}，超出部分不投影（仅告警一次）"
-        );
+        warn!("main-light shadow: {overflow} casters beyond the capacity of {OBJECT_CAPACITY} cast no shadow (warned once)");
     }
-    let kept = count.min(OBJECT_CAPACITY);
-    changed |= kept != previous;
-    static_dirty |= list.draws[kept.min(list.draws.len())..]
+    changed |= draws.len() != previous;
+    // A draw that left the list after the len above (the list shrank) or in
+    // its middle makes the static map stale.
+    static_dirty |= list.draws[draws.len().min(list.draws.len())..]
         .iter()
         .any(|draw| draw.baked);
-    list.draws.truncate(kept);
-    stored.truncate(kept);
-    list.bounds = bounds;
+    list.draws = draws;
+    list.casters = ShadowCasterTally {
+        seen,
+        kept: list.draws.len(),
+        sky_shells,
+    };
+    list.left_out = left_out;
+    list.overflow = overflow;
+    list.planes_from = list.planes_from.saturating_add(1);
     list.changed = changed;
     list.static_dirty |= static_dirty;
 }
 
+/// Whether the frame follows the camera ([`ShadowFit::Camera`]); the render
+/// world's copy of the settings comes with the first extraction, so the
+/// default stands in before it.
+fn uses_camera_frame(settings: ShadowSettings) -> bool {
+    settings.enabled && settings.fit == ShadowFit::Camera
+}
+
 /// Extract, after [`extract_shadow_casters`]: the skinned character casters
-/// (module comment, "Caster 集") and their joint palettes of this frame.
+/// (module comment, "Caster set") and their joint palettes of this frame.
 ///
-/// The light box stays the rigid casters' box. A skinned draw's box here is
-/// conservative (every joint's image of the bind-pose box), so folding it in
-/// would move the light box, and with it every texel of the map, whenever a
-/// character animates. The characters stand inside the site's world box, which
-/// the rigid box contains; a vertex nearer than the near plane is clamped to it
-/// by the skinned entry point.
+/// The light boxes stay the rigid casters' (a skinned draw's box is
+/// conservative, so the cross section would move whenever a character
+/// animates); only the depth range takes the skinned casters in, as the box
+/// of all of them, so a character beyond the rigid depth range still casts. A
+/// vertex nearer than the near plane is clamped to it by the skinned entry
+/// point.
 ///
 /// Renderers that share one skin (the same joints and inverse bind poses)
 /// share one palette. A palette is the joint's global transform times its
@@ -756,6 +1198,7 @@ fn extract_skinned_casters(
     local_bounds.retain(|id, _| meshes.contains(*id));
     list.skinned.clear();
     list.palette_bytes.clear();
+    list.skinned_extent = None;
     let mut tally = SkinnedTally::default();
     // Skin -> (palette byte offset, index into `palette_matrices`).
     let mut palettes: HashMap<(AssetId<SkinnedMeshInverseBindposes>, Vec<Entity>), (u32, usize)> =
@@ -798,7 +1241,7 @@ fn extract_skinned_casters(
                         if !*too_many_warned {
                             *too_many_warned = true;
                             warn!(
-                                "主光阴影：蒙皮网格关节数 {count} 超过调色板上限 {MAX_JOINTS}，该网格不投影（仅告警一次）"
+                                "main-light shadow: a skinned mesh has {count} joints, beyond the palette's {MAX_JOINTS}; it casts no shadow (warned once)"
                             );
                         }
                         continue;
@@ -842,6 +1285,10 @@ fn extract_skinned_casters(
         } else {
             tally.npc += 1;
         }
+        list.skinned_extent = Some(match list.skinned_extent {
+            Some((low, high)) => (low.min(min), high.max(max)),
+            None => (min, max),
+        });
         list.skinned.push(SkinnedShadowDraw {
             mesh: id,
             palette_offset,
@@ -908,70 +1355,304 @@ pub fn push_palette(bytes: &mut Vec<u8>, matrices: &[Mat4]) -> u32 {
     offset as u32
 }
 
-/// 光源向正交的一对矩阵：深度 pass 用裁剪矩阵，消费侧用采样矩阵
-/// （xy 已折进 [0,1] 且带 y 翻转——WebGPU 帧缓冲原点在左上而 NDC y 向上，
-/// 纹理 v=0 对应 NDC y=+1；z 是 [0,1] 比较深度，近 0 远 1，
-/// `orthographic` 的 z 语义恰是这一约定）。随矩阵带回框的几何三数
-/// （光系宽/高/深度程，米），账目行用它折 texel 尺寸与深度差。
+/// The light view's orthographic matrices: the depth pass's clip matrix and
+/// the consumer's sampling matrix (xy folded into [0, 1] and y flipped: a
+/// WebGPU framebuffer's origin is at the top left while NDC y points up, so
+/// texture v = 0 is NDC y = +1; z is the compared depth in [0, 1], near 0
+/// and far 1, which is exactly `orthographic`'s z convention). The frame's
+/// geometry travels with the matrices (the light-space width and the depth
+/// range, in metres), and the account derives texel size and depth gaps from
+/// it.
 struct LightMatrices {
     clip: Mat4,
     consumer: Mat4,
     width: f32,
-    height: f32,
     depth: f32,
     /// The unit direction towards the light.
     to_light: Vec3,
 }
 
-fn light_matrices(env: &SiteEnv, bounds: (Vec3, Vec3)) -> Option<LightMatrices> {
-    let to_light = Vec3::from_array(env.globals.light_vector).normalize_or_zero();
-    if to_light == Vec3::ZERO {
-        return None;
+/// The shortest depth range a frame is given, in metres (a slice whose
+/// casters all sit at one distance).
+const MIN_DEPTH_RANGE: f32 = 2.0;
+
+impl LightFrame {
+    /// The clip and sampling matrices of the frame (the light axes, its
+    /// centre and the depth range above).
+    fn matrices(&self) -> Option<LightMatrices> {
+        let (right, up, towards) = self.axes;
+        if self.far.partial_cmp(&self.near) != Some(std::cmp::Ordering::Greater) || !self.half.is_finite() || self.half <= 0.0 {
+            return None;
+        }
+        // The light view: the axes again, put on the frame's centre. The view
+        // looks away from the light (its z axis points towards it), so the
+        // distance in front of it is the negated depth towards the light, the
+        // range `near..far` spans.
+        let view = Mat4::from_cols(
+            right.extend(0.0),
+            up.extend(0.0),
+            towards.extend(0.0),
+            self.center.extend(1.0),
+        )
+        .inverse();
+        let proj = glam::camera::rh::proj::directx::orthographic(
+            -self.half,
+            self.half,
+            -self.half,
+            self.half,
+            self.near,
+            self.far,
+        );
+        let light_view_proj = proj * view;
+        // uv 折算：u = 0.5x + 0.5，v = −0.5y + 0.5（y 翻转见上），z 直通。
+        let to_uv = Mat4::from_cols_array(&[
+            0.5, 0.0, 0.0, 0.0, //
+            0.0, -0.5, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0, //
+            0.5, 0.5, 0.0, 1.0,
+        ]);
+        Some(LightMatrices {
+            clip: light_view_proj,
+            consumer: to_uv * light_view_proj,
+            width: 2.0 * self.half,
+            depth: self.far - self.near,
+            to_light: towards,
+        })
     }
-    let center = (bounds.0 + bounds.1) * 0.5;
-    // up 与光向近平行的档位换轴，避免 look_at 退化。
-    let up = if to_light.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
-    let view = glam::camera::rh::view::look_at_mat4(center + to_light * 100.0, center, up);
-    let mut light_min = Vec3::INFINITY;
-    let mut light_max = Vec3::NEG_INFINITY;
-    for sx in [bounds.0.x, bounds.1.x] {
-        for sy in [bounds.0.y, bounds.1.y] {
-            for sz in [bounds.0.z, bounds.1.z] {
-                let corner = view.transform_point3(Vec3::new(sx, sy, sz));
-                light_min = light_min.min(corner);
-                light_max = light_max.max(corner);
-            }
+}
+
+/// Builds the light frame of one extraction (module comment, "Light frame").
+/// `casters` holds the world corners of every caster the frame keeps and
+/// `skinned` the world box of every skinned caster; the depth range spans all
+/// of them. The frame itself is the camera's slice (`slice`, the camera fit)
+/// or the casters' box (the site fit).
+fn light_frame(
+    to_light: Vec3,
+    settings: &ShadowSettings,
+    resolution: u32,
+    casters: &[[Vec3; 8]],
+    slice: Option<&ShadowCameraSlice>,
+    skinned: Option<(Vec3, Vec3)>,
+) -> Option<LightFrame> {
+    let axes = light_axes(to_light);
+    let (right, up, towards) = axes;
+    let plane = LightPlane::none(towards);
+    let mut cross = Spans::NONE;
+    let mut depth = Span::NONE;
+    for corners in casters {
+        let boxed = plane.boxed(corners);
+        if boxed.is_set() {
+            cross.merge(boxed.across);
+            depth.grow(boxed.depth.min);
+            depth.grow(boxed.depth.max);
         }
     }
-    let near = (-light_max.z - DEPTH_PAD).max(0.01);
-    let far = -light_min.z + DEPTH_PAD;
-    if far <= near || !light_max.x.is_finite() {
+    if let Some((low, high)) = skinned {
+        let boxed = light_box(towards, low, high);
+        if boxed.is_set() {
+            cross.merge(boxed.across);
+            depth.grow(boxed.depth.min);
+            depth.grow(boxed.depth.max);
+        }
+    }
+    if !cross.is_set() || !depth.is_set() {
         return None;
     }
-    let proj = glam::camera::rh::proj::directx::orthographic(
-        light_min.x,
-        light_max.x,
-        light_min.y,
-        light_max.y,
+    let (center_x, center_y, half) = match settings.fit {
+        ShadowFit::Camera => {
+            // The square around the slice's sphere, its centre on whole
+            // texels of that square so that camera motion moves the grid by
+            // whole texels only.
+            let slice = slice?;
+            let sphere = SliceSphere::around(slice);
+            let half = sphere.radius.max(MIN_FRAME_RADIUS);
+            let texel = 2.0 * half / resolution.max(1) as f32;
+            let snap = |value: f32| (value / texel).round() * texel;
+            (
+                snap(sphere.center.dot(right)),
+                snap(sphere.center.dot(up)),
+                half,
+            )
+        }
+        ShadowFit::Site => (
+            (cross.min.x + cross.max.x) * 0.5,
+            (cross.min.y + cross.max.y) * 0.5,
+            ((cross.max.x - cross.min.x).max(cross.max.y - cross.min.y) * 0.5).max(MIN_FRAME_RADIUS),
+        ),
+    };
+    let center = right * center_x + up * center_y;
+    let near = -(depth.max + DEPTH_PAD);
+    let far = (-(depth.min - DEPTH_PAD)).max(near + MIN_DEPTH_RANGE);
+    let plane = LightPlane {
+        to_light: towards,
+        cross: Spans {
+            min: Vec2::new(center_x - half, center_y - half),
+            max: Vec2::new(center_x + half, center_y + half),
+        },
+        depth: Span {
+            min: -far,
+            max: -near,
+        },
+    };
+    Some(LightFrame {
+        axes,
+        center,
+        half,
         near,
         far,
-    );
-    let light_view_proj = proj * view;
-    // uv 折算：u = 0.5x + 0.5，v = −0.5y + 0.5（y 翻转见上），z 直通。
-    let to_uv = Mat4::from_cols_array(&[
-        0.5, 0.0, 0.0, 0.0, //
-        0.0, -0.5, 0.0, 0.0, //
-        0.0, 0.0, 1.0, 0.0, //
-        0.5, 0.5, 0.0, 1.0,
-    ]);
-    Some(LightMatrices {
-        clip: light_view_proj,
-        consumer: to_uv * light_view_proj,
-        width: light_max.x - light_min.x,
-        height: light_max.y - light_min.y,
-        depth: far - near,
-        to_light,
+        plane,
     })
+}
+
+/// The sphere around a camera slice's eight corners.
+#[derive(Clone, Copy)]
+struct SliceSphere {
+    center: Vec3,
+    radius: f32,
+}
+
+impl SliceSphere {
+    /// The sphere around a slice of frustum corners (four at the near plane,
+    /// four at the far end of the slice).
+    fn around(slice: &ShadowCameraSlice) -> Self {
+        let mut center = Vec3::ZERO;
+        for corner in slice.near.iter().chain(slice.far.iter()) {
+            center += *corner;
+        }
+        center /= 8.0;
+        let radius = slice
+            .near
+            .iter()
+            .chain(slice.far.iter())
+            .map(|corner| corner.distance(center))
+            .fold(0.0, f32::max);
+        Self { center, radius }
+    }
+}
+
+/// The slice of a camera as the next frame would find it again: the camera
+/// and the settings it was taken with (the camera fit's frame).
+#[derive(Component, Clone, Copy, PartialEq)]
+struct ShadowCameraKey {
+    camera: Entity,
+    pose: [u32; 16],
+    near: u32,
+    far: u32,
+    aspect: u32,
+    fov: u32,
+}
+
+/// The camera fit's slice of one render camera (module comment on
+/// [`ShadowCameraSlice`]): the frustum's corners at the near plane and at the
+/// settings' distance, of the camera whose pose and projection the site
+/// globals follow. Runs in the render world's `Prepare`, before
+/// `PrepareResources`. A camera, projection and distance that did not change
+/// since the last frame keep the slice they had.
+fn fit_camera_frame(
+    mut commands: Commands,
+    settings: Option<Res<ShadowSettingsGlobals>>,
+    env: Option<Res<SiteEnv>>,
+    key: Query<&ShadowCameraKey>,
+    cameras: Query<(Entity, &GlobalTransform, &Projection), With<Camera3d>>,
+) {
+    let Some(settings) = settings else {
+        return;
+    };
+    if settings.settings.fit != ShadowFit::Camera {
+        return;
+    }
+    // The main 3D camera is the one the site globals follow: the camera whose
+    // position the environment holds.
+    let view = env.as_deref().map(|env| env.globals.camera_position);
+    let Some((entity, global, projection)) = cameras.iter().find(|(_, global, _)| {
+        view.is_some_and(|view| {
+            let at = global.translation();
+            (at.x - view[0]).abs() < 1e-3 && (at.y - view[1]).abs() < 1e-3 && (at.z - view[2]).abs() < 1e-3
+        })
+    }) else {
+        return;
+    };
+    let mut key_now = ShadowCameraKey {
+        camera: entity,
+        pose: [0; 16],
+        near: 0.0f32.to_bits(),
+        far: settings.settings.distance.to_bits(),
+        aspect: 0,
+        fov: 0,
+    };
+    for (slot, value) in key_now.pose.iter_mut().zip(global.to_matrix().to_cols_array()) {
+        *slot = value.to_bits();
+    }
+    match projection {
+        Projection::Perspective(perspective) => {
+            key_now.near = perspective.near.to_bits();
+            key_now.aspect = perspective.aspect_ratio.to_bits();
+            key_now.fov = perspective.fov.to_bits();
+        }
+        Projection::Orthographic(orthographic) => key_now.near = orthographic.near.to_bits(),
+        Projection::Custom(_) => return,
+    }
+    if key.get(entity).is_ok_and(|previous| *previous == key_now) {
+        return;
+    }
+    let Some(slice) = camera_slice(global, projection, settings.settings.distance) else {
+        return;
+    };
+    commands.entity(entity).insert((slice, key_now));
+}
+
+/// The corners of the frustum at the camera's near plane and at `distance` in
+/// front of it, or `None` for a projection without a frustum to slice.
+fn camera_slice(global: &GlobalTransform, projection: &Projection, distance: f32) -> Option<ShadowCameraSlice> {
+    let affine = global.affine();
+    let forward = affine.transform_vector3(Vec3::NEG_Z);
+    let corners = |distance: f32| -> Option<[Vec3; 4]> {
+        let mut corners = [Vec3::ZERO; 4];
+        for (index, (x, y)) in [(-1.0f32, 1.0f32), (1.0, 1.0), (-1.0, -1.0), (1.0, -1.0)]
+            .into_iter()
+            .enumerate()
+        {
+            corners[index] = match projection {
+                Projection::Perspective(perspective) => {
+                    let half_height = (perspective.fov * 0.5).tan();
+                    let half_width = half_height * perspective.aspect_ratio;
+                    affine.transform_point3(Vec3::new(x * half_width, y * half_height, 1.0) * distance)
+                }
+                Projection::Orthographic(orthographic) => {
+                    let half_height = orthographic.area.height() * 0.5;
+                    let half_width = orthographic.area.width() * 0.5;
+                    global.translation()
+                        + forward * distance
+                        + affine.transform_vector3(Vec3::new(x * half_width, y * half_height, 0.0))
+                }
+                Projection::Custom(_) => return None,
+            };
+        }
+        Some(corners)
+    };
+    let near = match projection {
+        Projection::Perspective(perspective) => perspective.near,
+        Projection::Orthographic(orthographic) => orthographic.near,
+        Projection::Custom(_) => return None,
+    };
+    let near = corners(near.max(CAMERA_FRAME_BEHIND))?;
+    let far = corners(distance.max(CAMERA_FRAME_BEHIND))?;
+    Some(ShadowCameraSlice { near, far })
+}
+
+/// What [`prepare_shadow_draws`] remembers between frames.
+#[derive(Default)]
+struct PrepareMemory {
+    /// A first set of settings was applied.
+    seen_settings: bool,
+    /// The one-time readiness line was logged.
+    readiness_logged: bool,
+    /// Prepares run so far (the account is logged at a few of them).
+    prepare_frames: u64,
+    /// What the buffers last received.
+    uploads: ShadowUploads,
+    /// The side of the maps the uploads were written for.
+    maps_size: u32,
 }
 
 /// What the three shadow buffers last received from `prepare_shadow_draws`.
@@ -979,8 +1660,20 @@ fn light_matrices(env: &SiteEnv, bounds: (Vec3, Vec3)) -> Option<LightMatrices> 
 struct ShadowUploads {
     frame: Option<Vec<u8>>,
     consumer: Option<Vec<u8>>,
+    /// The settings the consumer block was built from (its distances and the
+    /// light size are in metres, so unchanged bytes alone do not say the
+    /// block still holds).
+    consumer_settings: Option<ShadowSettings>,
     /// The object pool holds the current draw list's matrices.
     objects: bool,
+}
+
+impl ShadowUploads {
+    /// The maps were rebuilt: nothing the buffers hold was written by this
+    /// list or this frame block any more.
+    fn forget(&mut self) {
+        *self = Self::default();
+    }
 }
 
 /// Queues the depth pipeline of one key, or INVALID when the mesh layout lacks
@@ -1078,10 +1771,21 @@ fn queue_depth_pipeline(
     }
 }
 
-/// PrepareResources：特化管线、解光源正交框、写三块 uniform。
+/// PrepareResources：重建深度图（边长变了时）、特化管线、解光源正交框、写
+/// 三块 uniform。
 ///
 /// 挂 PrepareResources 而非 Prepare：与引擎的网格资产 prepare（Prepare 集）
 /// 错开一拍，本帧的 `RenderAssets<RenderMesh>` 与 MeshAllocator 切片已定。
+///
+/// A change of the settings (including a resolution change, whose new maps
+/// [`apply_shadow_resolution`] created during extraction) restarts the draw
+/// list's planes and the buffers' upload memory.
+///
+/// A buffer whose bytes came out as the last frame's run's is skipped: the
+/// light frame block by content (frames without a frame write zeros), the
+/// object pool when the draw list did not change, and the consumer block both
+/// by content and whenever the settings changed (its distances and light size
+/// are in metres).
 fn prepare_shadow_draws(
     mut draws: ResMut<ShadowDrawList>,
     mut pipelines: ResMut<DepthPipelines>,
@@ -1091,13 +1795,63 @@ fn prepare_shadow_draws(
     meshes: Res<RenderAssets<RenderMesh>>,
     extracted: Option<Res<ExtractedAssets<RenderMesh>>>,
     env: Option<Res<SiteEnv>>,
-    gpu: Res<ShadowMapGpu>,
+    settings: Option<Res<ShadowSettingsGlobals>>,
+    mut gpu: ResMut<ShadowMapGpu>,
     mut palette: ResMut<ShadowPaletteGpu>,
     account: Res<ShadowAccount>,
-    mut readiness_logged: Local<bool>,
-    mut prepare_frames: Local<u64>,
-    mut uploaded: Local<ShadowUploads>,
+    slices: Query<&ShadowCameraSlice>,
+    mut memory: Local<PrepareMemory>,
 ) {
+    let PrepareMemory {
+        seen_settings,
+        readiness_logged,
+        prepare_frames,
+        uploads,
+        maps_size,
+    } = &mut *memory;
+    let settings = settings.map(|globals| globals.settings).unwrap_or_default();
+    // The settings changed: the planes and the extractions' hold count start
+    // again.
+    let changed = !*seen_settings || draws.settings != Some(settings);
+    if *maps_size != gpu.size {
+        // New maps: nothing the buffers hold was written for them.
+        uploads.forget();
+        *maps_size = gpu.size;
+    }
+    if changed {
+        draws.planes_from = 0;
+        {
+            let mut frame = account.0.lock().unwrap();
+            frame.prepares_since = 0;
+            frame.frames_written = 0;
+        }
+        draws.settings = Some(settings);
+        *seen_settings = true;
+    }
+    if !settings.enabled {
+        // No depth pass: no draw stays on the GPU, and a draw that comes back
+        // is queued again on that frame.
+        for item in &mut draws.draws {
+            item.pipeline = CachedRenderPipelineId::INVALID;
+            item.baked = false;
+        }
+        for item in &mut draws.skinned {
+            item.pipeline = CachedRenderPipelineId::INVALID;
+        }
+        draws.baked_count = 0;
+        draws.plane = LightPlane::default();
+        // The receivers read intensity 0 whichever map is bound: the map of
+        // the last frame with shadows is not updated any more.
+        let consumer = ShadowConsumer::unlit();
+        let consumer_bytes = consumer.bytes();
+        if uploads.consumer.as_deref() != Some(consumer_bytes.as_slice()) {
+            render_queue.write_buffer(&gpu.consumer_buffer, 0, &consumer_bytes);
+            uploads.consumer = Some(consumer_bytes);
+            uploads.consumer_settings = None;
+        }
+        return;
+    }
+
     // 矩阵池按 draw 序全量写（缺管线的 draw 也占位，动态 offset 才对得上）。
     // The dynamic binding reads at index * object_stride, not index * 64.
     // Pad every matrix, including unavailable meshes, to that same slot size.
@@ -1106,7 +1860,7 @@ fn prepare_shadow_draws(
     // The pool is written once, never reallocated, and keeps what was last
     // written; it is rewritten only when the draw list changed.
     let stride = gpu.object_stride as usize;
-    let write_objects = draws.changed || !uploaded.objects;
+    let write_objects = draws.changed || !uploads.objects;
     let mut object_bytes = Vec::new();
     if write_objects {
         object_bytes.reserve(draws.draws.len() * stride);
@@ -1140,7 +1894,7 @@ fn prepare_shadow_draws(
             .or_insert_with_key(|key| queue_depth_pipeline(&pipeline_cache, &gpu, key));
     }
     // The skinned character casters: their own entry point and state (module
-    // comment, "Caster 集"); a mesh without normals or joint streams is
+    // comment, "Caster set"); a mesh without normals or joint streams is
     // counted as a layout that cannot be drawn.
     for item in draws.skinned.iter_mut() {
         item.pipeline = match meshes.get(item.mesh) {
@@ -1168,52 +1922,63 @@ fn prepare_shadow_draws(
         render_queue.write_buffer(&palette.buffer, 0, &draws.palette_bytes);
     }
 
-    // Light frame and sampling matrices: a frame whose light or content is
-    // incomplete writes intensity 0; the consumer's intensity gate folds atten
-    // to 1 identically, so the shadow contributes nothing (this is not the
-    // approximation of skipping the lookup). The four components take the
-    // serialized values described in the module comment "Numeric values";
-    // strength, soft shadow and fade are computed as noted on their constants.
-    let mut resolved: Option<LightMatrices> = None;
-    let (frame, consumer) = match env
+    // The light frame (module comment, "Light frame"). Without a light
+    // direction or a caster there is no frame: the consumer reads intensity 0
+    // and every receiver is fully lit, whichever map is bound. The sky shell
+    // reaches the light only while the frame is derived from every caster (a
+    // camera frame would have it drawn across the whole map).
+    let camera_frame = settings.fit == ShadowFit::Camera;
+    let slice = camera_frame.then(|| slices.single().ok().copied()).flatten();
+    let to_light = env
         .as_deref()
-        .zip(draws.bounds)
-        .and_then(|(env, bounds)| light_matrices(env, bounds))
-    {
+        .and_then(|env| Vec3::from_array(env.globals.light_vector).try_normalize());
+    let mut corners: Vec<[Vec3; 8]> = Vec::with_capacity(draws.draws.len());
+    corners.extend(
+        draws
+            .draws
+            .iter()
+            .filter(|draw| !camera_frame || !draw.sky_shell)
+            .map(|draw| draw.corners),
+    );
+    let frame = to_light
+        .filter(|_| !corners.is_empty())
+        .and_then(|to_light| {
+            light_frame(
+                to_light,
+                &settings,
+                gpu.size,
+                &corners,
+                slice.as_ref(),
+                draws.skinned_extent,
+            )
+        });
+    let light = frame.as_ref().and_then(LightFrame::matrices);
+    let (frame_block, consumer) = match &light {
         Some(matrices) => {
-            let clip = matrices.clip;
-            let consumer_matrix = matrices.consumer;
             // The pipeline's caster bias: both biases in shadow-map texels of
             // world size (the orthographic width over the resolution, as the
-            // pipeline derives it from the projection), negated, and scaled by
-            // the soft-shadow kernel radius.
-            let texel = matrices.width / SHADOWMAP_SIZE as f32;
-            let depth_bias = -PIPELINE_SHADOW_DEPTH_BIAS * texel * SOFT_SHADOW_KERNEL_RADIUS;
-            let normal_bias = -PIPELINE_SHADOW_NORMAL_BIAS * texel * SOFT_SHADOW_KERNEL_RADIUS;
+            // pipeline derives it from the projection), negated, scaled by the
+            // soft-shadow kernel radius and by the settings' multipliers.
+            let texel = matrices.width / gpu.size as f32;
+            let depth_bias =
+                -PIPELINE_SHADOW_DEPTH_BIAS * texel * SOFT_SHADOW_KERNEL_RADIUS * settings.depth_bias;
+            let normal_bias =
+                -PIPELINE_SHADOW_NORMAL_BIAS * texel * SOFT_SHADOW_KERNEL_RADIUS * settings.normal_bias;
             let to_light = matrices.to_light;
-            let _ = resolved.insert(matrices);
             (
                 ShadowFrame {
-                    light_view_proj: mat4_cols(clip),
-                    world_to_shadow: mat4_cols(consumer_matrix),
+                    light_view_proj: mat4_cols(matrices.clip),
+                    world_to_shadow: mat4_cols(matrices.consumer),
                     shadow_bias: Vec4::new(depth_bias, normal_bias, 0.0, 0.0),
                     light_direction: to_light.extend(0.0),
                 },
-                ShadowConsumer {
-                    world_to_shadow: consumer_matrix,
-                    size: [
-                        SHADOWMAP_SIZE as f32,
-                        SHADOWMAP_SIZE as f32,
-                        1.0 / SHADOWMAP_SIZE as f32,
-                        1.0 / SHADOWMAP_SIZE as f32,
-                    ],
-                    params: [
-                        SHADOW_STRENGTH,
-                        SHADOW_SOFT,
-                        SHADOW_FADE_SCALE,
-                        SHADOW_FADE_BIAS,
-                    ],
-                },
+                consumer_block(
+                    matrices.consumer,
+                    matrices.width,
+                    gpu.size,
+                    &settings,
+                    matrices.depth,
+                ),
             )
         }
         None => (
@@ -1223,23 +1988,40 @@ fn prepare_shadow_draws(
                 shadow_bias: Vec4::ZERO,
                 light_direction: Vec4::ZERO,
             },
-            ShadowConsumer {
-                world_to_shadow: Mat4::ZERO,
-                size: [0.0; 4],
-                params: [0.0; 4],
-            },
+            ShadowConsumer::unlit(),
         ),
     };
+    // The planes the next extraction tests a draw against. A camera frame
+    // that moved makes the static map stale: its baked draws were placed under
+    // the old frame (a draw set that only lost a draw to the frame still has
+    // its baked draws in the list, and a bake covers them).
+    draws.plane = match &frame {
+        Some(frame) => {
+            if frame.plane != draws.plane {
+                draws.static_dirty = true;
+            }
+            frame.plane
+        }
+        None => LightPlane::none(to_light.unwrap_or(Vec3::Y)),
+    };
+
     // 阴影账目：prepare 侧记帧数与名单（节点侧记执行与读回，模块注释
-    // 「阴影账目」）。
+    // 「阴影账目」）。The numbers are this run's, which skips nothing, so the
+    // account can tell a skipped buffer from a written one.
     let invalid_now = draws
         .draws
         .iter()
         .filter(|item| item.pipeline == CachedRenderPipelineId::INVALID)
         .count();
+    // The static map was drawn with the previous frame block (its bias
+    // included); a new block makes it stale.
+    let frame_written = uploads.frame.as_deref() != Some(frame_bytes_of(&frame_block).as_slice());
+    let consumer_bytes = consumer.bytes();
+    let consumer_written = uploads.consumer_settings != Some(settings)
+        || uploads.consumer.as_deref() != Some(consumer_bytes.as_slice());
     {
         let mut inner = account.0.lock().unwrap();
-        inner.frames_prepared += resolved.is_some() as u64;
+        inner.frames_prepared += light.is_some() as u64;
         inner.casters = draws.draws.len();
         inner.casters_invalid = invalid_now;
         inner.skinned_casters = draws.skinned.len();
@@ -1249,14 +2031,25 @@ fn prepare_shadow_draws(
             .filter(|item| item.pipeline == CachedRenderPipelineId::INVALID)
             .count();
         inner.skinned_tally = draws.skinned_tally;
-        if let Some(matrices) = &resolved {
-            inner.light_box = Some((matrices.width, matrices.height, matrices.depth));
+        inner.settings = Some(settings);
+        inner.casters_seen = draws.casters.seen;
+        inner.casters_kept = draws.casters.kept;
+        inner.casters_left_out = draws.left_out;
+        inner.sky_shell_in_frame = draws.casters.sky_shells > 0;
+        inner.casters_overflow = draws.overflow;
+        inner.resolution = gpu.size;
+        inner.prepares_since += 1;
+        inner.frames_written += (frame_written && consumer_written) as u64;
+        if let Some(matrices) = &light {
+            inner.light_box = Some((matrices.width, matrices.width, matrices.depth));
             inner.world_to_shadow = Some(matrices.consumer);
             inner.caster_bias = Some((
-                matrices.width / SHADOWMAP_SIZE as f32,
-                frame.shadow_bias.x,
-                frame.shadow_bias.y,
+                matrices.width / gpu.size as f32,
+                frame_block.shadow_bias.x,
+                frame_block.shadow_bias.y,
             ));
+            inner.depth_range = matrices.depth;
+            inner.penumbra_per_metre = settings.penumbra_per_metre();
         }
         inner.rigid_without_normals = draws
             .draws
@@ -1268,55 +2061,51 @@ fn prepare_shadow_draws(
             })
             .count();
     }
-    let mut frame_bytes = Vec::with_capacity(FRAME_BYTES);
-    for matrix in [frame.light_view_proj, frame.world_to_shadow] {
-        for column in matrix {
-            for component in column.to_array() {
-                frame_bytes.extend_from_slice(&component.to_le_bytes());
-            }
-        }
-    }
-    for slot in [frame.shadow_bias, frame.light_direction] {
-        for component in slot.to_array() {
-            frame_bytes.extend_from_slice(&component.to_le_bytes());
-        }
-    }
-    debug_assert_eq!(frame_bytes.len(), FRAME_BYTES);
-    // Both blocks keep their last contents; a write of the same bytes is
-    // skipped. The static map was drawn with the previous frame block.
-    if uploaded.frame.as_deref() != Some(frame_bytes.as_slice()) {
+    let frame_bytes = frame_bytes_of(&frame_block);
+    if frame_written {
         render_queue.write_buffer(&gpu.frame_buffer, 0, &frame_bytes);
-        uploaded.frame = Some(frame_bytes);
+        uploads.frame = Some(frame_bytes);
         draws.static_dirty = true;
     }
-    let consumer_bytes = consumer.bytes();
-    if uploaded.consumer.as_deref() != Some(consumer_bytes.as_slice()) {
+    if consumer_written {
         render_queue.write_buffer(&gpu.consumer_buffer, 0, &consumer_bytes);
-        uploaded.consumer = Some(consumer_bytes);
+        uploads.consumer = Some(consumer_bytes);
+        uploads.consumer_settings = Some(settings);
     }
     if write_objects {
         if !object_bytes.is_empty() {
             render_queue.write_buffer(&gpu.object_buffer, 0, &object_bytes);
         }
-        uploaded.objects = true;
+        uploads.objects = true;
     }
     // 深度图生成行（一次）：出现即代表光源框解出、矩阵与逐实体矩阵池已
-    // 入 GPU，节点将在主 pass 前成图；消费行由站点材质绑定 10/11/12 的
-    // 换装日志（「材质换装：…四族…」）共同推导。参数行逐值可推导：fade
-    // 两数 = 1/118.75 与 −506.25/118.75，由距离 25 m、级联边距 0.1 按引
-    // 擎线性距离 fade 算式现算（模块注释「数值口径」）。
-    if !*readiness_logged && consumer.params[0] > 0.0 && !draws.draws.is_empty() {
+    // 入 GPU，节点将在主 pass 前成图；消费面是站点材质的 binding 10/11/12。
+    let written = account.0.lock().unwrap().frames_written;
+    if !*readiness_logged && light.is_some() && written >= READY_FRAMES {
         *readiness_logged = true;
         info!(
-            "主光阴影深度图就绪：{}²（单图单矩阵，光源向正交，站点管线档）、caster {} 个；参数 [强度 {}、软 {}、fade {}/{}]（距离 25 m、边距 0.1 现算：1/118.75 与 −506.25/118.75）；消费侧站点四族已接（binding 10 消费块 / 11 深度图 / 12 比较采样器，pcf9 采样口）",
-            SHADOWMAP_SIZE,
+            "main-light shadow map ready: {}², {} (filter {:?}, strength {}, Pcf radius {} m, sun {}°, caster bias x{} / x{}); rigid casters {} of {} seen ({} left out, sky shell {}), skinned {}; texel {} cm, depth range {} m; consumer block at group 3 binding 10, depth at 11, comparison sampler at 12",
+            gpu.size,
+            match settings.fit {
+                ShadowFit::Camera => "camera fit",
+                ShadowFit::Site => "site fit",
+            },
+            settings.filter,
+            settings.strength,
+            settings.pcf_radius,
+            settings.light_angle,
+            settings.depth_bias,
+            settings.normal_bias,
             draws.draws.len(),
-            SHADOW_STRENGTH,
-            SHADOW_SOFT,
-            SHADOW_FADE_SCALE,
-            SHADOW_FADE_BIAS,
+            draws.casters.seen,
+            draws.left_out,
+            draws.casters.sky_shells,
+            draws.skinned.len(),
+            light.as_ref().map_or(0.0, |matrices| matrices.width / gpu.size as f32) * 100.0,
+            light.as_ref().map_or(0.0, |matrices| matrices.depth),
         );
     }
+    gpu.maps_frames = gpu.maps_frames.saturating_add(1);
     // 节点死锁检测（账目兜底）：pass 一次都没跑过而 prepare 已进行很久，
     // 账目行从 prepare 侧落一次计数，避免「图就绪」行与实际 pass 之间的
     // 缺口无人喊。
@@ -1325,11 +2114,79 @@ fn prepare_shadow_draws(
         let drawn = account.0.lock().unwrap().frames_drawn;
         if drawn == 0 {
             info!(
-                "主光阴影账目（prepare 视角，第 {} 帧）：pass 仍未执行（frames_drawn 0）——节点没跑或整帧静默跳过，深度图恒空；caster {} 个（布局取不出 {invalid_now}）",
+                "main-light shadow account (prepare's view, frame {}): the pass has still not run (frames_drawn 0) — the node does not run or the whole frame is skipped in silence, and the depth map stays empty; {} casters (no layout that can be drawn: {invalid_now})",
                 *prepare_frames,
                 draws.draws.len(),
             );
         }
+    }
+}
+
+/// The depth pass's frame block as bytes (the WGSL `ShadowFrame`'s memory
+/// order).
+fn frame_bytes_of(frame: &ShadowFrame) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(FRAME_BYTES);
+    for matrix in [frame.light_view_proj, frame.world_to_shadow] {
+        for column in matrix {
+            for component in column.to_array() {
+                bytes.extend_from_slice(&component.to_le_bytes());
+            }
+        }
+    }
+    for slot in [frame.shadow_bias, frame.light_direction] {
+        for component in slot.to_array() {
+            bytes.extend_from_slice(&component.to_le_bytes());
+        }
+    }
+    debug_assert_eq!(bytes.len(), FRAME_BYTES);
+    bytes
+}
+
+/// The consumer block of one light frame: the matrix, the map size, the
+/// shadow parameters and the filter constants of `settings`. `depth` is the
+/// map's depth range in metres.
+fn consumer_block(
+    consumer: Mat4,
+    width: f32,
+    resolution: u32,
+    settings: &ShadowSettings,
+    depth: f32,
+) -> ShadowConsumer {
+    // The fade reads the receiver's distance from the camera: the shadow is
+    // full up to 90% of the settings' distance and gone at the distance
+    // itself.
+    let fade_start = FADE_START * settings.distance;
+    let fade_end = settings.distance;
+    let code = match settings.filter {
+        ShadowFilter::Hard => 0.0,
+        ShadowFilter::Tent => 1.0,
+        ShadowFilter::Pcf => 2.0,
+        ShadowFilter::Pcss => 3.0,
+    };
+    let filtering = Vec4::new(code, fade_start, fade_end, settings.strength);
+    // The map has a constant depth range: a metre along the light is `1 /
+    // depth` of the map's z, and a metre across the frame is `1 / width` of
+    // its uv, so a kernel radius travels as two factors (the Pcss light size
+    // is `tan(angle)` times depth over width).
+    let kernel = Vec4::new(
+        settings.pcf_radius / width,
+        settings.penumbra_per_metre() * depth / width,
+        settings.max_radius_texels / resolution as f32,
+        0.0,
+    );
+    let depth_range = Vec4::new(1.0 / resolution as f32, 0.0, 0.0, 0.0);
+    ShadowConsumer {
+        world_to_shadow: consumer,
+        size: [
+            resolution as f32,
+            resolution as f32,
+            1.0 / resolution as f32,
+            1.0 / resolution as f32,
+        ],
+        params: [SHADOW_MAIN_LIGHT_INTENSITY, SHADOW_SOFT, 0.0, 0.0],
+        filtering,
+        kernel,
+        depth: depth_range,
     }
 }
 
@@ -1379,7 +2236,10 @@ fn plan_static_bake(
         }
     }
     for draw in &mut list.draws {
+        // The sky shell is never left to the frame's map alone: a camera
+        // frame draws it per frame.
         if draw.baked
+            || draw.sky_shell
             || draw.stable < STATIC_AFTER_FRAMES
             || draw.pipeline == CachedRenderPipelineId::INVALID
         {
@@ -1390,9 +2250,7 @@ fn plan_static_bake(
         };
         let slices = allocator.mesh_vertex_slice(&draw.mesh).is_some()
             && match render_mesh.buffer_info {
-                RenderMeshBufferInfo::Indexed { .. } => {
-                    allocator.mesh_index_slice(&draw.mesh).is_some()
-                }
+                RenderMeshBufferInfo::Indexed { .. } => allocator.mesh_index_slice(&draw.mesh).is_some(),
                 RenderMeshBufferInfo::NonIndexed => true,
             };
         if slices {
@@ -1401,6 +2259,9 @@ fn plan_static_bake(
         }
     }
     list.baked_count = list.draws.iter().filter(|draw| draw.baked).count();
+    // Every bake answers a request for the list as it is: a skipped draw
+    // became a per-frame draw above, and a draw that changed or left since
+    // the last bake set `static_dirty`.
     if list.static_dirty || list.static_request.is_some() {
         list.static_generation += 1;
         list.static_request = Some(list.static_generation);
@@ -1467,8 +2328,7 @@ struct BoundState {
     index: Option<(BufferId, IndexFormat)>,
 }
 
-/// 深度 pass：一次成图，跨视图共享（站点场景只有一台 3D 相机；
-/// 光源深度本就不依赖取景，多相机也不需要每视图一份）。
+/// 深度 pass：一次成图，跨视图共享（站点场景只有一台 3D 相机）。
 ///
 /// Its one bind group binds the frame and object buffers, which are replaced
 /// only when they grow, so it is cached by those buffer ids.
@@ -1483,7 +2343,13 @@ fn shadow_depth_pass(
     finish_pending_probe(world, &render_context);
 
     let draws = world.resource::<ShadowDrawList>();
-    if draws.draws.is_empty() {
+    // With the shadows off nothing is drawn: the static map (and its copy)
+    // stays as it is, and no pass runs.
+    if draws.draws.is_empty()
+        || world
+            .get_resource::<ShadowSettingsGlobals>()
+            .is_some_and(|settings| !settings.settings.enabled)
+    {
         return;
     }
     let gpu = world.resource::<ShadowMapGpu>();
@@ -1764,13 +2630,22 @@ fn frames_drawn_due(inner: &mut AccountInner) -> bool {
 #[cfg(not(target_arch = "wasm32"))]
 fn record_depth_probe(world: &World, render_context: &mut RenderContext) {
     let gpu = world.resource::<ShadowMapGpu>();
+    let size = gpu.size;
+    let bytes = (size as u64) * (size as u64) * 4;
     let mut inner = world.resource::<ShadowAccount>().0.lock().unwrap();
+    // The maps of another side fit another buffer.
+    if inner.probe_bytes != bytes {
+        inner.probe_buffer = None;
+        inner.previous_map = None;
+        inner.previous_window = None;
+        inner.probe_bytes = bytes;
+    }
     let buffer = inner
         .probe_buffer
         .get_or_insert_with(|| {
             render_context.render_device().create_buffer(&BufferDescriptor {
                 label: Some("site_shadow_probe_readback"),
-                size: (SHADOWMAP_SIZE as u64) * (SHADOWMAP_SIZE as u64) * 4,
+                size: bytes,
                 usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             })
@@ -1784,13 +2659,13 @@ fn record_depth_probe(world: &World, render_context: &mut RenderContext) {
                 buffer: &buffer,
                 layout: TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(SHADOWMAP_SIZE * 4),
+                    bytes_per_row: Some(size * 4),
                     rows_per_image: None,
                 },
             },
             Extent3d {
-                width: SHADOWMAP_SIZE,
-                height: SHADOWMAP_SIZE,
+                width: size,
+                height: size,
                 depth_or_array_layers: 1,
             },
         );
@@ -1816,31 +2691,41 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
         return;
     };
     let (sender, receiver) = std::sync::mpsc::channel();
-    buffer
-        .slice(..)
-        .map_async(MapMode::Read, move |result| {
-            let _ = sender.send(result);
-        });
+    buffer.slice(..).map_async(MapMode::Read, move |result| {
+        let _ = sender.send(result);
+    });
     if render_context
         .render_device()
         .poll(PollType::wait_indefinitely())
         .is_err()
     {
-        warn!("主光阴影账目：深度图读回 poll 失败，本次读回作废");
+        warn!("shadow account: the depth map read-back's poll failed; this read-back is dropped");
         return;
     }
     if !matches!(receiver.recv(), Ok(Ok(()))) {
-        warn!("主光阴影账目：深度图读回 map 失败，本次读回作废");
+        warn!("shadow account: the depth map read-back's map failed; this read-back is dropped");
         return;
     }
 
     // 深度统计：非清 texel 数（clear 是 1.0，光栅只会更小）与最小深度。
     let Ok(data) = buffer.slice(..).get_mapped_range() else {
-        warn!("主光阴影账目：深度图读回 map 范围无效，本次读回作废");
+        warn!("shadow account: the depth map read-back has no mapped range; this read-back is dropped");
         return;
     };
+    // A read-back recorded before a resolution change holds the old map: its
+    // bytes no longer match the map's side, and it is dropped.
+    if data.len() as u64 != inner.probe_bytes {
+        warn!(
+            "shadow account: the read-back holds {} bytes but the map has {}; this read-back is dropped",
+            data.len(),
+            inner.probe_bytes
+        );
+        return;
+    }
+    let size = ((inner.probe_bytes / 4) as f64).sqrt() as usize;
+    let side = size as i64;
     let texel = |x: usize, y: usize| -> f32 {
-        let i = (y * SHADOWMAP_SIZE as usize + x) * 4;
+        let i = (y * size + x) * 4;
         f32::from_le_bytes(data[i..i + 4].try_into().unwrap())
     };
     let mut nonclear = 0usize;
@@ -1869,16 +2754,13 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
             {
                 out_of_range += 1;
             }
-            let size = SHADOWMAP_SIZE as i64;
-            let tx = (clip.x * size as f32) as i64;
-            let ty = (clip.y * size as f32) as i64;
-            let tx = tx.clamp(0, size - 1) as usize;
-            let ty = ty.clamp(0, size - 1) as usize;
+            let tx = ((clip.x * side as f32) as i64).clamp(0, side - 1) as usize;
+            let ty = ((clip.y * side as f32) as i64).clamp(0, side - 1) as usize;
             let mut hit = false;
             for dy in -1i64..=1 {
                 for dx in -1i64..=1 {
                     let (x, y) = (tx as i64 + dx, ty as i64 + dy);
-                    if x >= 0 && y >= 0 && x < size && y < size {
+                    if x >= 0 && y >= 0 && x < side && y < side {
                         hit |= texel(x as usize, y as usize) < PROBE_CLEAR_EPS;
                     }
                 }
@@ -1894,16 +2776,15 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
             max_gap = max_gap.max((stored - clip.z).abs());
         }
     }
-    let (box_w, box_h, box_d) = inner.light_box.unwrap_or((0.0, 0.0, 0.0));
+    let (box_w, _box_h, box_d) = inner.light_box.unwrap_or((0.0, 0.0, 0.0));
     let caster_bias = inner.caster_bias.unwrap_or((0.0, 0.0, 0.0));
-    let total_texels = (SHADOWMAP_SIZE * SHADOWMAP_SIZE) as f32;
+    let total_texels = (inner.probe_bytes / 4) as f32;
 
     // The player's caster window: the texel rectangle the player's skinned
     // bounds project to. Its texels are compared with the previous read-back
     // over the union of this and the previous window, and the rest of the map
     // is compared too, so a change inside the window with the player's bounds
     // centre in place is the animation moving the caster.
-    let size = SHADOWMAP_SIZE as usize;
     let draws = world.resource::<ShadowDrawList>();
     let player_bounds = draws
         .skinned
@@ -1911,23 +2792,25 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
         .filter(|item| item.player)
         .map(|item| item.bounds)
         .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
-    let window = player_bounds.zip(inner.world_to_shadow).map(|((low, high), to_shadow)| {
-        let (mut x0, mut y0, mut x1, mut y1) = (size, size, 0usize, 0usize);
-        for sx in [low.x, high.x] {
-            for sy in [low.y, high.y] {
-                for sz in [low.z, high.z] {
-                    let uv = to_shadow.transform_point3(Vec3::new(sx, sy, sz));
-                    let tx = ((uv.x * size as f32) as i64).clamp(0, size as i64 - 1) as usize;
-                    let ty = ((uv.y * size as f32) as i64).clamp(0, size as i64 - 1) as usize;
-                    x0 = x0.min(tx);
-                    y0 = y0.min(ty);
-                    x1 = x1.max(tx);
-                    y1 = y1.max(ty);
+    let window = player_bounds
+        .zip(inner.world_to_shadow)
+        .map(|((low, high), to_shadow)| {
+            let (mut x0, mut y0, mut x1, mut y1) = (size, size, 0usize, 0usize);
+            for sx in [low.x, high.x] {
+                for sy in [low.y, high.y] {
+                    for sz in [low.z, high.z] {
+                        let uv = to_shadow.transform_point3(Vec3::new(sx, sy, sz));
+                        let tx = ((uv.x * size as f32) as i64).clamp(0, side - 1) as usize;
+                        let ty = ((uv.y * size as f32) as i64).clamp(0, side - 1) as usize;
+                        x0 = x0.min(tx);
+                        y0 = y0.min(ty);
+                        x1 = x1.max(tx);
+                        y1 = y1.max(ty);
+                    }
                 }
             }
-        }
-        (x0, y0, x1, y1)
-    });
+            (x0, y0, x1, y1)
+        });
     let mut window_nonclear = 0usize;
     let mut window_min = 1.0f32;
     if let Some((x0, y0, x1, y1)) = window {
@@ -1948,10 +2831,17 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
     let (mut changed_in, mut changed_out) = (None, None);
     if let Some(previous) = inner.previous_map.as_deref() {
         let (mut inside, mut outside) = (0usize, 0usize);
-        for (index, (now, before)) in data.as_chunks::<4>().0.iter().zip(previous.as_chunks::<4>().0).enumerate() {
+        for (index, (now, before)) in data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(previous.as_chunks::<4>().0)
+            .enumerate()
+        {
             if now != before {
                 let (x, y) = (index % size, index / size);
-                let within = union.is_some_and(|(x0, y0, x1, y1)| (x0..=x1).contains(&x) && (y0..=y1).contains(&y));
+                let within =
+                    union.is_some_and(|(x0, y0, x1, y1)| (x0..=x1).contains(&x) && (y0..=y1).contains(&y));
                 if within {
                     inside += 1;
                 } else {
@@ -2006,7 +2896,11 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
         inner.static_bakes,
     );
     info!(
-        "主光阴影账目：帧 prepared {} / drawn {}（静默跳过 {}、空过 {}）；caster {}（布局取不出 {}，实录 draw {}）；光框 {box_w:.1}×{box_h:.1} m 深 {box_d:.1} m（texel {:.2} cm）；深度图非清 {} texel（{:.2}%）、最小深度 {min_depth:.4}；caster 原点：投影 {origins}、出框 {out_of_range}、邻域有图 {near_nonclear}；单 texel 比较 lit {lit} vs 影 {shadowed}、最大深度差 {max_gap:.4}",
+        "shadow account: settings {}; frames prepared {} / drawn {} (skipped, not compiled {}; empty {}); casters {} (no layout that can be drawn {}, draws recorded {}); light box {box_w:.1} x {box_w:.1} m deep {box_d:.1} m ({}², texel {:.2} cm); nonclear texels {} ({:.2}%), min depth {min_depth:.4}; caster origins: projected {origins}, out of the frame {out_of_range}, with content near them {near_nonclear}; single texel comparison lit {lit} vs shadowed {shadowed}, largest depth gap {max_gap:.4}",
+        inner
+            .settings
+            .map(|settings| format!("{settings:?}"))
+            .unwrap_or_else(|| "none yet".to_owned()),
         inner.frames_prepared,
         inner.frames_drawn,
         inner.frames_skipped_not_ready,
@@ -2014,9 +2908,10 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
         inner.casters,
         inner.casters_invalid,
         inner.draws_recorded,
-        box_w * 100.0 / SHADOWMAP_SIZE as f32,
+        size,
+        box_w * 100.0 / size.max(1) as f32,
         nonclear,
-        nonclear as f32 * 100.0 / total_texels,
+        nonclear as f32 * 100.0 / total_texels.max(1.0),
     );
 }
 
@@ -2026,7 +2921,7 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
 fn log_counter_line(world: &World) {
     let inner = world.resource::<ShadowAccount>().0.lock().unwrap();
     info!(
-        "主光阴影账目（wasm 计数行）：帧 prepared {} / drawn {}（静默跳过 {}、空过 {}）；caster {}（布局取不出 {}，实录 draw {}）；skinned casters {} drawn {} (player {}, NPC {}, NPC Off at dither 0 {}, other skinned {}, layout invalid {}; palettes {}, joints {}); static map: {} rigid draws as of its last bake, {} rigid draws per frame, {} bakes",
+        "shadow account (browser build, counts): frames prepared {} / drawn {} (skipped, not compiled {}; empty {}); casters {} (no layout that can be drawn {}, draws recorded {}); skinned casters {} drawn {} (player {}, NPC {}, NPC Off at dither 0 {}, other skinned {}, layout invalid {}; palettes {}, joints {}); static map: {} rigid draws as of its last bake, {} rigid draws per frame, {} bakes",
         inner.frames_prepared,
         inner.frames_drawn,
         inner.frames_skipped_not_ready,
@@ -2049,17 +2944,72 @@ fn log_counter_line(world: &World) {
     );
 }
 
-/// 渲染启动：深度图、比较采样器、三块 buffer、group 0 布局。
-fn init_shadow_resources(
-    mut commands: Commands,
+/// `ExtractSchedule`, after the settings are copied: re-creates the depth maps
+/// when the settings' resolution differs from the maps' side. It runs during
+/// extraction so that the material bind groups prepared later on the same
+/// frame (marked changed by [`mark_materials_on_resolution`]) bind the new
+/// views.
+fn apply_shadow_resolution(
+    settings: Res<ShadowSettingsGlobals>,
     render_device: Res<RenderDevice>,
     pipeline_cache: Res<PipelineCache>,
+    gpu: Option<ResMut<ShadowMapGpu>>,
+    account: Res<ShadowAccount>,
 ) {
+    let Some(mut gpu) = gpu else {
+        return;
+    };
+    let size = settings.settings.resolution;
+    if gpu.size != size {
+        rebuild_shadow_maps(&render_device, &pipeline_cache, &mut gpu, &account, size);
+    }
+}
+
+/// Main world: marks every material of type `M` changed on the frame the
+/// shadow resolution changes. Each such material's bind group holds the depth
+/// map's view, which [`apply_shadow_resolution`] replaces during that frame's
+/// extraction; a material marked changed is extracted and prepared again on
+/// the same frame, after the new maps exist. The first frame only records the
+/// resolution: the maps were created at it.
+pub fn mark_materials_on_resolution<M: Asset>(
+    settings: Res<ShadowSettings>,
+    mut last: Local<Option<u32>>,
+    materials: Option<ResMut<Assets<M>>>,
+) {
+    let resolution = settings.resolution;
+    let previous = last.replace(resolution);
+    if previous.is_none_or(|previous| previous == resolution) {
+        return;
+    }
+    let Some(mut materials) = materials else {
+        return;
+    };
+    let ids: Vec<AssetId<M>> = materials.ids().collect();
+    for id in ids {
+        // The asset is marked modified when the borrow is taken out of its
+        // guard; holding the guard alone marks nothing.
+        if let Some(material) = materials.get_mut(id) {
+            material.into_inner();
+        }
+    }
+}
+
+/// The maps, views and samplers of one resolution.
+struct ShadowMaps {
+    size: u32,
+    depth_texture: Texture,
+    depth_view: TextureView,
+    static_view: TextureView,
+    cmp_sampler: Sampler,
+}
+
+/// Creates the depth maps of `size` and their samplers.
+fn create_maps(render_device: &RenderDevice, size: u32) -> ShadowMaps {
     let texture = render_device.create_texture(&TextureDescriptor {
         label: Some("site_shadow_depth_texture"),
         size: Extent3d {
-            width: SHADOWMAP_SIZE,
-            height: SHADOWMAP_SIZE,
+            width: size,
+            height: size,
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
@@ -2079,8 +3029,8 @@ fn init_shadow_resources(
         .create_texture(&TextureDescriptor {
             label: Some("site_shadow_static_depth_texture"),
             size: Extent3d {
-                width: SHADOWMAP_SIZE,
-                height: SHADOWMAP_SIZE,
+                width: size,
+                height: size,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -2094,6 +3044,34 @@ fn init_shadow_resources(
             dimension: Some(TextureViewDimension::D2),
             ..Default::default()
         });
+    // The comparison sampler: a bilinear compare (each tap compares the four
+    // texels around its point and interpolates), `LessEqual` = a stored depth
+    // at or behind the fragment is lit (the map's z grows with distance).
+    let cmp_sampler = render_device.create_sampler(&SamplerDescriptor {
+        address_mode_u: AddressMode::ClampToEdge,
+        address_mode_v: AddressMode::ClampToEdge,
+        mag_filter: FilterMode::Linear,
+        min_filter: FilterMode::Linear,
+        mipmap_filter: MipmapFilterMode::Nearest,
+        compare: Some(CompareFunction::LessEqual),
+        ..Default::default()
+    });
+    ShadowMaps {
+        size,
+        depth_texture: texture,
+        depth_view,
+        static_view,
+        cmp_sampler,
+    }
+}
+
+/// The static map's copy: its bind group layout, sampler and pipeline. Every
+/// texel is written with the stored depth (compare Always, no raster bias:
+/// the depth comes from the program, not the rasteriser).
+fn create_copy(
+    render_device: &RenderDevice,
+    pipeline_cache: &PipelineCache,
+) -> (BindGroupLayoutDescriptor, Sampler, CachedRenderPipelineId) {
     // The copy reads the static map as an unfilterable float texture through a
     // nearest, non-comparison sampler (shaders/shadow_depth_copy.wgsl).
     let copy_layout = BindGroupLayoutDescriptor::new(
@@ -2117,9 +3095,7 @@ fn init_shadow_resources(
             },
         ],
     );
-    let copy_sampler = crate::weather_depth::raw_depth_sampler(&render_device);
-    // Every texel is written with the stored depth (compare Always, no
-    // raster bias: the depth comes from the program, not the rasteriser).
+    let copy_sampler = crate::weather_depth::raw_depth_sampler(render_device);
     let copy_pipeline = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
         label: Some("site_shadow_static_copy_pipeline".into()),
         layout: vec![copy_layout.clone()],
@@ -2148,15 +3124,62 @@ fn init_shadow_resources(
         multisample: MultisampleState::default(),
         ..Default::default()
     });
-    let cmp_sampler = render_device.create_sampler(&SamplerDescriptor {
-        address_mode_u: AddressMode::ClampToEdge,
-        address_mode_v: AddressMode::ClampToEdge,
-        mag_filter: FilterMode::Linear,
-        min_filter: FilterMode::Linear,
-        mipmap_filter: MipmapFilterMode::Nearest,
-        compare: Some(CompareFunction::LessEqual),
-        ..Default::default()
-    });
+    (copy_layout, copy_sampler, copy_pipeline)
+}
+
+/// Replaces the depth maps with maps of `size`: the frame's and the static
+/// map's textures and views, their samplers, and the read-back sized by the
+/// old side. The buffers and layouts are not sized by the map and stay.
+///
+/// Every material bind group that binds the maps holds the old depth view;
+/// those materials are marked changed in the main world on the same frame
+/// ([`mark_materials_on_resolution`]) and prepared again after this runs.
+fn rebuild_shadow_maps(
+    render_device: &RenderDevice,
+    pipeline_cache: &PipelineCache,
+    gpu: &mut ShadowMapGpu,
+    account: &ShadowAccount,
+    size: u32,
+) {
+    let maps = create_maps(render_device, size);
+    let (copy_layout, copy_sampler, copy_pipeline) = create_copy(render_device, pipeline_cache);
+    gpu.size = maps.size;
+    gpu.depth_texture = maps.depth_texture;
+    gpu.depth_view = maps.depth_view;
+    gpu.static_view = maps.static_view;
+    gpu.cmp_sampler = maps.cmp_sampler;
+    gpu.copy_layout = copy_layout;
+    gpu.copy_sampler = copy_sampler;
+    gpu.copy_pipeline = copy_pipeline;
+    gpu.maps_frames = 0;
+    let mut inner = account.0.lock().unwrap();
+    // A read-back of the old side is dropped with it.
+    inner.probe_pending = false;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        inner.probe_buffer = None;
+        inner.previous_map = None;
+        inner.previous_window = None;
+        inner.probe_bytes = 0;
+    }
+    inner.next_probe_frame = 0;
+}
+
+/// RenderStartup: the depth maps, the comparison sampler, the three buffers
+/// and the group 0 layout.
+fn init_shadow_resources(
+    mut commands: Commands,
+    render_device: Res<RenderDevice>,
+    pipeline_cache: Res<PipelineCache>,
+    settings: Option<Res<ShadowSettingsGlobals>>,
+) {
+    // The maps' side is the settings' resolution; without them yet, the
+    // default, which the first prepare applies.
+    let size = settings
+        .map(|settings| settings.settings.resolution)
+        .unwrap_or_else(|| ShadowSettings::default().resolution);
+    let maps = create_maps(&render_device, size);
+    let (copy_layout, copy_sampler, copy_pipeline) = create_copy(&render_device, &pipeline_cache);
     let consumer_buffer = render_device.create_buffer(&BufferDescriptor {
         label: Some("site_shadow_consumer"),
         size: CONSUMER_BYTES as u64,
@@ -2170,7 +3193,10 @@ fn init_shadow_resources(
         mapped_at_creation: false,
     });
     // 动态 offset 槽距按设备对齐（通常 256）。
-    let align = render_device.limits().min_uniform_buffer_offset_alignment.max(64);
+    let align = render_device
+        .limits()
+        .min_uniform_buffer_offset_alignment
+        .max(64);
     let object_buffer = render_device.create_buffer(&BufferDescriptor {
         label: Some("site_shadow_objects"),
         size: (align as u64) * (OBJECT_CAPACITY as u64),
@@ -2191,7 +3217,10 @@ fn init_shadow_resources(
         "site_shadow_skin_layout",
         &BindGroupLayoutEntries::with_indices(
             ShaderStages::VERTEX,
-            ((0, uniform_buffer_sized(true, std::num::NonZeroU64::new(PALETTE_WINDOW))),),
+            ((
+                0,
+                uniform_buffer_sized(true, std::num::NonZeroU64::new(PALETTE_WINDOW)),
+            ),),
         ),
     );
     commands.insert_resource(ShadowPaletteGpu {
@@ -2204,9 +3233,11 @@ fn init_shadow_resources(
         capacity: PALETTE_WINDOW,
     });
     commands.insert_resource(ShadowMapGpu {
-        depth_texture: texture,
-        depth_view,
-        cmp_sampler,
+        size: maps.size,
+        depth_texture: maps.depth_texture,
+        depth_view: maps.depth_view,
+        cmp_sampler: maps.cmp_sampler,
+        maps_frames: 0,
         consumer_buffer,
         frame_buffer,
         object_buffer,
@@ -2214,14 +3245,18 @@ fn init_shadow_resources(
         object_binding_size: std::mem::size_of::<[Vec4; 4]>() as u64,
         depth_layout,
         skin_layout,
-        static_view,
+        static_view: maps.static_view,
         copy_layout,
         copy_sampler,
         copy_pipeline,
     });
 }
 
-/// Startup：着色程序入表（weather 同款形状）。
+/// Startup: the two programs of the shadow map enter the shader table (the
+/// same shape as weather.rs; the repository has no default asset source
+/// directory to load them from). The consumers' programs (the site material's
+/// in site_material.rs, the room shell's in room_shell.rs) are inserted the
+/// same way by the crates that hold their paths.
 fn load(mut shaders: ResMut<Assets<Shader>>) {
     let _ = shaders.insert(
         SHADOW_DEPTH_SHADER.id(),
@@ -2239,14 +3274,15 @@ fn load(mut shaders: ResMut<Assets<Shader>>) {
     );
 }
 
-/// 主光阴影深度图插件：消费面（站点材质）在 native 与 wasm 都在，两侧都装
-/// ——此前 wasm 分支的装配缺口（sky/站点材质漏挂）不在这里重演。
+/// 主光阴影深度图插件：消费面（站点材质）在 native 与 wasm 都在，两侧都装。
 pub struct ShadowmapPlugin;
 
 impl Plugin for ShadowmapPlugin {
     fn build(&self, app: &mut App) {
         crate::render::gpu::install_bind_group_caches(app);
-        app.add_systems(Startup, load);
+        app.add_plugins(ShadowSettingsPlugin)
+            .add_systems(Startup, load)
+            .add_systems(Last, mark_materials_on_resolution::<SiteMaterial>);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
@@ -2256,15 +3292,22 @@ impl Plugin for ShadowmapPlugin {
             .init_resource::<ShadowAccount>()
             .init_resource::<StaticBake>()
             .add_systems(RenderStartup, init_shadow_resources)
+            .add_systems(Render, fit_camera_frame.in_set(RenderSystems::Prepare).before(prepare_shadow_draws))
+            .add_systems(
+                Render,
+                (
+                    prepare_shadow_draws,
+                    plan_static_bake.after(prepare_shadow_draws),
+                )
+                    .in_set(RenderSystems::PrepareResources),
+            )
             .add_systems(
                 ExtractSchedule,
                 (extract_shadow_casters, extract_skinned_casters).chain(),
             )
             .add_systems(
-                Render,
-                (prepare_shadow_draws, plan_static_bake)
-                    .chain()
-                    .in_set(RenderSystems::PrepareResources),
+                ExtractSchedule,
+                apply_shadow_resolution.after(crate::shadow_settings::extract_shadow_settings),
             )
             .add_systems(
                 Core3d,

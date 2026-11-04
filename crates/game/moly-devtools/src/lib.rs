@@ -47,6 +47,7 @@ pub use moly_render::render_inputs;
 pub use moly_render::source_billboard;
 pub use moly_render::particle_mesh_emission;
 pub use moly_render::shadowmap;
+pub use moly_render::shadow_settings;
 pub use moly_render::site_material;
 pub use moly_render::sky;
 pub use moly_render::site_extension;

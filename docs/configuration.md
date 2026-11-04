@@ -101,6 +101,24 @@ The server also reads `MOLY_SERVER_ADMIN`, from the environment only: `off` refu
 | `hide_hud` | `MOLY_HIDE_HUD` | true or false | game, developer window, stage | Hides every HUD, button and dialog view; the scene, the balloons and the talk window remain. Default: false, the game's own interface. |
 | `hide_player` | `MOLY_HIDE_PLAYER` | true or false | game, developer window, stage | Hides the player's own body. Default: false, the body shows. |
 
+### `[graphics]`
+
+The main light's shadow. Every key here is a runtime setting as well: `moly.graphics.set` changes it while the game runs, and `moly.graphics.get` answers the current values (see [the control surface](mcp.md)). A value that breaks a rule below stops the start with the key and the rule named, and `moly.graphics.set` answers the same refusal without changing anything; no value is corrected silently.
+
+| Key | Environment variable | Value | Read by | Description |
+|---|---|---|---|---|
+| `shadow_enabled` | `MOLY_SHADOW_ENABLED` | true or false | game, stage | Whether the main light casts a shadow (a depth map drawn before the scene and read by the site and room materials). `false` draws no depth map and leaves every receiver fully lit. Default: true. |
+| `shadow_resolution` | `MOLY_SHADOW_RESOLUTION` | whole number | game, stage | The side of the main-light shadow depth maps, in texels: 512 to 8192, a power of two or a multiple of 512. Default: 2560 in the game, 2048 in the browser. |
+| `shadow_fit` | `MOLY_SHADOW_FIT` | string | game, stage | What the shadow frame covers: `camera` (a sphere around the camera's view out to `graphics.shadow_distance`, dense near the camera) or `site` (one frame around every caster of the site). Default: `camera`. |
+| `shadow_distance` | `MOLY_SHADOW_DISTANCE` | string | game, stage | How far in front of the camera (`camera` fit) the shadow map reaches and where the shadow fades out, in metres; the fade starts at 90% of it. Default: 30. |
+| `shadow_filter` | `MOLY_SHADOW_FILTER` | string | game, stage | How a receiver reads the shadow map: `hard` (one bilinear comparison), `tent` (a nine-tap tent), `pcf` (a sixteen-tap disk of `graphics.shadow_pcf_radius`) or `pcss` (contact hardening from `graphics.shadow_light_angle`). Default: `pcss`. |
+| `shadow_pcf_radius` | `MOLY_SHADOW_PCF_RADIUS` | string | game, stage | The radius of the `pcf` filter's disk, in metres (0 or more); capped at `graphics.shadow_max_radius_texels`. Default: 0.02. |
+| `shadow_light_angle` | `MOLY_SHADOW_LIGHT_ANGLE` | string | game, stage | The sun's angular diameter for the `pcss` filter, in degrees from 0 up to 90: the penumbra is the blocker-to-receiver distance times its tangent. Default: 2.5. |
+| `shadow_max_radius_texels` | `MOLY_SHADOW_MAX_RADIUS_TEXELS` | string | game, stage | The largest radius any shadow filter reaches, in map texels (1 or more). Default: 24. |
+| `shadow_strength` | `MOLY_SHADOW_STRENGTH` | string | game, stage | The shadow's opacity: the final attenuation is mixed from full light to the shadow by this value, 0 to 1. Default: 1. |
+| `shadow_depth_bias` | `MOLY_SHADOW_DEPTH_BIAS` | string | game, stage | A multiplier on the casters' depth bias, which keeps a lit surface from shadowing itself; 0 or more. Lower values keep contact shadows tight, higher values hide acne. Default: 1. |
+| `shadow_normal_bias` | `MOLY_SHADOW_NORMAL_BIAS` | string | game, stage | A multiplier on the casters' normal bias, which moves casters along their normals by map texels; 0 or more. Default: 1. |
+
 ### `[text]`
 
 The developer window translates its display text with these files: the source catalogue named by `text.source`, over which the official and community overlays are applied, in the locale of `text.locale`. Without `text.source` the original text is shown.

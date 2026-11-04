@@ -95,6 +95,31 @@
 # Hides the player's own body.
 # hide_player = false
 
+[graphics]
+
+# Whether the main light casts a shadow (a depth map drawn before the scene and read by the site and room materials). `false` draws no depth map and leaves every receiver fully lit.
+# shadow_enabled = true
+# The side of the main-light shadow depth maps, in texels: 512 to 8192, a power of two or a multiple of 512. Default: 2560 in the game, 2048 in the browser.
+# shadow_resolution = 2560
+# What the shadow frame covers: `camera` (a sphere around the camera's view out to `graphics.shadow_distance`, dense near the camera) or `site` (one frame around every caster of the site). Default: `camera`.
+# shadow_fit = "camera"
+# How far in front of the camera (`camera` fit) the shadow map reaches and where the shadow fades out, in metres; the fade starts at 90% of it. Default: 30.
+# shadow_distance = "30"
+# How a receiver reads the shadow map: `hard` (one bilinear comparison), `tent` (a nine-tap tent), `pcf` (a sixteen-tap disk of `graphics.shadow_pcf_radius`) or `pcss` (contact hardening from `graphics.shadow_light_angle`). Default: `pcss`.
+# shadow_filter = "pcss"
+# The radius of the `pcf` filter's disk, in metres (0 or more); capped at `graphics.shadow_max_radius_texels`. Default: 0.02.
+# shadow_pcf_radius = "0.02"
+# The sun's angular diameter for the `pcss` filter, in degrees from 0 up to 90: the penumbra is the blocker-to-receiver distance times its tangent. Default: 2.5.
+# shadow_light_angle = "2.5"
+# The largest radius any shadow filter reaches, in map texels (1 or more). Default: 24.
+# shadow_max_radius_texels = "24"
+# The shadow's opacity: the final attenuation is mixed from full light to the shadow by this value, 0 to 1. Default: 1.
+# shadow_strength = "1.0"
+# A multiplier on the casters' depth bias, which keeps a lit surface from shadowing itself; 0 or more. Lower values keep contact shadows tight, higher values hide acne. Default: 1.
+# shadow_depth_bias = "1.0"
+# A multiplier on the casters' normal bias, which moves casters along their normals by map texels; 0 or more. Default: 1.
+# shadow_normal_bias = "1.0"
+
 [text]
 
 # The source text catalogue file the display translation reads. Unset: the original text is shown.

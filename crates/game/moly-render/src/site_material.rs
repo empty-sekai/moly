@@ -592,12 +592,14 @@ impl AsBindGroup for SiteMaterial {
                 ),
             ),
             (9, UnpreparedBindingResource::Sampler(SamplerBindingType::Filtering, repeat)),
-            // binding 10：主光阴影消费块（矩阵 + 尺寸 + 参数），全族共用。
+            // binding 10：主光阴影消费块（矩阵 + 尺寸 + 参数 + 滤波常数）。
             (
                 10,
                 UnpreparedBindingResource::Buffer(shadow.consumer_buffer.clone()),
             ),
-            // binding 11/12：深度图 + 比较采样器（pcf9 的硬件比较口）。
+            // binding 11/12：深度图 + 比较采样器（每次 tap 的硬件比较）；
+            // Pcss 的遮挡物搜索按 texel 直接取深度（`textureLoad`），不再
+            // 需要第二个采样器。
             (
                 11,
                 UnpreparedBindingResource::TextureView(
