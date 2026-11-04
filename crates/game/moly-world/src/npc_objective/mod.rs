@@ -4287,7 +4287,10 @@ pub fn decide(
                                 .map(|uid| format!("，{uid} 记入不可达表"))
                                 .unwrap_or_default(),
                         );
-                        if mind.force_updates > 0 {
+                        // Only the decision pass outside the machine makes the
+                        // owed calls (see the pass's end); a machine's pass
+                        // would draw again without making one.
+                        if !hfsm && mind.force_updates > 0 {
                             continue 'cascade;
                         }
                         continue 'npc;
@@ -4333,7 +4336,7 @@ pub fn decide(
                                         moly_law::path::NpcPathWalkSlot::from_corners(Vec::new());
                                     *phase = MotionPhase::Dwelling { remaining: None };
                                     finish_objective(unit.0, &mut mind, &slot, frame, true);
-                                    if mind.force_updates > 0 {
+                                    if !hfsm && mind.force_updates > 0 {
                                         continue 'cascade;
                                     }
                                     continue 'npc;
