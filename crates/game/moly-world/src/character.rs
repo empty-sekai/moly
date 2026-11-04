@@ -239,6 +239,9 @@ pub enum BodyOwner {
     Portrait,
     /// A sequence player sampling its tracks at the played time.
     Sequence,
+    /// A ragdoll: the body falls as rigid parts until it gets up, and its
+    /// animation is handed back when it does.
+    Ragdoll,
 }
 
 impl BodyOwner {
@@ -256,9 +259,16 @@ impl BodyOwner {
             Self::CutScene => "a cut-scene",
             Self::Portrait => "a portrait",
             Self::Sequence => "a sequence",
+            Self::Ragdoll => "a ragdoll",
         }
     }
 }
+
+/// The character is falling: its bones' rotations are written by the ragdoll
+/// each frame, and passes that solve poses of their own (a look-at) leave it
+/// alone until it gets up.
+#[derive(Component)]
+pub struct Falling;
 
 /// One motion a pose plays: the shared library's clip `clip`, sampled
 /// `local` seconds into it at `weight`.
@@ -300,6 +310,12 @@ impl MotionDriver {
         token
     }
 
+    /// The token a state holds, for a state that keeps its hold in its own
+    /// record and hands it back through [`Self::hand_back`].
+    pub fn token(&self) -> Option<BodyToken> {
+        self.held
+    }
+
     /// [`Self::take`] for a state that keeps its token in `slot` while it
     /// plays several clips in a row. Called where the state enters the body
     /// (its first clip, or a new motion it is told to play), never to carry
@@ -331,6 +347,11 @@ impl MotionDriver {
     /// The owner currently playing the animator instead of locomotion.
     pub fn held_by(&self) -> Option<BodyOwner> {
         self.held.map(BodyToken::owner)
+    }
+
+    /// Whether the body is held by the owner `owner`.
+    pub fn is_held_by(&self, owner: BodyOwner) -> bool {
+        self.held_by() == Some(owner)
     }
 
     pub fn locomotion_owns(&self) -> bool {

@@ -6,6 +6,9 @@
 //!
 //! A taken character is held by the run that took it, in the hub's
 //! [`moly_features::act::Taken`], and given back to its AI when the run ends.
+//! `npc.ragdoll` takes a character and lets it fall as a ragdoll, with a push
+//! on a bone of the script's choosing; it gets up where it comes to rest and
+//! stays taken by the run.
 
 use bevy::prelude::*;
 use moly_features::act::{targets, ActCtx, ActPoll, ActionRun, ActionSpec, Fields, FixtureRef, Kinds, Leaving, Step, Taken, Target};
@@ -21,6 +24,7 @@ use crate::Requested;
 pub fn install(app: &mut App) {
     Kinds::new()
         .step(Step::new("npc.take", false, None, |fields| Ok(Box::new(Take { unit: fields.req_u32("unit")? }))))
+        .step(Step::new("npc.ragdoll", false, None, |fields| Ok(Box::new(read_ragdoll(fields)?))))
         .step(Step::new("npc.walk_to", false, Some(60.0), |fields| Ok(Box::new(read_walk(fields)?))))
         .step(Step::new("npc.face", false, None, |fields| Ok(Box::new(read_face(fields)?))))
         .step(Step::new("npc.emote", false, None, |fields| Ok(Box::new(read_emote(fields)?))))
@@ -87,6 +91,59 @@ fn is_taken(world: &World, unit: u32) -> bool {
 /// already is the same take.
 fn take_npc(world: &mut World, ticket: u64, unit: u32) -> Result<Entity, String> {
     Taken::take(world, ticket, unit).map(|(entity, _)| entity)
+}
+
+/// Shows the taken character of `unit` falling where it stands, with the push
+/// `push` landing on the bone `at` (the pelvis when none is named). The body
+/// is built by the ragdoll where the frame's animation leaves the bones.
+fn show_fall(world: &mut World, unit: u32, push: Option<Vec3>, at: Option<&str>) -> Result<(), String> {
+    let member = Taken::body(world, unit)?;
+    moly_features::act::request_fall(world, member, push, at.map(str::to_owned))
+}
+
+/// `npc.ragdoll`: the character of `unit` taken and dropped, so that it falls
+/// as a body of parts until it comes to rest and gets up again. An `at` names
+/// the bone a push lands on, and `impulse` is the push in metres per second
+/// per metre of the character's height.
+#[derive(Debug)]
+struct Ragdoll {
+    unit: u32,
+    impulse: Option<Vec3>,
+    at: Option<String>,
+}
+
+fn read_ragdoll(fields: &mut Fields<'_>) -> Result<Ragdoll, String> {
+    let unit = fields.req_u32("unit")?;
+    let impulse = match fields.opt("impulse") {
+        None => None,
+        Some(value) => {
+            let numbers = value.as_array().filter(|numbers| numbers.len() == 3).ok_or("impulse must be three numbers, [x, y, z]")?;
+            let mut push = Vec3::ZERO;
+            for (axis, number) in numbers.iter().enumerate() {
+                push[axis] = number.as_f64().filter(|number| number.is_finite()).ok_or("impulse must be three numbers, [x, y, z]")? as f32;
+            }
+            Some(push)
+        }
+    };
+    let at = fields.opt_str("at")?.map(str::to_owned);
+    Ok(Ragdoll { unit, impulse, at })
+}
+
+impl ActionSpec for Ragdoll {
+    fn name(&self) -> &str {
+        "npc.ragdoll"
+    }
+
+    fn hand(&self) -> bool {
+        false
+    }
+
+    fn start(&self, world: &mut World, ctx: &mut ActCtx) -> Result<Box<dyn ActionRun>, String> {
+        let unit = self.unit;
+        take_npc(world, ctx.ticket, unit)?;
+        show_fall(world, unit, self.impulse, self.at.as_deref())?;
+        Ok(Box::new(Requested { note: format!("character {unit} falls") }))
+    }
 }
 
 /// The body of `unit`, when it is taken.

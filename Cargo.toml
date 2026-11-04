@@ -29,6 +29,7 @@ members = [
     "crates/game/moly-cutscene",
     "crates/game/moly-act",
     "crates/game/moly-sequence-player",
+    "crates/game/moly-ragdoll",
     "crates/game/moly-devtools",
     "crates/game/moly-masters",
     "crates/game/moly-game",
@@ -85,6 +86,10 @@ bevy = { version = "0.20.1", default-features = false, features = [
     "mp3",
 ] }
 serde_json = { version = "1", features = ["preserve_order"] }
+# 3D rigid bodies and joints on the game's own frame clock. Colliders come from
+# Parry in single precision; extra multithreading is native only, so the
+# browser build keeps the same feature set apart from it.
+avian3d = { version = "0.8", default-features = false, features = ["3d", "parry-f32", "xpbd_joints"] }
 
 # Line tables keep panics and profiles readable. Full debug information for the
 # engine and every dependency pushes the application's PDB past 2 GB and makes

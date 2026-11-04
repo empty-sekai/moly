@@ -180,6 +180,7 @@ pub use moly_features::mysekai_rank;
 pub use moly_features::option_dialog;
 pub use moly_photo as photo_shot;
 pub use moly_features::pick;
+pub use moly_ragdoll as ragdoll;
 pub use moly_features::player_input;
 pub use moly_features::player_data;
 pub use moly_features::player_data_ui;

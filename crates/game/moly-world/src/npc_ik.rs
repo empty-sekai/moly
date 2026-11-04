@@ -51,7 +51,9 @@ pub fn install(app: &mut App) {
             .after(bevy::app::AnimationSystems).before(bevy::transform::TransformSystems::Propagate));
 }
 
-fn global(world: &World, entity: Entity) -> Option<GlobalTransform> {
+/// The world transform of an entity by its local transforms along its parent
+/// chain: the pose the live `Transform` components give, before propagation.
+pub fn global(world: &World, entity: Entity) -> Option<GlobalTransform> {
     let mut chain = Vec::new();
     let mut current = entity;
     loop {
@@ -140,6 +142,17 @@ pub fn update(world:&mut World) {
     let actors:Vec<Entity>=world.query_filtered::<Entity,With<NpcIk>>().iter(world).collect();
     for actor in actors {
         let Some(mut ik)=world.entity_mut(actor).take::<NpcIk>() else {continue;};
+        // A character that has fallen keeps its bone poses.
+        if world.get::<crate::character::Falling>(actor).is_some() {
+            // A fallen pose already turns the head: the look-at would turn a
+            // standing head on top of it, so the target is let go.
+            ik.weight_time=0.0;
+            ik.target=None;
+            ik.wait=None;
+            ik.wait_result=None;
+            world.entity_mut(actor).insert(ik);
+            continue;
+        }
         let (Some(hip),Some(head))=(global(world,ik.hip),global(world,ik.head)) else {world.entity_mut(actor).insert(ik);continue;};
         let target=ik.target.and_then(|target|global(world,target)).map(|t|t.translation());
         let active=ik.enabled && target.is_some();

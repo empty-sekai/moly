@@ -282,6 +282,10 @@ pub fn install(app: &mut App) {
     // among the others, and its control surface methods.
     moly_sequence_player::install(app);
     crate::director::install(app);
+    // The ragdoll: the physics of the characters' falls on the game's frame
+    // time, after the frame's animation and before its physics step, with the
+    // actions' takes dropping the characters their scripts take.
+    crate::ragdoll::install(app);
     // Native only: the browser engine runs no Luau plugins.
     #[cfg(not(target_arch = "wasm32"))]
     crate::plugin_host::install(app);

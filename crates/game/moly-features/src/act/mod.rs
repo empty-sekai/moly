@@ -158,6 +158,35 @@ impl Card {
     }
 }
 
+/// What a host's ragdoll does when a step asks a character to fall: the
+/// request names the character, a push and the bone it lands on. Without one,
+/// asking a character to fall is refused by name.
+#[derive(Resource, Default)]
+pub struct FallRequests {
+    request: Option<fn(&mut World, Entity, Option<Vec3>, Option<String>) -> Result<(), String>>,
+}
+
+impl FallRequests {
+    /// The request a host installs.
+    pub fn new(request: fn(&mut World, Entity, Option<Vec3>, Option<String>) -> Result<(), String>) -> Self {
+        Self { request: Some(request) }
+    }
+
+    /// The request a host installed, if any.
+    pub fn request(&self) -> Option<fn(&mut World, Entity, Option<Vec3>, Option<String>) -> Result<(), String>> {
+        self.request
+    }
+}
+
+/// Asks the character `member` to fall, through the host's ragdoll.
+pub fn request_fall(world: &mut World, member: Entity, push: Option<Vec3>, at: Option<String>) -> Result<(), String> {
+    let request = world.get_resource::<FallRequests>().and_then(|requests| requests.request);
+    match request {
+        Some(request) => request(world, member, push, at),
+        None => Err("no ragdoll is installed, so the character cannot fall".to_owned()),
+    }
+}
+
 /// What a finished step leaves for the steps after it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Leaving {
@@ -227,6 +256,7 @@ pub fn install(app: &mut App) {
         .init_resource::<crate::lease::Leases>()
         .init_resource::<hand::Grip>()
         .init_resource::<Taken>()
+        .init_resource::<FallRequests>()
         .init_resource::<Activities>()
         .init_resource::<targets::Gatherables>();
     crate::camera_hold::install(app);

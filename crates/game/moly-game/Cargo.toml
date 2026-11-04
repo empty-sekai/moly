@@ -21,6 +21,7 @@ moly-harvest = { path = "../moly-harvest" }
 moly-content-library = { path = "../moly-content-library" }
 moly-cutscene = { path = "../moly-cutscene" }
 moly-sequence-player = { path = "../moly-sequence-player" }
+moly-ragdoll = { path = "../moly-ragdoll" }
 moly-devtools = { path = "../moly-devtools" }
 moly-assets = { path = "../../engine/moly-assets" }
 moly-config = { path = "../../base/moly-config" }

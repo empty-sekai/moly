@@ -105,6 +105,7 @@ crates = ["moly-app", "moly-stage", "moly-android", "moly-launcher", "moly-serve
 "crates/game/moly-photo/Cargo.toml" = "domain"
 "crates/game/moly-act/Cargo.toml" = "domain"
 "crates/game/moly-sequence-player/Cargo.toml" = "domain"
+"crates/game/moly-ragdoll/Cargo.toml" = "domain"
 "crates/game/moly-fixture-edit/Cargo.toml" = "domain"
 "crates/game/moly-delivery/Cargo.toml" = "domain"
 "crates/game/moly-harvest/Cargo.toml" = "domain"

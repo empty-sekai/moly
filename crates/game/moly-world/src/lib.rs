@@ -136,6 +136,8 @@ pub mod npc_state;
 pub mod npc_talk_lottery;
 pub mod npc_tweet;
 pub mod npc_view;
+// The ground a character stands on, as the navigation face samples it.
+pub mod ragdoll_ground;
 pub mod system_fixture;
 pub mod player;
 pub mod player_avatar;
