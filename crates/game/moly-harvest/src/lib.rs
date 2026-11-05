@@ -55,7 +55,7 @@ mod arrival;
 pub mod catalog;
 pub mod companion_gather;
 mod clips;
-mod gather_actions;
+pub mod gather_actions;
 pub(crate) mod damage;
 mod drops;
 mod effects;

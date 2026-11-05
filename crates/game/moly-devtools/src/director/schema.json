@@ -59,7 +59,16 @@
      "layout.put_many",
      "layout.remove",
      "view.set",
-     "companion.gather"
+     "companion.gather",
+     "camera.free",
+     "camera.talk_lens",
+     "camera.talk_lens_off",
+     "npc.ragdoll",
+     "npc.play_talk",
+     "npc.warp_to",
+     "player.warp_to",
+     "sequence.play",
+     "sequence.stop"
     ],
     "description": "The action name."
    },
@@ -243,6 +252,311 @@
      "times",
      "steps"
     ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "player.warp_to",
+   "description": "Stands the player at a world point [x, y, z] at once.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "array",
+      "items": {
+       "type": "number"
+      },
+      "minItems": 3,
+      "maxItems": 3,
+      "description": "[x, y, z] world point."
+     }
+    },
+    "required": [
+     "to"
+    ],
+    "additionalProperties": false
+   },
+   "constraints": [
+    "ends at once; fails when no player is on the site"
+   ]
+  },
+  {
+   "name": "npc.ragdoll",
+   "description": "Takes the character of unit and drops it as a ragdoll where it stands: its body falls as parts until it comes to rest, then gets up again and stays taken by the step's run. impulse is a push in metres per second per metre of the character's height, landing on the bone named by at (the pelvis when absent). The step ends once the fall has started.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "impulse": {
+      "type": "array",
+      "items": {
+       "type": "number"
+      },
+      "minItems": 3,
+      "maxItems": 3,
+      "description": "Push [x, y, z] in metres per second per metre of the character's height."
+     },
+     "at": {
+      "type": "string",
+      "description": "Bone the push lands on; the pelvis when absent."
+     }
+    },
+    "required": [
+     "unit"
+    ],
+    "additionalProperties": false
+   },
+   "constraints": [
+    "impulse must be three finite numbers",
+    "a character falling already, or one that cannot fall (no such bone, a skeleton without the pelvis bone), fails the step"
+   ]
+  },
+  {
+   "name": "npc.play_talk",
+   "description": "Plays the conversation of talk at once, without the cast's gathering: the speakers' own activities are cancelled and the talk player is handed the row itself. A conversation at a fixture names that fixture: the placed instance of the UID, or the instance of the master id nearest the speaking character. The roster is first set to the talk's speakers and rebuilt when it is not theirs already, which ends the step with a refusal asking to ask again once they stand.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "talk": {
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+     },
+     "fixture": {
+      "oneOf": [
+       {
+        "type": "string",
+        "description": "Placement UID."
+       },
+       {
+        "type": "integer",
+        "minimum": -2147483648,
+        "maximum": 2147483647,
+        "description": "Master id; the placed instance nearest the speaking character is used."
+       }
+      ]
+     }
+    },
+    "required": [
+     "unit",
+     "talk"
+    ],
+    "additionalProperties": false
+   },
+   "constraints": [
+    "a talk with no script or no master row fails the step",
+    "a fixture UID that is not placed, or a master id with no placed instance, fails the step"
+   ]
+  },
+  {
+   "name": "npc.warp_to",
+   "description": "Stands a character at a world point [x, y, z] at once; the character is taken by the step's run, so its AI makes no decision until it is released (npc.release). The step ends at once.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "to": {
+      "type": "array",
+      "items": {
+       "type": "number"
+      },
+      "minItems": 3,
+      "maxItems": 3,
+      "description": "[x, y, z] world point."
+     }
+    },
+    "required": [
+     "unit",
+     "to"
+    ],
+    "additionalProperties": false
+   },
+   "constraints": [
+    "fails when the unit has no character on the site"
+   ]
+  },
+  {
+   "name": "camera.free",
+   "description": "Holds the field camera at the eye position looking at target, with a vertical field of view of fov degrees. The pose stays held until the step's run ends or another program takes the camera. The step ends on the frame the pose is held.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "position": {
+      "type": "array",
+      "items": {
+       "type": "number"
+      },
+      "minItems": 3,
+      "maxItems": 3,
+      "description": "[x, y, z] world point of the eye."
+     },
+     "target": {
+      "type": "array",
+      "items": {
+       "type": "number"
+      },
+      "minItems": 3,
+      "maxItems": 3,
+      "description": "[x, y, z] world point the camera looks at."
+     },
+     "fov": {
+      "type": "number",
+      "minimum": 5,
+      "maximum": 120,
+      "default": 45,
+      "description": "Vertical field of view in degrees."
+     }
+    },
+    "required": [
+     "position",
+     "target"
+    ],
+    "additionalProperties": false
+   },
+   "constraints": [
+    "fov outside 5..=120 is refused when the step is parsed",
+    "fails with the refusal when another program holds the camera"
+   ]
+  },
+  {
+   "name": "camera.talk_lens",
+   "description": "Frames conversations with the talk lens, following the speaker: a line spoken toward the player is framed from the front, other lines from a three-quarter view. The eye eases toward each new framing at glide per second (0 cuts) and closes in by push of its distance while the framing holds. With clear on, the view's placed fixtures fade out while one stands between the eye and a cast member; unit names a character the idle framing holds when no conversation plays; wide and wide_hold frame the conversation's wide view. The lens holds the camera until it is set again or taken off (camera.talk_lens_off).",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "distance": {
+      "type": "number",
+      "minimum": 0,
+      "default": 1.9
+     },
+     "height": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0.8
+     },
+     "target": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0.47
+     },
+     "fov": {
+      "type": "number",
+      "minimum": 5,
+      "maximum": 120,
+      "default": 35,
+      "description": "Vertical field of view in degrees."
+     },
+     "swing": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0.5
+     },
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "wide": {
+      "type": "boolean",
+      "default": true
+     },
+     "wide_hold": {
+      "type": "number",
+      "minimum": 0,
+      "default": 2.5
+     },
+     "glide": {
+      "type": "number",
+      "minimum": 0,
+      "default": 2.5,
+      "description": "Rate per second."
+     },
+     "push": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "exclusiveMaximum": true,
+      "default": 0.12,
+      "description": "Fraction of the distance in 0..1."
+     },
+     "clear": {
+      "type": "boolean",
+      "default": true
+     }
+    },
+    "additionalProperties": false
+   },
+   "constraints": [
+    "fov outside 5..=120, a glide below 0 and a push outside 0..1 are refused when the step is parsed",
+    "fails with the refusal when another program holds the camera",
+    "ends at once"
+   ]
+  },
+  {
+   "name": "camera.talk_lens_off",
+   "description": "Takes the talk lens of the step's run off and lets its camera go. Another program's lens is left alone. The step ends at once.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "sequence.play",
+   "description": "Holds the document at path when one is named, plays it from from seconds (on the played time by default) and ends when the playback ends: the document played out or stopped. It fails with the reason when the document is refused (it cannot be read, parsed or compiled, or its cast is not on the site) or the playback fails. Stopped by its caller, the step stops the playback.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "Sequence document to load first; the loaded one by default."
+     },
+     "from": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Seconds to play from; on the played time by default."
+     }
+    },
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "sequence.stop",
+   "description": "Stops the playback and gives the camera and the cast back. The step ends at once; the note says whether a sequence was playing.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {},
     "additionalProperties": false
    }
   },

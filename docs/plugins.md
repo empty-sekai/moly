@@ -133,6 +133,7 @@ expands into several steps; the common fields apply to each of them.
 | `npc.talk` | `unit`, `talk` | Hands the character to its AI with a talk to open: its next decision builds the talk (the talk's fixture drawn, the other speakers drafted) instead of drawing one. | Ends when the talk is built; fails at the timeout (60 s default) or when the talk is refused. |
 | `npc.warp_to` | `unit`, `to` (`[x, y, z]`) | Stands a character at a world point at once; its AI makes no decision until released. | Ends at once; fails when the unit has no character. |
 | `npc.play_talk` | `unit`, `talk`, `fixture`? | Plays a conversation at once, without the cast's gathering. A fixture conversation needs `fixture`: a placed fixture's UID, or a master id (the nearest placed instance). | Ends at once when it starts; fails at the timeout (20 s default) or when it is refused. |
+| `npc.ragdoll` | `unit`, `impulse` (`[x, y, z]`, metres per second per metre of the character's height; none by default), `at` (a bone name; the pelvis by default) | Takes the character for this run and drops it as a ragdoll, with the push landing on the named bone; once it has come to rest it gets up and stays taken. See [Ragdoll](ragdoll.md). | Ends at once when the fall starts; fails when the character is falling already or cannot fall (no such bone, a skeleton without the pelvis bone). |
 
 ### Companions
 
@@ -156,10 +157,17 @@ expands into several steps; the common fields apply to each of them.
 |---|---|---|---|
 | `camera.drag` | `by` (`[dx, dy]` logical pixels, x right, y down), `secs` (default 0.5), `from` (fractions of the window; default above the player) | Drags one finger through the gesture layer and the camera's own input law. | Ends when the drag has finished; fails when there is no primary window or the touch is refused. |
 | `camera.zoom` | `by` (pixels; positive zooms in), `secs` (0.5 by default) | Turns the wheel by `by` pixels spread over `secs`. | Ends when the amount has been turned; fails when the wheel is refused. |
-| `view.set` | `hud`, `player` (booleans; each changes only when given) | Sets the clean view: `hud: true` hides every UI view but the talk window, `player: true` hides the player's own body. | Ends at once; the note names the state (`view: hud hidden, player shown`). Refused when it gives neither switch. It is not a hand step. |
+| `view.set` | `hud`, `player` (booleans; each changes only when given) | Sets the clean view: `hud: true` hides every HUD, button and dialog view, so only the scene, the in-world balloons and the talk window remain; `player: true` hides the player's own body. | Ends at once; the note names the state (`view: hud hidden, player shown`). Refused when it gives neither switch. It is not a hand step. |
 | `camera.free` | `position` (`[x, y, z]`), `target` (`[x, y, z]`), `fov` (degrees in 5..=120, default 45) | Holds the field camera at a world pose (a screenshot's eye). | Ends at once; a field of view outside 5..=120 is refused when the step is parsed. |
 | `camera.talk_lens` | `distance` (1.9), `height` (0.8), `target` (0.47), `fov` (35), `swing` (0.5), `unit`, `wide` (`true`), `wide_hold` (2.5), `glide` (2.5), `push` (0.12), `clear` (`true`) | Frames conversations with the talk lens, following the speaker: a line spoken toward the player is framed from the front, other lines from a three-quarter view. The eye eases toward each new framing at `glide` per second (0 cuts) and closes in by `push` of its distance while the framing holds. With `clear`, a placed fixture standing between the eye and a cast member fades out with the fixture dither until it no longer blocks the view. | Ends at once. |
 | `camera.talk_lens_off` | | Turns the talk lens off. | Ends at once. |
+
+### Sequences
+
+| Step | Fields | What it does | How it ends / refuses |
+|---|---|---|---|
+| `sequence.play` | `path` (a sequence document to load first; the loaded one by default), `from` (seconds; on from the played time by default) | Plays a sequence document on the field. See [Sequences](sequence.md). | Ends when the sequence has played to its end or is stopped; fails when the document is refused or the playback fails, with the reason. |
+| `sequence.stop` | | Stops the playback and gives the camera and the cast back. | Ends at once; the note says whether a sequence was playing. |
 
 ### Layout
 
@@ -288,9 +296,9 @@ while the game runs.
 
 ## Keeping this current
 
-The step tables above are checked against `director/schema.json`: a step added
-to the schema needs its row here in the same change, and the test
-`the_plugin_document_names_every_step` in `moly-devtools` fails naming every
-`do` value that has no row. The observe sections, event kinds and environment
-switches are kept the same way: when one is added or removed, its row changes
-with it.
+The step tables above follow `director/schema.json`, which `moly.director.schema` answers. The
+tests in `crates/game/moly-devtools/tests/director_schema.rs` build the action registry and fail,
+naming every miss, when a registered step has no schema entry, when a schema step is neither
+registered nor a flow step or macro, when a schema step has no row here, or when a bundled example
+uses a field its schema entry does not name. The observe sections, event kinds and environment
+switches are kept the same way by hand: when one is added or removed, its row changes with it.

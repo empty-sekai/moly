@@ -73,6 +73,11 @@ wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = ["Window", "Storage", "Location", "UrlSearchParams", "Navigator", "Clipboard", "File", "Blob", "FileList", "Document", "HtmlInputElement", "HtmlElement", "Element", "Node", "Event", "EventTarget", "AbortController", "AbortSignal", "ReadableStream", "ReadableStreamDefaultReader", "Request", "RequestInit", "RequestRedirect", "Response", "Headers", "ResizeObserver", "DragEvent", "DataTransfer"] }
 
 [dev-dependencies]
+# The steps of a registry built without a window: each crate that registers them.
+moly-act = { path = "../moly-act" }
+moly-harvest = { path = "../moly-harvest" }
+moly-delivery = { path = "../moly-delivery" }
+moly-sequence-player = { path = "../moly-sequence-player" }
 moly-core = { path = "../moly-core", features = ["test-support"] }
 moly-render = { path = "../moly-render", features = ["test-support"] }
 moly-audio = { path = "../moly-audio", features = ["test-support"] }
