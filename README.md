@@ -26,26 +26,48 @@
 > - **只供本地单机**：不连接原版游戏的服务器；服务端由使用者自己运行，只服务于自己的游玩，没有账号、登录或支付，也没有多人联机。
 
 > [!NOTE]
-> 项目仍在开发中。当前版本的范围与之后的计划见 [路线图](ROADMAP.md)，已知问题见 [Issues](https://github.com/empty-sekai/moly/issues)。
+> **本仓库已归档。** moly 的开发随 0.0.7 结束：不再增加功能，也不再修复问题，Issues 与 Pull requests 均已关闭。
+> 代码按许可证可自由 fork 与修改。
 
-## 功能
+## 完成情况
 
-按玩法域分组，括号内是实现它的 crate（各 crate 的职责见 [项目结构](docs/architecture.md)）：
+按玩法域分组，括号内是实现它的 crate（各 crate 的职责见 [项目结构](docs/architecture.md)）。
+行为与原版客户端兼容，结构按本仓需要组织；如何重新实现、兼容的范围与验证方式见 [方法](docs/METHOD.md)。
 
-- **场景与移动**（`moly-world`、`moly-features`）：入场流程，大炮与门在站点之间移动，室内房间，玩家角色、脚步声与表情。
-- **采集**（`moly-harvest`）：采集地图、障碍物、工具与体力、采集粒子、掉落与拾取、持有上限、采集 HUD、批量采集与获得提示。
-- **配送**（`moly-delivery`）：生日派对的配送场地、配送流程、掉落、荣誉奖励与配送界面。
-- **制作与转换**（`moly-features`、`moly-convert`）：制作界面与背包，转换机的槽位与转换界面。
-- **家具编辑**（`moly-fixture-edit`）：从背包摆放家具，地面家具、道路与环境的布局编辑。
+- **场景与移动**（`moly-world`、`moly-features`）：进入 MySekai 的入场流程与横幅；大炮与门在站点之间移动，门可交互并切换场景，地图选择界面；室内房间（室内壳与墙面剔除），多个站点常驻；玩家角色、脚步声与表情。
+- **采集**（`moly-harvest`）：采集地图、障碍物、工具与体力、采集粒子、掉落与拾取、持有上限；采集 HUD（当前工具、动作图标、缺少工具时的提示气泡、体力条）；获得提示与获得物对话框；长按蓄力的大锤一键清图，见 [批量采集](docs/bulk-harvest.md)。
+- **配送**（`moly-delivery`）：生日派对的配送场地与完整配送流程，掉落、荣誉奖励与总奖励，配送界面。
+- **制作与转换**（`moly-features`、`moly-convert`）：制作界面与制作结果对话框，制作与图纸的服务端回复；转换机的槽位、转换界面与转换的服务端规则。
+- **家具编辑**（`moly-fixture-edit`）：背包界面与从背包摆放家具；地面家具、道路／地砖与环境的布局编辑，库存与已放置对象随同一份布局事务更新。
 - **任务与拍照**（`moly-mission`、`moly-photo`）：任务界面与奖励领取，拍照模式与保存照片。
-- **内容库**（`moly-content-library`）：浏览对话、家具与 NPC 活动，在场地上布置并播放所选内容。
-- **NPC**（`moly-world`）：寻路、配对后的对话、头顶 tweet 气泡、待机动作决策、自主与家具互动。
-- **天气与粒子**（`moly-law`、`moly-render`）：天气现象的完整链路。
-- **音频与演出**（`moly-audio`、`moly-cutscene`）：BGM、SE、语音与环境音，唱片 BGM，生日派对与过场演出。
-- **导演脚本与插件**（`moly-devtools`、`moly-plugin`）：用 JSON 脚本或 Luau 插件编排玩家、角色、相机、天气与服务端模拟面板。
-- **MCP 服务器**（`tools/mcp`）：供 AI 客户端启动并驱动原生或浏览器实例。
+- **内容库**（`moly-content-library`）：浏览对话、家具与 NPC 活动；独立模式下搭起临时布景，在场地上布置并播放所选内容，结束后复原站点。
+- **NPC**（`moly-world`）：寻路、配对后的对话、头顶 tweet 气泡、待机动作决策、自主与家具互动；按原版可行走格选取目标位置；日服 7.0.0 的分层 NPC 状态机，以及不同团体角色之间的对话。
+- **天气与粒子**（`moly-law`、`moly-render`）：天气现象的完整链路（宿主生命周期、子发射器、曲线、雨滴面片等）；天气页按已解锁内容选择环境；界面粒子效果。
+- **画面**（`moly-render`）：主光源阴影的范围、分辨率、过滤方式（`hard`、`tent`、`pcf`、`pcss`）与强度由 `moly.toml` 的 `[graphics]` 设置，运行中可经 `moly.graphics.set` 修改，见 [配置](docs/configuration.md)。
+- **音频与演出**（`moly-audio`、`moly-cutscene`）：BGM、SE、语音与环境音，唱片 BGM 与 BGM 选择界面；生日派对的过场动画、派对对话与生日语音、收场与站点复原。
+- **序列播放**（`moly-sequence`、`moly-sequence-player`）：用 JSON 序列文档按时间轴驱动相机、角色走位与动作、表情、台词、字幕、声音与画面效果，可暂停、跳转、调速，并把暂停时的相机写回文档，见 [序列](docs/sequence.md)。
+- **布娃娃**（`moly-ragdoll`）：角色脱离动画以刚体倒下，静止后起身并回到原来的行为，见 [布娃娃](docs/ragdoll.md)。
+- **界面与设置**（`moly-ui`）：菜单、信息页与设置、学习现象对话框、界面切换管理。
+- **导演脚本与插件**（`moly-act`、`moly-devtools`、`moly-plugin`）：用 JSON 脚本或 Luau 插件编排玩家、角色、相机、天气与服务端模拟面板，两者经同一份动作注册表执行；插件有清单、依赖与冲突声明、独立沙箱与每帧预算，默认不启用，见 [插件](docs/plugins.md)。
+- **录制**（`moly-devtools`）：把窗口画面与游戏混音录成 MP4，录制时游戏时钟按固定帧率前进，见 [录制](docs/recording.md)。
+- **MCP 服务器**（`tools/mcp`）：供 AI 客户端启动并驱动原生或浏览器实例，读取状态、运行脚本、截取画面，见 [MCP 服务器](docs/mcp.md)。
+- **服务端与启动器**（`moly-server`、`moly-launcher`）：服务端作为独立进程保存玩家文档并应答游戏的请求；启动器选择、下载并校验资源版本，启动服务端与游戏，检查并更新程序版本，各目录可更改并迁移已有内容。
+- **数据与文本**（`moly-masters`、`moly-text`）：master 以日服为主体，按区服合并其他区服的独占行，运行时从使用者配置的 master 仓库读取，镜像作为后备，见 [主表与区服](docs/masters.md)；网页版选择中文时可用匹配的国服文本替换日服显示文本；使用开源字体 Resource Han Rounded。
+- **网页版**（`moly-stage`、`web/`）：嵌入舞台与完整游戏，各含 WebGPU 与 WebGL2 构建；网页版只运行原版，不加载插件。
 
-行为与原版客户端兼容，结构按本仓需要组织：如何重新实现、兼容的范围与验证方式见 [方法](docs/METHOD.md)，逐项范围见 [路线图](ROADMAP.md)。
+## 已知限制
+
+以下原版内容没有实现：
+
+- 访客流程；采集工具选择器；墙面与叠放编辑；房间升级。
+- 背包的排序、筛选、分类页签、分解与 3D 预览；商店与兑换；换装。
+- 软深度、部分光效与轨道粒子等渲染细节；各界面的部分附属对话框。
+- 只启用日服；其他区服的独占内容与界面语言切换没有实现。
+
+平台：
+
+- Android 不受支持：程序包在真机上显示最初几帧后崩溃。`crates/app/moly-android` 与 [构建说明](docs/building.md) 保留原样，仅供参考。
+- Linux 与 macOS 程序包由发布工作流编译并核对版本，没有在真机上验证。
 
 ## 快速开始
 
@@ -67,7 +89,7 @@
 
 Releases 中另有 Linux x64（`x86_64-unknown-linux-gnu`）与 macOS Apple Silicon
 （`aarch64-apple-darwin`）程序包，内容与用法同 Windows 包。这两个平台的程序包由发布工作流编译并核对版本，
-尚未经过实机验证，使用中遇到的问题请提交到 [Issues](https://github.com/empty-sekai/moly/issues)。
+没有在真机上验证。
 
 - Linux：需要系统提供 ALSA、udev、Vulkan 驱动与 WebKitGTK 4.1（启动器窗口）。
 - macOS：程序未签名，解压后先执行 `xattr -dr com.apple.quarantine <解压目录>` 再运行启动器。
@@ -80,21 +102,20 @@ Releases 中另有 Linux x64（`x86_64-unknown-linux-gnu`）与 macOS Apple Sili
 
 ## 文档
 
-- [从源码构建](docs/building.md)：环境要求，原生程序、浏览器版与 Android 的构建方法。
+- [从源码构建](docs/building.md)：环境要求，原生程序与浏览器版的构建方法（Android 的构建方法仅供参考）。
 - [服务端](docs/server.md)：服务端的协议、监听地址、控制端口，以及在自己的另一台机器上运行的方法。
 - [配置](docs/configuration.md)：配置文件 `moly.toml`、覆盖其键的环境变量与浏览器版的页面参数。
 - [玩家数据导入](docs/player-data.md)：开发窗口中导入玩家数据的步骤、备份与资源要求。
 - [主表与区服](docs/masters.md)：主表的读取来源、合并规则与启用的区服。
 - [MCP 服务器](docs/mcp.md)：供 AI 客户端启动并驱动游戏实例的 MCP 服务器。
 - [插件](docs/plugins.md)：Luau 插件的接口、全部导演步骤、可观察的段落、事件与环境变量开关。
+- [序列](docs/sequence.md)：序列文档的格式与播放、暂停、跳转和取景的方法。
+- [布娃娃](docs/ragdoll.md)：让角色倒下与起身的方法、参数与动作步骤。
+- [录制](docs/recording.md)：把窗口画面与游戏混音录成 MP4 的方法与参数。
 - [项目结构](docs/architecture.md)：各目录与 crate 的职责。
 - [方法](docs/METHOD.md)：如何在理解原版客户端后重新实现，哪些行为与原版逐值兼容、哪些由本仓自定，以及如何验证。
 - [开发](docs/development.md)：测试与检查、提交规范、持续集成与版本发布。
 - [发布包说明](docs/release-package.md)：下载发布包后的内容、运行与升级方法。
-
-## 参与贡献
-
-贡献代码或文档前，请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 许可
 

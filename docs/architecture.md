@@ -7,6 +7,7 @@
 | `crates/base/moly-store` | Local resource library: data directory, CDN release manifest, resource download and verification, install records |
 | `crates/base/moly-plugin` | Plugins for the native game: manifests, the enabled profile and the check of the enabled set at startup |
 | `crates/base/moly-text` | Display-only localization over the source text catalogue |
+| `crates/base/moly-sequence` | Sequence documents: the timeline format, its compilation and its sampling at any time |
 | `crates/engine/moly-assets` | Resource directory, resource packs and data loading |
 | `crates/engine/moly-perf` | Per-frame performance counters |
 | `crates/game/moly-core` | Types, markers and system ordering shared by the game layers |
@@ -25,6 +26,8 @@
 | `crates/game/moly-harvest` | Harvest: the harvest sites, gathering with tools, drops and pickup, stamina, bulk harvest and the harvest tool material |
 | `crates/game/moly-content-library` | Content library: browsing conversations, furniture and NPC activities, staging and playing a choice on the field, and the JSON bridge the browser page and developer tools drive |
 | `crates/game/moly-cutscene` | Cut-scenes: the home site's expansion cut-scene, the cut-scenes with a cast that the gate, the tutorial and the birthday start, and the birthday cut-scene and party |
+| `crates/game/moly-sequence-player` | Plays a sequence document on the running game: camera, cast, sounds, lines, captions, screen colours and events, with its control methods and steps |
+| `crates/game/moly-ragdoll` | Drops a character as a ragdoll of rigid parts and lets it get up again, with its control methods |
 | `crates/game/moly-devtools` | Control port, director scripts and developer panel |
 | `crates/game/moly-game` | Assembles the layers above into the game |
 | `crates/net/moly-protocol` | Request, response and push message types between the game and the server |
