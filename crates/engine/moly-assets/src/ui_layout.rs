@@ -492,7 +492,12 @@ impl UiPrefab {
         }
     }
 
+    /// The node a path suffix names. The empty path names the document root,
+    /// whatever the root node itself is called.
     pub fn find(&self, suffix: &str) -> Result<usize, String> {
+        if suffix.is_empty() && !self.nodes.is_empty() {
+            return Ok(0);
+        }
         if let Some(id) = suffix.strip_prefix('@').and_then(|s| s.parse::<i64>().ok()) {
             return self
                 .indices
