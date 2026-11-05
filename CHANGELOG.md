@@ -2,6 +2,46 @@
 
 All notable changes to this project are listed here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.0.7](https://github.com/empty-sekai/moly/compare/v0.0.6...v0.0.7) - 2026-11-05
+
+This is the last release; the repository is archived after it.
+
+### Features
+
+- **sequence:** Add the `moly-sequence` crate: a JSON sequence document with times in seconds, by line, by marker or relative to another clip, compiled and sampled for camera shots, actor moves and facings, motions, faces, looks, sounds, lines, captions, screen effects and events. `docs/sequence.md` describes the format.
+- **sequence-player:** Play a sequence document in the game through `moly.sequence.load|play|pause|seek|speed|stop|status|schema` and the `sequence.play` and `sequence.stop` steps. While paused, `moly.sequence.frame` frees the camera and `moly.sequence.key` writes the live camera into the document.
+- **ragdoll:** Add the `moly-ragdoll` crate: a character falls as a body of rigid parts and gets up where it came to rest. `moly.ragdoll.drop|recover|status|settings|schema` and the `npc.ragdoll` step drive it; `docs/ragdoll.md` describes it.
+- **render:** Set the main light's shadow in the `[graphics]` section of `moly.toml` and change it at runtime through `moly.graphics.get` and `moly.graphics.set`: map resolution, coverage, distance and fade, receiver filter (`hard`, `tent`, `pcf` or `pcss`) and biases.
+- **render:** Draw fixture parts whose material uses the character program.
+- **devtools:** Record the window and the game's mix to MP4 through `moly.record.start|stop|status`; `docs/recording.md` describes it.
+- **director:** `camera.talk_lens` takes `glide`, `push` and `clear`; the lens follows the speaker of the line on screen and fades out a fixture that blocks the view. `npc.play_talk` takes a fixture.
+- **director:** `moly.director.schema` lists every registered step; a test keeps the schema, the registry and `docs/plugins.md` in agreement.
+- **features:** A stage set service switches site, lays out the temporary set, casts and parks characters and restores everything afterwards; the content library's independent mode uses it.
+- **world:** NPC bodies are handed out by token, so only the newest state that takes a body writes to it, and fixture timelines are layered over the body's own clips.
+
+### Bug fixes
+
+- **assets:** Resolve an empty UI prefab path to the document root, so the photo screen opens without a panic ([#28](https://github.com/empty-sekai/moly/issues/28)).
+- **server-host:** Accept control port 0 and name the bound address in the ready line; the launcher, the MCP server and the balloon order check use it, so a game start no longer fails when the default control port is taken ([#26](https://github.com/empty-sekai/moly/issues/26)).
+- **world:** Keep a state machine's decision pass from redrawing forever when an objective ends inside it.
+- **world:** Keep characters taken by a host action out of NPC conversations and Rest scripts.
+- **world:** Run NPC timers and movement on the scaled game clock, so time scale, pause and single steps apply to them.
+- **world:** Keep emoticon particle velocity in simulation space, so stretched particles point along their motion.
+- **render:** Shade characters on stored colour values, so the shade colours darken by their full amount.
+- **render:** Sample the main-light shadow map with bilinear comparison, so shadow edges no longer step by whole texels.
+- **act:** Frame the body instead of the root in the talk lens.
+- **features:** Hide the action button with the clean view's HUD switch.
+- **content-library:** Keep the scene when the browser closes.
+
+### Engineering
+
+- Run director and plugin steps through one action registry with leases on the hand and the camera; domain crates register their own steps.
+
+### Documentation
+
+- The READMEs list what works and the known limitations; the roadmap and the contribution guide are removed.
+- Android is marked as unsupported; its build files are kept for reference only.
+
 ## [0.0.6](https://github.com/empty-sekai/moly/compare/v0.0.5...v0.0.6) - 2026-11-01
 
 ### Breaking changes
