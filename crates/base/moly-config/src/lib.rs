@@ -158,7 +158,7 @@ keys! {
     SERVER_LISTEN = "server.listen", Some("MOLY_SERVER_ADDR"), Text, "server",
         "The server's listen address (`host:port`).";
     SERVER_CONTROL_PORT = "server.control_port", Some("MOLY_SERVER_CONTROL_PORT"), Integer, "server",
-        "The server's control port.";
+        "The server's control port; 0 asks the system for a free port.";
     SERVER_DATA = "server.data", Some("MOLY_SERVER_DATA"), Path, "server",
         "The directory the server saves player documents in. Unset: documents are kept in memory only.";
     UPDATE_SOURCE = "update.source", None, Url, "launcher",

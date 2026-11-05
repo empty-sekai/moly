@@ -74,7 +74,7 @@ See [importing player data](player-data.md). Setting `player_data.uid` (`MOLY_PL
 |---|---|---|---|---|
 | `url` | `MOLY_SERVER_URL` | address | game, developer window | The server the game connects to. Default: `http://127.0.0.1:15800`, the local server. |
 | `listen` | `MOLY_SERVER_ADDR` | string | server | The server's listen address (`host:port`). Default: `127.0.0.1:15800`. |
-| `control_port` | `MOLY_SERVER_CONTROL_PORT` | whole number | server | The server's control port. Default: `15801`, always bound to `127.0.0.1`. |
+| `control_port` | `MOLY_SERVER_CONTROL_PORT` | whole number | server | The server's control port. Default: `15801`, always bound to `127.0.0.1`; `0` asks the system for a free port, which the ready line names. |
 | `data` | `MOLY_SERVER_DATA` | path | server | The directory the server saves player documents in. Unset: documents are kept in memory only. |
 
 The server also reads `MOLY_SERVER_ADMIN`, from the environment only: `off` refuses the administration calls, `on` or unset allows them, and any other value stops the start.

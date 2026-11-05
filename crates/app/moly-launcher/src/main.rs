@@ -308,6 +308,7 @@ fn start_server(
         .current_dir(exe.parent().unwrap_or_else(|| Path::new(".")))
         // Port 0 asks the system for a free port; the server announces it.
         .env("MOLY_SERVER_ADDR", "127.0.0.1:0")
+        .env("MOLY_SERVER_CONTROL_PORT", "0")
         .env("MOLY_ASSET_ROOT", assets)
         .env("MOLY_ASSET_CATALOG", catalog)
         .env("MOLY_DEV", if developer { "1" } else { "0" })

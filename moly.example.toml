@@ -71,7 +71,7 @@
 
 # The server's listen address (`host:port`).
 # listen = "127.0.0.1:15800"
-# The server's control port.
+# The server's control port; 0 asks the system for a free port.
 # control_port = 15801
 # The directory the server saves player documents in. Unset: documents are kept in memory only.
 # data = "server"

@@ -6,9 +6,9 @@
 //! overridden by its environment variable. `server.listen`
 //! (`MOLY_SERVER_ADDR`) names the HTTP endpoint's address (default
 //! `127.0.0.1:15800`). `server.control_port` (`MOLY_SERVER_CONTROL_PORT`)
-//! names the control port (default 15801), always bound to `127.0.0.1`. The
-//! process prints one ready line naming both addresses, and exits with status
-//! 1 when it cannot listen.
+//! names the control port (default 15801), always bound to `127.0.0.1`; port
+//! 0 asks the system for a free port. The process prints one ready line naming
+//! both addresses it bound, and exits with status 1 when it cannot listen.
 //!
 //! The asset root and the remote master bases are read as the native game
 //! reads them, so both processes read the same masters. `server.data`
@@ -52,7 +52,6 @@ fn main() {
             .trim()
             .parse::<u16>()
             .ok()
-            .filter(|port| *port != 0)
             .unwrap_or_else(|| {
                 fail(&format!(
                     "server.control_port (MOLY_SERVER_CONTROL_PORT) = {value:?} is not a port"
@@ -60,13 +59,17 @@ fn main() {
             }),
         None => DEFAULT_CONTROL_PORT,
     };
-    let control_address = SocketAddr::from((Ipv4Addr::LOCALHOST, control_port));
-    // The transport binds the port when the app starts; bind it here first so
-    // a taken port is a named failure instead of a silent one.
-    match TcpListener::bind(control_address) {
-        Ok(listener) => drop(listener),
-        Err(error) => fail(&format!("cannot listen on {control_address}: {error}")),
-    }
+    // The transport binds the port when the app starts and does not report
+    // it; bind it here first so a taken port is a named failure instead of a
+    // silent one, and so port 0 is settled to the free port the system gives.
+    let requested = SocketAddr::from((Ipv4Addr::LOCALHOST, control_port));
+    let control_address = match TcpListener::bind(requested) {
+        Ok(listener) => listener
+            .local_addr()
+            .unwrap_or_else(|error| fail(&format!("cannot read the address of {requested}: {error}"))),
+        Err(error) => fail(&format!("cannot listen on {requested}: {error}")),
+    };
+    let control_port = control_address.port();
     let source = moly_assets::asset_source::resolve()
         .unwrap_or_else(|error| fail(&format!("the asset root: {error}")));
     let remote = moly_assets::asset_source::resolve_remote()

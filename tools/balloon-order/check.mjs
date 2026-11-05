@@ -91,7 +91,7 @@ function startServer(exe, logPath) {
   append(`# ${new Date().toISOString()} server ${serverExe}\n`);
   const child = spawn(serverExe, [], {
     cwd: path.dirname(exe),
-    env: { ...process.env, MOLY_SERVER_ADDR: '127.0.0.1:0' },
+    env: { ...process.env, MOLY_SERVER_ADDR: '127.0.0.1:0', MOLY_SERVER_CONTROL_PORT: '0' },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
