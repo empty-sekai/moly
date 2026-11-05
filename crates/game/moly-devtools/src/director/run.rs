@@ -4,7 +4,7 @@
 //! take, an assert) lets the next one start on the same frame.
 //!
 //! A flow step is the runner's own (`Kind`). An action step is an action of
-//! the hub's registry ([`Node::Act`]): the runner takes the hand for the
+//! the hub's registry (`Node::Act`): the runner takes the hand for the
 //! step's track, starts every spec the step stands for in turn and polls the
 //! run until it ends, fails, times out, or another holder takes a lease from
 //! it. The runner keeps what is the script's own: the log, the hand, the
@@ -193,7 +193,7 @@ fn sub_ticket(base: u64, index: u64) -> u64 {
 impl Track {
     /// A track of `block` that runs as the ticket `ticket`: the script's own
     /// run is `0`, a plugin's step its offset ticket, and a parallel track or
-    /// a step's part one of its own ([`sub_ticket`]).
+    /// a step's part one of its own (`sub_ticket`).
     pub fn new(block: Arc<[Step]>, path: String, ticket: u64) -> Self {
         Self { frames: vec![Frame { block, next: 0, repeats_left: 0, path }], active: None, ticket }
     }

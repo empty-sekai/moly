@@ -200,7 +200,7 @@ impl Drop {
     }
 
     /// The fastest any point of any part moved over the last frame, in
-    /// metres per second (see [`Seen`]).
+    /// metres per second (see `Seen`).
     pub fn fastest(&self) -> f32 {
         self.seen.fastest()
     }

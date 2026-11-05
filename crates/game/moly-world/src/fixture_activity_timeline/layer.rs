@@ -12,8 +12,8 @@
 //! Here the timeline's clips and the body's own clips play on one
 //! `AnimationPlayer` under the same blend root, which averages every playing
 //! clip by its normalized weight. While a timeline holds a body,
-//! [`yield_to_timeline`] scales the body's own clips to share
-//! `1 - timeline weight` for this frame's evaluation, and [`restore`] puts
+//! `yield_to_timeline` scales the body's own clips to share
+//! `1 - timeline weight` for this frame's evaluation, and `restore` puts
 //! their weights back right after it, so the systems that play those clips
 //! never read the scaled values.
 

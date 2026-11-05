@@ -14,9 +14,10 @@
 //! those whose time lies between two sampled times.
 //!
 //! A camera clip may be previewed at one time of its own ([`Compiled::shot`]),
-//! and one camera clip's sample may be reshaped into the key form authors
-//! write (`keys` for the eye, `keys` for the look) and back
-//! ([`ShotKeys`], [`EyeKey`], [`AimKey`], [`Compiled::pose_from_keys`]).
+//! and one camera clip may be read back in the key form authors write
+//! (`keys` for the eye, `dir` angles for the look; [`Compiled::shot_keys`],
+//! [`ShotKeys`], [`EyeKey`], [`AimKey`]) or placed at a content time
+//! ([`Compiled::shot`]).
 
 mod actor;
 mod bake;

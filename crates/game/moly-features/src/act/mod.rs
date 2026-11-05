@@ -11,7 +11,7 @@
 //!
 //! Programs keep what is theirs either side of an action here: the
 //! characters it took ([`Taken`]), the targets its steps name ([`Target`])
-//! and the conditions they wait on ([`condition`]). The leases the actions
+//! and the conditions they wait on ([`condition`](mod@condition)). The leases the actions
 //! hold are the hub's ([`crate::lease`]), so two programs never take one
 //! output from each other by accident.
 

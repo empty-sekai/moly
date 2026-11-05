@@ -19,7 +19,7 @@
 //! strength and the caster bias multipliers. The settings reach this module as
 //! the render world's [`ShadowSettingsGlobals`], extracted on the frame they
 //! change. A change of the resolution re-creates the depth maps during that
-//! extraction ([`apply_shadow_resolution`]); on the same frame the main world
+//! extraction (`apply_shadow_resolution`); on the same frame the main world
 //! marks every material that binds the maps changed
 //! ([`mark_materials_on_resolution`]), so their bind groups, prepared after
 //! extraction, hold the new views.
@@ -75,12 +75,12 @@
 //! orthographic box is the sphere's square, and its centre is snapped to whole
 //! texels in the light's plane, so camera motion moves the sampled grid by
 //! whole texels only. The depth range is, in both cases, the light-space
-//! extent of every caster along the light plus [`DEPTH_PAD`] at both ends:
+//! extent of every caster along the light plus `DEPTH_PAD` at both ends:
 //! casters outside the view still cast into it. The sphere is never smaller
-//! than [`MIN_FRAME_RADIUS`].
+//! than `MIN_FRAME_RADIUS`.
 //!
 //! From one frame's frame the extraction derives the planes a draw is tested
-//! against (module comment on [`LightPlane`]): a draw inside them cannot reach
+//! against (module comment on `LightPlane`): a draw inside them cannot reach
 //! the map, so it keeps its static-map place and pipeline. A draw outside them
 //! is queued again, and a [`ShadowFit::Camera`] frame also leaves out a draw
 //! that lies wholly behind the camera or beyond the fade.
@@ -411,7 +411,7 @@ impl ShadowConsumer {
 
 /// The render world's shared shadow resources: built once, then only the
 /// buffers are written each frame. The depth maps are re-created when the
-/// settings' resolution changes (see [`rebuild_shadow_maps`]).
+/// settings' resolution changes (see `rebuild_shadow_maps`).
 #[derive(Resource)]
 pub struct ShadowMapGpu {
     /// The side of the depth maps, in texels (the settings' resolution the
@@ -2967,7 +2967,7 @@ fn apply_shadow_resolution(
 
 /// Main world: marks every material of type `M` changed on the frame the
 /// shadow resolution changes. Each such material's bind group holds the depth
-/// map's view, which [`apply_shadow_resolution`] replaces during that frame's
+/// map's view, which `apply_shadow_resolution` replaces during that frame's
 /// extraction; a material marked changed is extracted and prepared again on
 /// the same frame, after the new maps exist. The first frame only records the
 /// resolution: the maps were created at it.
