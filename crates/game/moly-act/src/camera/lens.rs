@@ -14,7 +14,8 @@
 //! other than the speaker starts an animation in the middle of a line.
 //!
 //! The eye does not jump between framings: it eases toward each new one at
-//! `glide` per second, and while a framing holds it closes in on its target
+//! `glide` per second, turning round its target rather than cutting across
+//! it, and while a framing holds it closes in on its target
 //! by `push` of the distance.
 //!
 //! The pose is written on the camera lease ([`moly_features::lease`]) into
@@ -23,7 +24,10 @@
 //! member fades out while `clear` is on: its materials take the fixture
 //! programs' own Bayer dither with a lowered alpha, and go back once the
 //! fixture no longer stands in the way. The fixture a single character is
-//! talking about is the subject of the shot and never fades.
+//! talking about is the subject of the shot and never fades. With no
+//! conversation playing, the unit the step named is framed from its front
+//! side, turned aside a little where a fixture stands in the way, and the
+//! fixtures that still block it fade the same way while `clear` is on.
 
 use std::collections::HashMap;
 
@@ -64,6 +68,10 @@ pub struct TalkLens {
     /// Whether placed fixtures standing between the eye and the cast fade
     /// out.
     pub clear: bool,
+    /// The farthest the eye stands back in a single character's shot with
+    /// its fixture. A fixture that would need more is cropped, and the shot
+    /// aims at the speaker's height instead of low between the two.
+    pub reach: Option<f32>,
 }
 
 /// The lens set by a `camera.talk_lens` step, and the program that set it.
@@ -185,9 +193,10 @@ impl LensMotion {
         let shown = match self.shown {
             Some(prev) if lens.glide > 0.0 => {
                 let k = 1.0 - (-lens.glide * dt).exp();
+                let target = prev.target.lerp(wanted.target, k);
                 HeldPose {
-                    eye: prev.eye.lerp(wanted.eye, k),
-                    target: prev.target.lerp(wanted.target, k),
+                    eye: target + orbit(prev.eye - prev.target, wanted.eye - wanted.target, k),
+                    target,
                     up: wanted.up,
                     fov_degrees: prev.fov_degrees + (wanted.fov_degrees - prev.fov_degrees) * k,
                 }
@@ -197,6 +206,22 @@ impl LensMotion {
         self.shown = Some(shown);
         shown
     }
+}
+
+/// The eye's offset from its target eased `k` of the way from `from` to `to`
+/// around the target: the bearing turns the short way, and the horizontal
+/// reach and the height ease on their own, so an eye moving to the other
+/// side of a body goes round it instead of through it.
+fn orbit(from: Vec3, to: Vec3, k: f32) -> Vec3 {
+    let (a, b) = (from.xz(), to.xz());
+    let (reach_a, reach_b) = (a.length(), b.length());
+    if reach_a < 1e-4 || reach_b < 1e-4 {
+        return from.lerp(to, k);
+    }
+    let turn = a.angle_to(b) * k;
+    let reach = reach_a + (reach_b - reach_a) * k;
+    let bearing = Vec2::from_angle(turn).rotate(a / reach_a) * reach;
+    Vec3::new(bearing.x, from.y + (to.y - from.y) * k, bearing.y)
 }
 
 /// PostUpdate, after the talk camera: the lens's pose for the frame.
@@ -230,6 +255,8 @@ fn follow_speaker(
             let (entity, _) = characters.iter().find(|(_, id)| id.0 == unit)?;
             let body = bodies.get(entity)?;
             let (out, _) = front(lens, &body, Vec2::ZERO, None, false)?;
+            let ahead = (body.compute_transform().rotation * Vec3::Z).xz().normalize_or_zero();
+            let out = clear_of_fixtures(lens, body.translation(), ahead, out, &fixtures);
             Some((Framing::Idle(unit), place(lens, &body, out)))
         }),
     };
@@ -310,6 +337,9 @@ fn aim(
 
 /// Height above the speaker's feet the lens aims at in a shot with a fixture.
 const PROP_AIM: f32 = 0.1;
+/// How far from the speaker toward the fixture a shot held to `reach` is
+/// centred.
+const CROPPED_PROP_SHARE: f32 = 0.25;
 
 /// The speaker and a fixture's bounds in one frame: seen from between the
 /// speaker's front (`side`) and the side of the line from the speaker to the
@@ -346,8 +376,13 @@ fn place_with_prop(lens: &TalkLens, feet: Vec3, side: Vec2, (min, max): (Vec3, V
     // clear of the dialogue box, and stands back far enough for the top of
     // the fixture to fit in the upper half.
     let height_fit = top * 1.15 / tan_half;
-    let distance = width_fit.max(height_fit).max(lens.distance);
-    let aim = feet.y + PROP_AIM;
+    let fit = width_fit.max(height_fit).max(lens.distance);
+    // Held to `reach`, the shot centres nearer the speaker, the fixture
+    // filling the side of the frame behind.
+    let (distance, aim, centre) = match lens.reach {
+        Some(reach) if fit > reach => (reach.max(lens.distance), feet.y + lens.target, body.lerp(prop, CROPPED_PROP_SHARE)),
+        _ => (fit, feet.y + PROP_AIM, centre),
+    };
     Some(HeldPose {
         eye: Vec3::new(
             centre.x + out.x * distance,
@@ -388,6 +423,39 @@ fn unblocked(lens: &TalkLens, feet: Vec3, out: Vec2, others: &[Vec3]) -> Vec2 {
         }
     }
     out
+}
+
+/// Turns tried either way of `out` for an eye clear of the placed fixtures,
+/// in radians per step, and the number of steps.
+const FIXTURE_TURN: f32 = 0.35;
+const FIXTURE_TURNS: i32 = 3;
+/// The farthest a turned eye may stand from straight ahead of the body
+/// (radians): past it the shot would show the side or the back.
+const FRONT_LIMIT: f32 = 1.1;
+
+/// `out`, or the nearest turn of it either way, within `FRONT_LIMIT` of
+/// `ahead`, whose eye sees the face past every placed fixture; `out` itself
+/// when none does, the fixtures in the way then fading while `clear` is on.
+/// Used where no conversation plays, when a fixture timeline turns the body
+/// toward the fixture it uses.
+fn clear_of_fixtures(lens: &TalkLens, feet: Vec3, ahead: Vec2, out: Vec2, fixtures: &FixtureBounds) -> Vec2 {
+    let face = feet + Vec3::Y * FACE;
+    (0..=FIXTURE_TURNS)
+        .flat_map(|step| [step, -step])
+        .map(|step| {
+            let (sin, cos) = (step as f32 * FIXTURE_TURN).sin_cos();
+            Vec2::new(out.x * cos - out.y * sin, out.x * sin + out.y * cos)
+        })
+        .filter(|candidate| ahead == Vec2::ZERO || ahead.angle_to(*candidate).abs() <= FRONT_LIMIT)
+        .find(|candidate| {
+            let eye = Vec3::new(
+                feet.x + candidate.x * lens.distance,
+                feet.y + lens.height,
+                feet.z + candidate.y * lens.distance,
+            );
+            !fixtures.parts.iter().any(|&(_, _, min, max)| blocks(eye, face, min, max))
+        })
+        .unwrap_or(out)
 }
 
 /// Whether a body centred at `body` stands on the segment from `eye` to `face`
@@ -475,11 +543,13 @@ fn place_wide(lens: &TalkLens, members: &[Vec3], side: Vec2) -> Option<HeldPose>
 }
 
 /// Each placed fixture's world bounds (the union of its meshes' bounds) and
-/// its meshes, measured while the talk lens is on.
+/// each of its meshes with the mesh's own bounds, measured while the talk
+/// lens is on.
 #[derive(Resource, Default)]
 pub struct FixtureBounds {
     bounds: HashMap<Entity, (Vec3, Vec3)>,
-    meshes: HashMap<Entity, Vec<Entity>>,
+    /// Mesh, its fixture's root, and the mesh's world bounds.
+    parts: Vec<(Entity, Entity, Vec3, Vec3)>,
     owner: HashMap<Entity, Option<Entity>>,
 }
 
@@ -490,7 +560,7 @@ impl FixtureBounds {
     }
 }
 
-/// The fixtures faded so far, the materials their meshes had, and the shared
+/// The fixture meshes faded so far, the materials their meshes had, and the shared
 /// material copies per base and dither level.
 #[derive(Default)]
 pub struct LensClearState {
@@ -515,7 +585,7 @@ pub fn measure_fixtures(
     }
     let fixtures = &mut *fixtures;
     fixtures.bounds.clear();
-    fixtures.meshes.clear();
+    fixtures.parts.clear();
     if lens.is_none() {
         fixtures.owner.clear();
         return;
@@ -531,7 +601,7 @@ pub fn measure_fixtures(
         let entry = fixtures.bounds.entry(root).or_insert((min, max));
         entry.0 = entry.0.min(min);
         entry.1 = entry.1.max(max);
-        fixtures.meshes.entry(root).or_default().push(mesh);
+        fixtures.parts.push((mesh, root, min, max));
     }
 }
 
@@ -544,6 +614,7 @@ pub fn clear_view(
     hold: Res<CameraHold>,
     time: Res<Time>,
     bodies: Bodies,
+    characters: Query<(Entity, &moly_features::npc::CharacterUnitId)>,
     fixtures: Res<FixtureBounds>,
     mut fixture_handles: Query<&mut MeshMaterial3d<FixtureMaterial>>,
     mut site_handles: Query<&mut MeshMaterial3d<SiteMaterial>>,
@@ -553,21 +624,27 @@ pub fn clear_view(
 ) {
     let looking = lens.as_ref().is_some_and(|lens| lens.lens.clear && hold.holder.as_deref() == Some(lens.holder.as_str()));
     let eye = hold.pose.map(|pose| pose.eye);
-    let targets: Vec<Vec3> = match (looking, eye, talk.as_deref()) {
-        (true, Some(_), Some(talk)) => talk
-            .participants()
-            .iter()
-            .filter_map(|(_, body)| bodies.get(*body).map(|at| at.translation()))
-            .flat_map(|feet| BODY_HEIGHTS.map(|height| feet + Vec3::Y * height))
-            .collect(),
+    // With no conversation playing, the unit the idle framing holds.
+    let idle = lens.as_ref().and_then(|lens| lens.lens.idle_unit).and_then(|unit| {
+        characters.iter().find(|(_, id)| id.0 == unit).map(|(entity, _)| entity)
+    });
+    let watched: Vec<Entity> = match (looking, eye, talk.as_deref()) {
+        (true, Some(_), Some(talk)) => talk.participants().iter().map(|(_, body)| *body).collect(),
+        (true, Some(_), None) => idle.into_iter().collect(),
         _ => Vec::new(),
     };
+    let feet: Vec<Vec3> = watched
+        .iter()
+        .filter_map(|body| bodies.get(*body).map(|at| at.translation()))
+        .collect();
+    let targets: Vec<Vec3> = feet
+        .iter()
+        .flat_map(|feet| BODY_HEIGHTS.map(|height| *feet + Vec3::Y * height))
+        .collect();
     if targets.is_empty() && state.alpha.is_empty() {
         return;
     }
-    let bounds = &fixtures.bounds;
-    let members = &fixtures.meshes;
-    if bounds.is_empty() {
+    if fixtures.parts.is_empty() {
         // The lens is off: every faded mesh takes its own material back now.
         for (mesh, base) in state.fixture_base.drain() {
             if let Ok(mut handle) = fixture_handles.get_mut(mesh) {
@@ -594,34 +671,33 @@ pub fn clear_view(
         _ => Vec::new(),
     };
     let step = FADE_PER_SECOND * time.delta_secs();
+    // Each mesh fades on its own: the part of a fixture standing in the way,
+    // not the whole fixture.
     let mut levels: Vec<(Entity, u32)> = Vec::new();
-    for (&root, &(min, max)) in bounds {
-        let blocking =
-            !subject.contains(&root) && eye.is_some_and(|eye| targets.iter().any(|&body| blocks(eye, body, min, max)));
-        let current = state.alpha.get(&root).copied().unwrap_or(1.0);
+    for &(mesh, root, min, max) in &fixtures.parts {
+        let blocking = !subject.contains(&root)
+            && eye.is_some_and(|eye| targets.iter().any(|&body| blocks(eye, body, min, max)));
+        let current = state.alpha.get(&mesh).copied().unwrap_or(1.0);
         let wanted = if blocking { CLEAR_ALPHA } else { 1.0 };
         let alpha = if current < wanted { (current + step).min(wanted) } else { (current - step).max(wanted) };
         if alpha >= 1.0 {
-            if state.alpha.remove(&root).is_some() {
-                levels.push((root, OPAQUE));
+            if state.alpha.remove(&mesh).is_some() {
+                levels.push((mesh, OPAQUE));
             }
         } else {
-            state.alpha.insert(root, alpha);
-            levels.push((root, dither_level(alpha)));
+            state.alpha.insert(mesh, alpha);
+            levels.push((mesh, dither_level(alpha)));
         }
     }
-    // A fixture that left the scene is no longer tracked; its meshes went
-    // with it.
-    state.alpha.retain(|root, _| bounds.contains_key(root));
+    // A mesh that left the scene is no longer tracked.
+    state.alpha.retain(|mesh, _| fixtures.parts.iter().any(|(part, _, _, _)| part == mesh));
 
-    for (root, level) in levels {
-        for &mesh in members.get(&root).into_iter().flatten() {
-            if let Ok(mut handle) = fixture_handles.get_mut(mesh) {
-                set_fixture(&mut state, mesh, &mut handle, level, &mut fixture_materials);
-            }
-            if let Ok(mut handle) = site_handles.get_mut(mesh) {
-                set_site(&mut state, mesh, &mut handle, level, &mut site_materials);
-            }
+    for (mesh, level) in levels {
+        if let Ok(mut handle) = fixture_handles.get_mut(mesh) {
+            set_fixture(&mut state, mesh, &mut handle, level, &mut fixture_materials);
+        }
+        if let Ok(mut handle) = site_handles.get_mut(mesh) {
+            set_site(&mut state, mesh, &mut handle, level, &mut site_materials);
         }
     }
     if state.alpha.is_empty() {

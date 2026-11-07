@@ -507,12 +507,17 @@
      "clear": {
       "type": "boolean",
       "default": true
+     },
+     "reach": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Metres: the farthest the eye stands back in a single character's shot with its fixture."
      }
     },
     "additionalProperties": false
    },
    "constraints": [
-    "fov outside 5..=120, a glide below 0 and a push outside 0..1 are refused when the step is parsed",
+    "fov outside 5..=120, a glide below 0, a push outside 0..1 and a reach of 0 or less are refused when the step is parsed",
     "fails with the refusal when another program holds the camera",
     "ends at once"
    ]

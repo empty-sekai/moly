@@ -299,6 +299,10 @@ fn read_lens(fields: &mut Fields<'_>) -> Result<Lens, String> {
     if !(0.0..1.0).contains(&push) {
         return Err(format!("{at}: push is a fraction of the distance in 0..1, got {push}"));
     }
+    let reach = fields.opt_f32("reach")?;
+    if let Some(reach) = reach.filter(|reach| reach.is_nan() || *reach <= 0.0) {
+        return Err(format!("{at}: reach is metres above 0, got {reach}"));
+    }
     Ok(Lens {
         lens: lens::TalkLens {
             distance: fields.opt_f32("distance")?.unwrap_or(1.9),
@@ -312,6 +316,7 @@ fn read_lens(fields: &mut Fields<'_>) -> Result<Lens, String> {
             glide,
             clear: fields.opt_bool("clear")?.unwrap_or(true),
             push,
+            reach,
         },
     })
 }
