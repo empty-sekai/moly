@@ -16,6 +16,14 @@ All notable changes to this project are listed here. Versions follow [Semantic V
 - **world:** Keep the cast held through the after-talk fixture action; it fails at once, naming the unit, when a cast member loses its hold.
 - **content-library:** Stand characters and the observer on the side a fixture is used from, and take a finished choice off the set when the next choice cannot replace it in place.
 
+### Engineering
+
+- The Windows programs are cross-compiled on Linux with cargo-xwin and link the C and C++ runtimes statically, so they run without the Visual C++ Redistributable. The macOS build runs on `macos-latest`.
+
+### Documentation
+
+- The READMEs list the visitor gate, site expansion, stacked furniture editing, the inventory's tabs, filters, sorting and breaking down, and soft particles and trails as working, and the known limitations are updated to match.
+
 ## [0.0.7](https://github.com/empty-sekai/moly/compare/v0.0.6...v0.0.7) - 2026-11-05
 
 This is the last release; the repository is archived after it.

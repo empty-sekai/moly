@@ -28,34 +28,34 @@ It loads MYSEKAI resources supplied by the user and runs scene exploration, char
 Grouped by gameplay domain; the crates that implement each domain are in parentheses (see [Project structure](docs/architecture.md) for each crate's responsibility).
 Behaviour is compatible with the original client; the structure is organised for this repository. How the behaviour is reimplemented, what must match and how it is checked are described in [Method](docs/METHOD.md).
 
-- **Scenes and movement** (`moly-world`, `moly-features`): the flow and banner for entering MySekai; cannons and doors that move between sites, doors that change scenes, the map selection screen; indoor rooms (indoor shell and wall culling), with several sites kept loaded; player characters, footsteps and expressions.
+- **Scenes and movement** (`moly-world`, `moly-features`): the flow and banner for entering MySekai; cannons and doors that move between sites, doors that change scenes, the map selection screen; indoor rooms (indoor shell and wall culling), with several sites kept loaded; the visitor gate: the invite cutscene, changing visitors and visitors coming out of the gate; site expansion and the room expansion performance after a MySekai rank-up; player characters, footsteps and expressions.
 - **Gathering** (`moly-harvest`): harvest maps, obstacles, tools and stamina, gathering particles, drops and pickup, holding limits; the gathering HUD (current tool, action icons, a hint bubble when a tool is missing, the stamina bar); notices and dialogs for obtained items; the hold-to-charge hammer that clears a map in one action, see [Bulk harvest](docs/bulk-harvest.md).
 - **Delivery** (`moly-delivery`): the birthday party delivery site and the delivery flow, drops, honor rewards and total rewards, and the delivery screen.
 - **Crafting and conversion** (`moly-features`, `moly-convert`): the crafting screen and its result dialog, and the server replies for crafting and blueprints; the conversion machine's slots, its screen and the server rules for conversion.
-- **Furniture editing** (`moly-fixture-edit`): the inventory screen and placing furniture from it; layout editing for floor furniture, roads and tiles, and environments, with the inventory and placed objects updated in the same layout transaction.
+- **Furniture editing** (`moly-fixture-edit`): the inventory screen with its category tabs, filters, sorting and breaking down, and placing furniture from it; layout editing for floor furniture (stacking included: stacked furniture moves and rotates with its base), roads and tiles, and environments, with the inventory and placed objects updated in the same layout transaction.
 - **Missions and photos** (`moly-mission`, `moly-photo`): the mission screen and reward receive, and photo mode with saving the shot.
 - **Content library** (`moly-content-library`): browsing conversations, furniture and NPC activities; in its independent mode it stands a temporary set, stages and plays a choice on the field, and restores the site afterwards.
 - **NPCs** (`moly-world`): pathfinding, conversations after pairing, overhead tweet bubbles, idle action decisions, autonomous behaviour and furniture interaction; target positions chosen from the original walkable cells; the layered NPC state machine of the Japanese 7.0.0 version, and conversations between characters of different units.
-- **Weather and particles** (`moly-law`, `moly-render`): the weather phenomena pipeline, end to end (host lifecycle, sub-emitters, curves, raindrop quads and more); the weather page choosing an environment from unlocked content; UI particle effects.
+- **Weather and particles** (`moly-law`, `moly-render`): the weather phenomena pipeline, end to end (host lifecycle, sub-emitters, curves, raindrop quads, soft particles, trails and orbital motion and more); the weather page choosing an environment from unlocked content; UI particle effects.
 - **Graphics** (`moly-render`): the main light's shadow coverage, resolution, filter (`hard`, `tent`, `pcf`, `pcss`) and strength are set by the `[graphics]` section of `moly.toml` and can be changed while the game runs with `moly.graphics.set`, see [Configuration](docs/configuration.md).
 - **Audio and presentation** (`moly-audio`, `moly-cutscene`): BGM, SE (sound effects), voice and ambient sound, record BGM and the BGM selection screen; birthday party cutscenes, the party's conversations and birthday voice lines, the closing and the site restoration.
 - **Sequences** (`moly-sequence`, `moly-sequence-player`): JSON sequence documents that drive the camera, the cast's moves and motions, faces, lines, captions, sounds and screen effects on one timeline, with pause, seek and speed, and the paused camera written back into the document, see [Sequences](docs/sequence.md).
 - **Ragdoll** (`moly-ragdoll`): characters drop out of their animation as rigid bodies, get up once at rest and return to what they were doing, see [Ragdoll](docs/ragdoll.md).
 - **UI and settings** (`moly-ui`): menus, information pages and settings, the phenomenon learning dialog and screen transitions.
-- **Director scripts and plugins** (`moly-act`, `moly-devtools`, `moly-plugin`): JSON scripts or Luau plugins that orchestrate players, characters, the camera, weather and the server simulation panel, both run through one action registry; plugins have manifests, dependencies and conflicts, their own sandbox and a per-frame budget, and none is enabled by default, see [Plugins](docs/plugins.md).
+- **Director scripts and plugins** (`moly-act`, `moly-devtools`, `moly-plugin`): JSON scripts or Luau plugins that orchestrate players, characters, the camera, weather and the server simulation panel, both run through one action registry; a talk lens frames the speaker of each line and fades out furniture that blocks the view; plugins have manifests, dependencies and conflicts, their own sandbox and a per-frame budget, and none is enabled by default, see [Plugins](docs/plugins.md).
 - **Recording** (`moly-devtools`): records the window and the game's mix to MP4, with the game clock advancing at a fixed frame rate while it records, see [Recording](docs/recording.md).
 - **MCP server** (`tools/mcp`): lets AI clients start and drive native or browser instances, read state, run scripts and capture frames, see [MCP server](docs/mcp.md).
 - **Server and launcher** (`moly-server`, `moly-launcher`): the server runs as a separate process, stores the player document and answers the game's requests; the launcher chooses, downloads and verifies a resource version, starts the server and the game, checks for and installs program updates, and lets each of its directories be changed, moving existing content along.
-- **Data and text** (`moly-masters`, `moly-text`): the master data uses the Japanese server as its base and merges each region's exclusive rows, read at run time from master repositories the user configures, with a mirror as a fallback, see [Master tables and regions](docs/masters.md); when Chinese is selected in the browser, matching Chinese-server text can replace the Japanese display text; the open-source Resource Han Rounded font is used.
+- **Data and text** (`moly-masters`, `moly-text`): the master data uses the Japanese server as its base and merges each region's exclusive rows, read at run time from master repositories the user configures, with a mirror as a fallback, see [Master tables and regions](docs/masters.md); when Chinese is selected in the browser, matching Chinese-server text can replace the Japanese display text, and the native program can apply an official or community translation overlay; the open-source Resource Han Rounded font is used.
 - **Browser** (`moly-stage`, `web/`): the embedded stage and the full game, each with WebGPU and WebGL2 builds; the browser runs the original game only and loads no plugins.
 
 ## Known limitations
 
 These parts of the original game are not implemented:
 
-- The visitor flow; the harvest tool picker; wall and stacked editing; room upgrades.
-- Inventory sorting, filters, category tabs, breaking down and 3D preview; the shop and exchange; outfits.
-- Rendering details such as soft depth, some light effects and orbital particles; some secondary dialogs of the screens.
+- The harvest tool picker (its list of tools is not drawn; the current tool is shown as usual); wall and fence editing.
+- The inventory's 3D preview, search and tags; the shop and exchange; outfits.
+- Rendering details such as some light effects; some secondary dialogs of the screens (for example the count selector when breaking down, and the level release dialog).
 - Only the Japanese region is enabled; other regions' exclusive content and switching the interface language are not implemented.
 
 Platforms:
@@ -72,7 +72,7 @@ Models, textures, animations and audio required to run the project are supplied 
 ### Windows release package
 
 1. Download the Windows package from [Releases](https://github.com/empty-sekai/moly/releases) and extract it.
-   The package contains the game `moly-app.exe`, the server `moly-server.exe` and the launcher `moly-launcher.exe`.
+   The package contains the game `moly-app.exe`, the server `moly-server.exe` and the launcher `moly-launcher.exe`. The C and C++ runtimes are linked statically, so the Visual C++ Redistributable is not needed.
 2. Run the launcher, configure **your own** resource address, choose a resource version and download it. When the download finishes, the launcher checks the SHA-256 of each file. An interrupted download can be resumed.
 3. Click 开始游戏 (Start game). The launcher starts the server first, then the game.
 
