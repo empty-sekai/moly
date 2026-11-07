@@ -119,6 +119,19 @@ fn viewing_position(
     }
     None
 }
+
+/// The side a fixture is used from. Fixture models face local -Z, the side
+/// their action start points are on, so a viewing ring around a fixture
+/// starts there instead of behind it.
+fn fixture_front_yaw(rotation: Quat) -> Quat {
+    rotation * Quat::from_rotation_y(std::f32::consts::PI)
+}
+
+/// Whether a point lies on the front half of a fixture.
+fn in_front_of(point: Vec3, fixture: &Transform) -> bool {
+    (point - fixture.translation).dot(fixture.rotation * Vec3::NEG_Z) > 0.
+}
+
 fn observer_viewing_yaw(mode: ExperienceMode) -> Quat {
     if mode == ExperienceMode::Independent {
         Quat::from_rotation_y(std::f32::consts::FRAC_PI_3)
@@ -468,14 +481,20 @@ fn plan_current(world: &mut World, choice: &PlaybackChoice) -> Result<Vec<ActorP
             .and_then(|(_, id)| bindings.iter().find(|(fixture, _, _, _)| fixture == id));
         if let Some((_, _, _, fixture)) = anchor {
             let nearby = actor.before.translation.distance(fixture.translation) <= 1.8
+                && in_front_of(actor.before.translation, fixture)
                 && occupied
                     .iter()
                     .all(|other| actor.before.translation.distance(*other) >= 0.62)
                 && sample(actor.before.translation).is_some();
             if !nearby {
                 actor.after.translation =
-                    viewing_position(fixture.translation, fixture.rotation, &occupied, sample)
-                        .ok_or("家具旁暂时没有足够的安全站位")?;
+                    viewing_position(
+                        fixture.translation,
+                        fixture_front_yaw(fixture.rotation),
+                        &occupied,
+                        sample,
+                    )
+                    .ok_or("家具旁暂时没有足够的安全站位")?;
             }
             actor.after.rotation = facing(
                 actor.after.translation,
@@ -507,7 +526,7 @@ fn plan_current(world: &mut World, choice: &PlaybackChoice) -> Result<Vec<ActorP
         }
         occupied.push(actor.after.translation);
     }
-    let fixture_anchor = choice
+    let fixture_pose = choice
         .target
         .as_ref()
         .and_then(|target| {
@@ -516,9 +535,9 @@ fn plan_current(world: &mut World, choice: &PlaybackChoice) -> Result<Vec<ActorP
                 .find(|(_, entity, uid, _)| *entity == target.entity && uid == &target.uid)
         })
         .or_else(|| bindings.first())
-        .map(|(_, _, _, pose)| pose.translation);
+        .map(|(_, _, _, pose)| *pose);
     let anchor = observer_anchor(
-        fixture_anchor,
+        fixture_pose.map(|pose| pose.translation),
         actors.first().map(|actor| actor.after.translation),
         independent_center,
     )
@@ -528,7 +547,8 @@ fn plan_current(world: &mut World, choice: &PlaybackChoice) -> Result<Vec<ActorP
     // navigation sampler, but prefer an oblique side of the content. This is
     // staging composition only; the original scene and authored actor paths
     // retain their owners and are restored from the same snapshot.
-    let observer_yaw = observer_viewing_yaw(choice.mode);
+    let observer_yaw = fixture_pose.map_or(Quat::IDENTITY, |pose| fixture_front_yaw(pose.rotation))
+        * observer_viewing_yaw(choice.mode);
     let player_position = viewing_position(anchor, observer_yaw, &occupied, sample)
         .ok_or("目标附近暂时没有适合观看的位置")?;
     let mut after = *player_pose;
@@ -739,14 +759,15 @@ fn finish_independent(world: &mut World) {
 
 /// Whether the library still holds a choice of its own on the set: the
 /// choice is waiting, running, or finished and kept for a replay or the next
-/// choice. A stop takes it off once its owners are idle.
+/// choice. A stop takes it off once its owners are idle, and so does a next
+/// choice the set cannot take in place (the replacement path is tried first).
 fn plays_choice(world: &World, ticket: u64) -> bool {
     let state = world.resource::<ContentLibrary>();
+    let superseded = state.pending.is_some();
     state.pending.as_ref().is_some_and(|choice| choice.ticket == ticket)
-        || state
-            .active
-            .as_ref()
-            .is_some_and(|active| active.choice.ticket == ticket)
+        || state.active.as_ref().is_some_and(|active| {
+            active.choice.ticket == ticket && !(active.completed && superseded)
+        })
 }
 
 fn restore_preview(world: &mut World) {
