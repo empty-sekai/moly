@@ -42,6 +42,7 @@ use crate::fixture_activity_state::FixtureActivityIdentity;
 use crate::fixture_gimmick;
 use crate::fixture_material::FixtureMaterialsSwapped;
 use crate::lease::Holder;
+use crate::npc::gate_entries::{self, ModelHidden};
 use crate::npc::{self, CharacterUnitId, MotionPhase, NpcActions, WalkState};
 use crate::npc_fixture_activity;
 use crate::npc_objective::ObjectiveFace;
@@ -226,6 +227,8 @@ impl SetSession {
 struct ParkedActor {
     entity: Entity,
     visibility: Visibility,
+    /// The model was already hidden by its presenter, which keeps it so.
+    hidden: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -417,31 +420,41 @@ fn reserve_required_actors(world: &mut World, required: &[u32]) {
     }
 }
 
+/// Takes every character outside the cast off the set: stopped, held, and
+/// hidden the way the presenter hides a model, so the characters that stay
+/// do not see it either (overlap, greetings, balloons).
 fn park_background_actors(world: &mut World, required: &[u32]) -> Vec<ParkedActor> {
     let actors: Vec<_> = world
-        .query_filtered::<(Entity, &CharacterUnitId, &Visibility), Without<PlayerControlled>>()
+        .query_filtered::<(Entity, &CharacterUnitId, &Visibility, Has<ModelHidden>), Without<PlayerControlled>>()
         .iter(world)
-        .filter(|(_, unit, _)| !required.contains(&unit.0))
-        .map(|(entity, _, visibility)| (entity, *visibility))
+        .filter(|(_, unit, _, _)| !required.contains(&unit.0))
+        .map(|(entity, _, visibility, hidden)| ParkedActor {
+            entity,
+            visibility: *visibility,
+            hidden,
+        })
         .collect();
-    for (entity, _) in &actors {
-        npc::stop_for_external_activity(world, *entity);
-        world
-            .entity_mut(*entity)
-            .insert((TalkHold, Visibility::Hidden));
+    for actor in &actors {
+        npc::stop_for_external_activity(world, actor.entity);
+        world.entity_mut(actor.entity).insert(TalkHold);
+        if !actor.hidden {
+            gate_entries::hide(world, actor.entity);
+        }
     }
     actors
-        .into_iter()
-        .map(|(entity, visibility)| ParkedActor { entity, visibility })
-        .collect()
 }
 
 fn restore_background_actors(world: &mut World, parked: &[ParkedActor]) {
     for actor in parked {
-        if let Ok(mut entity) = world.get_entity_mut(actor.entity) {
-            entity.remove::<TalkHold>();
-            entity.insert(actor.visibility);
+        if world.get_entity(actor.entity).is_err() {
+            continue;
         }
+        if !actor.hidden {
+            gate_entries::show(world, actor.entity);
+        }
+        let mut entity = world.entity_mut(actor.entity);
+        entity.remove::<TalkHold>();
+        entity.insert(actor.visibility);
     }
 }
 
