@@ -54,7 +54,7 @@ jobs:
             launcher: moly-launcher
             server: moly-server
             archive: tar.gz
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             exe: moly-app
             launcher: moly-launcher
