@@ -2,6 +2,20 @@
 
 All notable changes to this project are listed here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.0.8](https://github.com/empty-sekai/moly/compare/v0.0.7...v0.0.8) - 2026-11-07
+
+### Features
+
+- **assets:** On native, a master or mirror base may name a `file://` directory ending in `/`, read from disk in the master host's layout.
+- **act:** The talk lens turns round its target between framings instead of cutting across it. `camera.talk_lens` takes `reach`, the farthest the eye stands back in a single character's shot with its fixture. With no conversation playing, the named unit is framed from its front, turned aside where a fixture stands in the way. Fixtures fade mesh by mesh, so only the part in the way fades.
+
+### Bug fixes
+
+- **world:** Start a fixture timeline once its clips are in the body's animation graph, so no rest-pose frame shows between the walk and the fixture action.
+- **features:** Hide characters parked by a stage set the way the presenter hides them, so an overlap with a parked character no longer cancels a cast member's move to a fixture.
+- **world:** Keep the cast held through the after-talk fixture action; it fails at once, naming the unit, when a cast member loses its hold.
+- **content-library:** Stand characters and the observer on the side a fixture is used from, and take a finished choice off the set when the next choice cannot replace it in place.
+
 ## [0.0.7](https://github.com/empty-sekai/moly/compare/v0.0.6...v0.0.7) - 2026-11-05
 
 This is the last release; the repository is archived after it.

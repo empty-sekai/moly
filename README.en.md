@@ -23,10 +23,6 @@ It loads MYSEKAI resources supplied by the user and runs scene exploration, char
 > - **A server of its own.** The bundled server is moly's own implementation, entirely different from the original game's servers, with no compatible interface or implementation. It has a single endpoint that speaks moly's own binary protocol, and every request first declares moly's protocol version. The original game client cannot make any meaningful connection to it; it serves only moly's client.
 > - **Local single-player only.** It does not connect to the original game's servers. The server is run by users for their own play; it has no accounts, login or payments, and no multiplayer.
 
-> [!NOTE]
-> **This repository is archived.** Development of moly ended with 0.0.7: no new features and no further fixes; issues and pull requests are closed.
-> The code may be forked and changed under its licence.
-
 ## What works
 
 Grouped by gameplay domain; the crates that implement each domain are in parentheses (see [Project structure](docs/architecture.md) for each crate's responsibility).

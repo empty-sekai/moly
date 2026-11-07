@@ -5505,7 +5505,7 @@ dependencies = [
 
 [[package]]
 name = "moly-act"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "bevy",
  "moly-config",
@@ -5518,7 +5518,7 @@ dependencies = [
 
 [[package]]
 name = "moly-android"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "android_log-sys",
  "bevy",
@@ -5529,7 +5529,7 @@ dependencies = [
 
 [[package]]
 name = "moly-app"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "bevy",
  "console_error_panic_hook",
@@ -5551,7 +5551,7 @@ dependencies = [
 
 [[package]]
 name = "moly-assets"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "async-lock",
  "bevy",
@@ -5575,7 +5575,7 @@ dependencies = [
 
 [[package]]
 name = "moly-audio"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "bevy",
  "cpal",
@@ -5605,7 +5605,7 @@ dependencies = [
 
 [[package]]
 name = "moly-config"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "toml 1.1.8+spec-1.1.0",
  "toml_edit 0.25.13+spec-1.1.0",
@@ -5613,7 +5613,7 @@ dependencies = [
 
 [[package]]
 name = "moly-content-library"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "arboard",
  "bevy",
@@ -5629,7 +5629,7 @@ dependencies = [
 
 [[package]]
 name = "moly-convert"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "bevy",
  "moly-assets",
@@ -5647,7 +5647,7 @@ dependencies = [
 
 [[package]]
 name = "moly-core"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "async-lock",
  "bevy",
@@ -5676,7 +5676,7 @@ dependencies = [
 
 [[package]]
 name = "moly-cutscene"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "bevy",
  "moly-assets",
@@ -5690,7 +5690,7 @@ dependencies = [
 
 [[package]]
 name = "moly-delivery"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "bevy",
  "moly-assets",
@@ -5706,7 +5706,7 @@ dependencies = [
 
 [[package]]
 name = "moly-devtools"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "async-channel",
  "base64 0.22.1",
@@ -5754,7 +5754,7 @@ dependencies = [
 
 [[package]]
 name = "moly-features"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "arboard",
  "bevy",
@@ -5792,7 +5792,7 @@ dependencies = [
 
 [[package]]
 name = "moly-fixture-edit"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "bevy",
  "moly-assets",
@@ -5809,7 +5809,7 @@ dependencies = [
 
 [[package]]
 name = "moly-game"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "bevy",
  "getrandom 0.2.17",
@@ -5851,7 +5851,7 @@ dependencies = [
 
 [[package]]
 name = "moly-harvest"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "bevy",
  "moly-assets",
@@ -5867,7 +5867,7 @@ dependencies = [
 
 [[package]]
 name = "moly-launcher"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "moly-config",
  "moly-store",
@@ -5882,11 +5882,11 @@ dependencies = [
 
 [[package]]
 name = "moly-law"
-version = "0.0.7"
+version = "0.0.8"
 
 [[package]]
 name = "moly-layout"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "moly-law",
  "moly-protocol",
@@ -5894,7 +5894,7 @@ dependencies = [
 
 [[package]]
 name = "moly-link"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "async-channel",
  "bevy",
@@ -5911,7 +5911,7 @@ dependencies = [
 
 [[package]]
 name = "moly-masters"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "bevy",
  "moly-assets",
@@ -5923,7 +5923,7 @@ dependencies = [
 
 [[package]]
 name = "moly-mission"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "bevy",
  "moly-assets",
@@ -5937,14 +5937,14 @@ dependencies = [
 
 [[package]]
 name = "moly-perf"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "bevy",
 ]
 
 [[package]]
 name = "moly-photo"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "bevy",
  "image",
@@ -5963,7 +5963,7 @@ dependencies = [
 
 [[package]]
 name = "moly-plugin"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "luau0-src",
  "mlua",
@@ -5975,7 +5975,7 @@ dependencies = [
 
 [[package]]
 name = "moly-protocol"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "bitcode",
  "serde",
@@ -5984,7 +5984,7 @@ dependencies = [
 
 [[package]]
 name = "moly-ragdoll"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "avian3d",
  "bevy",
@@ -5995,7 +5995,7 @@ dependencies = [
 
 [[package]]
 name = "moly-render"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "bevy",
  "getrandom 0.2.17",
@@ -6023,7 +6023,7 @@ dependencies = [
 
 [[package]]
 name = "moly-sequence"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "bevy_math",
  "serde",
@@ -6032,7 +6032,7 @@ dependencies = [
 
 [[package]]
 name = "moly-sequence-player"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "bevy",
  "bevy_remote",
@@ -6044,7 +6044,7 @@ dependencies = [
 
 [[package]]
 name = "moly-server"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "async-channel",
  "async-executor",
@@ -6070,7 +6070,7 @@ dependencies = [
 
 [[package]]
 name = "moly-server-host"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "bevy",
  "bevy_remote",
@@ -6082,7 +6082,7 @@ dependencies = [
 
 [[package]]
 name = "moly-stage"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "bevy",
  "console_error_panic_hook",
@@ -6107,7 +6107,7 @@ dependencies = [
 
 [[package]]
 name = "moly-store"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "flate2",
  "moly-config",
@@ -6124,7 +6124,7 @@ dependencies = [
 
 [[package]]
 name = "moly-text"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "serde",
  "serde_json",
@@ -6132,7 +6132,7 @@ dependencies = [
 
 [[package]]
 name = "moly-ui"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "bevy",
  "getrandom 0.2.17",
@@ -6164,7 +6164,7 @@ dependencies = [
 
 [[package]]
 name = "moly-world"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "bevy",
  "getrandom 0.2.17",
