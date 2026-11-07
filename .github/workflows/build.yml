@@ -116,6 +116,13 @@ jobs:
             exit 1
           fi
           eval "$exports"
+          # The C and C++ runtimes are linked statically, so the programs do
+          # not need the Visual C++ Redistributable. RUSTFLAGS, when cargo-xwin
+          # sets it, takes precedence over the per-target variable.
+          flags=CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
+          [[ -n "${RUSTFLAGS:-}" ]] && flags=RUSTFLAGS
+          declare -x "$flags=${!flags:-} -C target-feature=+crt-static"
+          grep -qx "$flags" <<< "$names" || names+=$'\n'"$flags"
           for name in $names; do
             printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
           done
@@ -158,6 +165,22 @@ jobs:
             echo "the server reports \"$served\", expected \"moly-server $VERSION\"" >&2
             exit 1
           fi
+      - name: Check the Windows programs need no Visual C++ runtime
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: bash
+        run: |
+          for exe in "${{ matrix.exe }}" "${{ matrix.launcher }}" "${{ matrix.server }}"; do
+            imports=$(llvm-readobj --coff-imports "target/${{ matrix.target }}/release/$exe" | grep -oiE 'Name: [^ ]+\.dll' | sort -u)
+            echo "$exe imports:" $imports
+            if ! grep -qi 'kernel32\.dll' <<< "$imports"; then
+              echo "no import table read from $exe" >&2
+              exit 1
+            fi
+            if grep -qiE 'vcruntime|msvcp' <<< "$imports"; then
+              echo "$exe links the Visual C++ runtime dynamically" >&2
+              exit 1
+            fi
+          done
       - name: Package
         if: inputs.package
         shell: bash
