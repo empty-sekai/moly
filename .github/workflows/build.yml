@@ -27,7 +27,7 @@ permissions:
   contents: read
 
 env:
-  RUST_TOOLCHAIN: '1.98.1'
+  RUST_TOOLCHAIN: '1.99.1'
   CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: '0'
   SCCACHE_GHA_ENABLED: 'true'
@@ -42,13 +42,15 @@ jobs:
           # The Windows programs are cross-compiled on Linux with cargo-xwin
           # (clang-cl, lld-link, and the MSVC CRT and Windows SDK that xwin
           # downloads); the version check runs them under Wine.
-          - os: ubuntu-24.04
+          - os: ubuntu-26.04
             target: x86_64-pc-windows-msvc
             exe: moly-app.exe
             launcher: moly-launcher.exe
             server: moly-server.exe
             archive: zip
             runner: wine
+          # The oldest supported image: the Linux programs need the glibc of
+          # the system they are built on or a newer one.
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             exe: moly-app
@@ -66,11 +68,11 @@ jobs:
     env:
       VERSION: ${{ inputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         if: inputs.package
         with:
-          node-version: '22'
+          node-version: '26'
       - name: Install the Rust toolchain
         shell: bash
         run: |
@@ -87,9 +89,18 @@ jobs:
         if: matrix.target == 'x86_64-pc-windows-msvc'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang-18 lld-18 llvm-18 wine wine64
+          sudo apt-get install -y --no-install-recommends clang lld llvm wine
           # clang-cl, lld-link, llvm-lib and llvm-rc under their plain names.
-          echo /usr/lib/llvm-18/bin >> "$GITHUB_PATH"
+          bin=$(llvm-config --bindir)
+          echo "$bin" >> "$GITHUB_PATH"
+          # The MSVC STL headers that xwin downloads need Clang 19 or newer.
+          major=$("$bin/clang-cl" --version | grep -oE 'version [0-9]+' | grep -oE '[0-9]+')
+          "$bin/clang-cl" --version
+          wine --version
+          if (( major < 19 )); then
+            echo "clang $major is older than the MSVC STL headers accept" >&2
+            exit 1
+          fi
           echo WINEDEBUG=-all >> "$GITHUB_ENV"
       - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: Swatinem/rust-cache@v2
@@ -97,7 +108,7 @@ jobs:
           key: ${{ matrix.target }}
           cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/master' }}
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         if: matrix.target == 'x86_64-pc-windows-msvc'
         with:
           path: ~/.cache/cargo-xwin
@@ -117,17 +128,23 @@ jobs:
           fi
           eval "$exports"
           # The C and C++ runtimes are linked statically, so the programs do
-          # not need the Visual C++ Redistributable. RUSTFLAGS, when cargo-xwin
-          # sets it, takes precedence over the per-target variable.
+          # not need the Visual C++ Redistributable. A set RUSTFLAGS, even an
+          # empty one, takes precedence over the per-target variable, so an
+          # empty one is dropped.
           flags=CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
-          [[ -n "${RUSTFLAGS:-}" ]] && flags=RUSTFLAGS
+          if [[ -z "${RUSTFLAGS:-}" ]]; then
+            unset RUSTFLAGS
+            names=$(grep -vx RUSTFLAGS <<< "$names")
+          else
+            flags=RUSTFLAGS
+          fi
           declare -x "$flags=${!flags:-} -C target-feature=+crt-static"
           grep -qx "$flags" <<< "$names" || names+=$'\n'"$flags"
           for name in $names; do
             printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
           done
           echo CARGO_BUILD_TARGET=${{ matrix.target }} >> "$GITHUB_ENV"
-          echo "$names"
+          echo "$names"; echo "$flags=${!flags}"
       - name: Build
         run: cargo build --release --locked -p moly-app -p moly-stage -p moly-launcher -p moly-server-host --target ${{ matrix.target }}
       - name: Test the workspace
@@ -205,13 +222,13 @@ jobs:
             fi
           done
           ls -l out
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: inputs.package
         with:
           name: native-${{ matrix.target }}
           path: dist/out/*
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: inputs.package && matrix.target == 'x86_64-pc-windows-msvc'
         with:
           name: stage-system-audit-windows
@@ -223,13 +240,13 @@ jobs:
       matrix:
         renderer: [webgpu, webgl2]
         product: [stage, game]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '26'
       - name: Install the Rust toolchain
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target wasm32-unknown-unknown
@@ -256,7 +273,7 @@ jobs:
       - name: Compiler cache statistics
         if: always()
         run: sccache --show-stats
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: inputs.package
         with:
           name: browser-${{ matrix.product }}-${{ matrix.renderer }}

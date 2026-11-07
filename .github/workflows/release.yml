@@ -26,7 +26,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RUST_TOOLCHAIN: '1.98.1'
+  RUST_TOOLCHAIN: '1.99.1'
   CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: '0'
 
@@ -40,10 +40,10 @@ jobs:
     outputs:
       version: ${{ steps.read.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
-          python-version: '3.13'
+          python-version: '3.15'
       - id: read
         name: Read the workspace version
         shell: bash
@@ -77,16 +77,16 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
-      - uses: actions/download-artifact@v4
+          node-version: '26'
+      - uses: actions/download-artifact@v8
         with:
           pattern: browser-stage-*
           path: stage/pkg
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: browser-game-*
           path: game/pkg
@@ -98,7 +98,7 @@ jobs:
           mkdir -p dist
           tar -czf "dist/moly-$VERSION-web-stage.tar.gz" -C stage pkg
           tar -czf "dist/moly-$VERSION-web-game.tar.gz" -C game pkg
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: browser
           path: dist/moly-${{ env.VERSION }}-web-*.tar.gz
@@ -114,7 +114,7 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Write the release notes
@@ -133,12 +133,12 @@ jobs:
             cp "release-notes/$TAG.md" RELEASE_NOTES.md
           fi
           cat RELEASE_NOTES.md
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: native-*
           path: dist
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: browser
           path: dist
