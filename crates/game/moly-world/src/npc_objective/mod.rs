@@ -2441,6 +2441,9 @@ pub fn decide(
             || reservations.contains(entity)
             || multi_reservations.contains(entity)
             || (hfsm && !hfsm_flags.get(entity).is_ok_and(|(f, _, _)| f.needs_plan))
+            // A talk, and the furniture action that follows it, hold the
+            // actor; the machine plans again once the hold is released.
+            || (hfsm && talk_hold.is_some())
         {
             continue;
         }

@@ -146,6 +146,15 @@ fn end_talk(world: &mut World, state: &mut FixtureTalkAction, mut session: Sessi
 }
 
 fn teardown(world: &mut World, session: &mut Session) {
+    info!(
+        "[fixture-talk-action] talk={} torn down (talked {}, ready {}, started {}, settled {}, last wait: {})",
+        session.talk,
+        session.talked,
+        session.ready,
+        session.token.is_some(),
+        session.settled,
+        session.pending
+    );
     // Preparation may have acquired particle/clip leases before a later
     // source or navigation failure. Drop this request immediately; diagnostics
     // and a queued cancellation message must not keep those leases alive.
@@ -595,6 +604,11 @@ pub fn drive(world: &mut World, mut cancels: Local<MessageCursor<TalkCancelReque
     // its talk.
     if cancelled || wanted.is_some() {
         if let Some(mut after) = state.after_talk.take() {
+            info!(
+                "[fixture-talk-action] talk={} after-talk run ends: {}",
+                after.talk,
+                if cancelled { "a talk cancel request" } else { "the next talk" }
+            );
             teardown(world, &mut after);
         }
     }
@@ -700,10 +714,34 @@ fn advance(world: &mut World, session: &mut Session) {
         } else if !session.plan_resolved || session.plan.is_some() && (!session.ready || waits_to_start(session)) {
             if let Err((retryable, reason)) = prepare(world, session) {
                 if retryable {
+                    if session.pending != reason {
+                        info!(
+                            "[fixture-talk-action] talk={} waits: {reason} (talked {})",
+                            session.talk, session.talked
+                        );
+                    }
                     session.pending = reason;
                 } else {
                     fail(world, session, reason);
                 }
+            }
+        }
+        // A reserved member must stay held until the pre-action ends: an
+        // actor whose hold or lease left meanwhile is back in its AI's hands.
+        if session.failed.is_none() && session.token.is_none() {
+            let lost = session.prior.iter().find(|prior| {
+                world.get::<TalkHold>(prior.entity).is_none()
+                    || world
+                        .get::<TalkFixtureActorLease>(prior.entity)
+                        .is_none_or(|lease| lease.owner != session.owner)
+            });
+            if let Some(prior) = lost {
+                let unit = world.get::<CharacterUnitId>(prior.entity).map(|id| id.0);
+                fail(
+                    world,
+                    session,
+                    format!("unit {unit:?} lost its hold while the cast walked to the action points"),
+                );
             }
         }
         if (!session.ready || waits_to_start(session))
