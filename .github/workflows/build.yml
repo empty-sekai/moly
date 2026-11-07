@@ -32,9 +32,6 @@ env:
   CARGO_INCREMENTAL: '0'
   SCCACHE_GHA_ENABLED: 'true'
   RUSTC_WRAPPER: sccache
-  # LLD ships with the Rust toolchain and links the Windows programs faster
-  # than link.exe; the variable only applies to the Windows target.
-  CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld
 
 jobs:
   native:
@@ -42,19 +39,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
+          # The Windows programs are cross-compiled on Linux with cargo-xwin
+          # (clang-cl, lld-link, and the MSVC CRT and Windows SDK that xwin
+          # downloads); the version check runs them under Wine.
+          - os: ubuntu-24.04
             target: x86_64-pc-windows-msvc
             exe: moly-app.exe
             launcher: moly-launcher.exe
             server: moly-server.exe
             archive: zip
+            runner: wine
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             exe: moly-app
             launcher: moly-launcher
             server: moly-server
             archive: tar.gz
-          - os: macos-15
+          - os: macos-latest
             target: aarch64-apple-darwin
             exe: moly-app
             launcher: moly-launcher
@@ -76,22 +77,54 @@ jobs:
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy --target ${{ matrix.target }}
           rustup default "$RUST_TOOLCHAIN"
       - name: Install system libraries
-        if: runner.os == 'Linux'
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
             libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+      - name: Install the Windows cross tools
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-18 lld-18 llvm-18 wine wine64
+          # clang-cl, lld-link, llvm-lib and llvm-rc under their plain names.
+          echo /usr/lib/llvm-18/bin >> "$GITHUB_PATH"
+          echo WINEDEBUG=-all >> "$GITHUB_ENV"
       - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
           cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/master' }}
+      - uses: actions/cache@v4
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        with:
+          path: ~/.cache/cargo-xwin
+          key: cargo-xwin-sysroot-v1
+      - name: Set up cargo-xwin
+        # Every later cargo command builds for the Windows target with the
+        # compilers, linker and library paths that cargo-xwin names.
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: |
+          command -v cargo-xwin > /dev/null || cargo install cargo-xwin --locked
+          exports=$(cargo xwin env --target ${{ matrix.target }})
+          names=$(grep -oE '^export [A-Za-z_][A-Za-z0-9_]*' <<< "$exports" | cut -d' ' -f2)
+          if [[ -z "$names" ]]; then
+            echo "cargo xwin env exported nothing:" >&2
+            echo "$exports" >&2
+            exit 1
+          fi
+          eval "$exports"
+          for name in $names; do
+            printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
+          done
+          echo CARGO_BUILD_TARGET=${{ matrix.target }} >> "$GITHUB_ENV"
+          echo "$names"
       - name: Build
         run: cargo build --release --locked -p moly-app -p moly-stage -p moly-launcher -p moly-server-host --target ${{ matrix.target }}
       - name: Test the workspace
-        if: runner.os == 'Linux'
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: >-
           cargo test --release --locked --workspace
           --exclude moly-launcher --exclude moly-android
@@ -100,10 +133,10 @@ jobs:
       - name: Check lint warning counts
         # The baseline counts the Windows build, whose platform code differs
         # from the other targets.
-        if: runner.os == 'Windows'
-        run: python tools/clippy-ratchet/check.py
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: python3 tools/clippy-ratchet/check.py
       - name: Build the API docs
-        if: runner.os == 'Windows'
+        if: matrix.target == 'x86_64-pc-windows-msvc'
         env:
           RUSTDOCFLAGS: -D warnings
         run: >-
@@ -115,12 +148,12 @@ jobs:
       - name: Check the reported version
         shell: bash
         run: |
-          reported=$("target/${{ matrix.target }}/release/${{ matrix.exe }}" --version)
+          reported=$(${{ matrix.runner }} "target/${{ matrix.target }}/release/${{ matrix.exe }}" --version | tr -d '\r')
           if [[ "$reported" != "moly $VERSION" ]]; then
             echo "the program reports \"$reported\", expected \"moly $VERSION\"" >&2
             exit 1
           fi
-          served=$("target/${{ matrix.target }}/release/${{ matrix.server }}" --version)
+          served=$(${{ matrix.runner }} "target/${{ matrix.target }}/release/${{ matrix.server }}" --version | tr -d '\r')
           if [[ "$served" != "moly-server $VERSION" ]]; then
             echo "the server reports \"$served\", expected \"moly-server $VERSION\"" >&2
             exit 1
@@ -143,7 +176,7 @@ jobs:
           cd dist
           for name in "$game" "$server"; do
             if [[ "${{ matrix.archive }}" == zip ]]; then
-              7z a -tzip "out/$name.zip" "$name" > /dev/null
+              zip -qr "out/$name.zip" "$name"
             else
               tar -czf "out/$name.tar.gz" "$name"
             fi
@@ -156,7 +189,7 @@ jobs:
           path: dist/out/*
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
-        if: inputs.package && runner.os == 'Windows'
+        if: inputs.package && matrix.target == 'x86_64-pc-windows-msvc'
         with:
           name: stage-system-audit-windows
           path: target/${{ matrix.target }}/release/moly-stage.exe
