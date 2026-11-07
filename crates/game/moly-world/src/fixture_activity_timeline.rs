@@ -1065,15 +1065,18 @@ pub struct FixtureActivityTimelines {
     sessions: HashMap<TimelineToken, Session>,
     /// Cache graph nodes, not running state. Reusing a clip in a new session
     /// cannot accumulate another node every time a character sits down.
-    nodes: HashMap<
-        (
-            AssetId<AnimationGraph>,
-            TimelineClipKey,
-            AssetId<AnimationClip>,
-        ),
-        AnimationNodeIndex,
-    >,
+    nodes: ClipNodes,
 }
+
+/// The graph node placed for each timeline clip on a body's graph.
+type ClipNodes = HashMap<
+    (
+        AssetId<AnimationGraph>,
+        TimelineClipKey,
+        AssetId<AnimationClip>,
+    ),
+    AnimationNodeIndex,
+>;
 
 impl FixtureActivityTimelines {
     pub(crate) fn has_npc_fixture_actor(&self, actor: Entity) -> bool {
@@ -2226,8 +2229,19 @@ pub fn advance(world: &mut World) {
                 runtime.sessions.insert(token, session);
                 continue;
             }
+            // A clip node added to a body's graph, or a released slot given a
+            // clip, plays nothing until the animation system rebuilds its
+            // evaluation order for the changed graph, which happens in the
+            // next frame's evaluation. The start resets every bone the
+            // timeline drives to its rest pose, so starting in the same frame
+            // would show the rest pose for one frame. Place the nodes first
+            // and start once the graph has them.
             let outcome = if !session.initialized {
-                initialize(world, token, &mut session, &mut runtime.nodes)
+                if bind_clip_nodes(world, &session.request, &mut runtime.nodes) {
+                    Ok(())
+                } else {
+                    initialize(world, token, &mut session, &mut runtime.nodes)
+                }
             } else {
                 Ok(())
             };
@@ -2246,18 +2260,89 @@ pub fn advance(world: &mut World) {
     });
 }
 
+/// Places every animation clip of `request` on its body's graph. Returns
+/// whether any graph changed. A binding whose graph is gone is left to
+/// `initialize`, which refuses it.
+fn bind_clip_nodes(world: &mut World, request: &StartTimeline, cache: &mut ClipNodes) -> bool {
+    // The lookup cache owns only IDs, so a destroyed body graph cannot keep
+    // its asset alive. Drop those obsolete keys when a new session starts;
+    // repeated body rebuilds must not retain their metadata indefinitely.
+    // Keep this out of the per-frame sampling path.
+    {
+        let graphs = world.resource::<Assets<AnimationGraph>>();
+        cache.retain(|(graph, _, _), _| graphs.get(*graph).is_some());
+    }
+    let mut changed = false;
+    for clip in request.definition.tracks.iter().flat_map(|track| &track.clips) {
+        if !matches!(clip.payload, TimelinePayload::Animation { .. }) {
+            continue;
+        }
+        let Some(binding) = request.bindings.animations.get(&clip.key) else {
+            continue;
+        };
+        if let Ok((_, added)) = clip_node(world, cache, &clip.key, binding) {
+            changed |= added;
+        }
+    }
+    changed
+}
+
+/// The node that plays `binding`'s clip on its body's graph, and whether the
+/// graph had to change for it.
+fn clip_node(
+    world: &mut World,
+    cache: &mut ClipNodes,
+    key: &TimelineClipKey,
+    binding: &TimelineAnimationBinding,
+) -> Result<(AnimationNodeIndex, bool), TimelineFailure> {
+    let cache_key = (binding.graph.id(), key.clone(), binding.clip.id());
+    let graph = world
+        .resource::<Assets<AnimationGraph>>()
+        .get(&binding.graph)
+        .ok_or_else(|| invalid("animation graph disappeared"))?;
+    let placed = cache.get(&cache_key).copied().filter(|node| {
+        graph.graph.node_weight(*node).is_some_and(
+            |n| matches!(&n.node_type, AnimationNodeType::Clip(handle) if *handle == binding.clip),
+        )
+    });
+    if let Some(node) = placed {
+        return Ok((node, false));
+    }
+    let mut graphs = world.resource_mut::<Assets<AnimationGraph>>();
+    let graph = graphs
+        .get_mut(&binding.graph)
+        .map(|asset| asset.into_inner())
+        .ok_or_else(|| invalid("animation graph disappeared"))?;
+    // Released slots keep stable graph indices (removing a petgraph node
+    // would move locomotion nodes). Reuse those slots instead of retaining
+    // every past clip in the graph.
+    let free = cache
+        .iter()
+        .find(|((id, _, _), node)| {
+            *id == binding.graph.id()
+                && graph
+                    .graph
+                    .node_weight(**node)
+                    .is_some_and(|n| matches!(n.node_type, AnimationNodeType::Blend))
+        })
+        .map(|(key, node)| (key.clone(), *node));
+    let node = if let Some((old_key, node)) = free {
+        cache.remove(&old_key);
+        graph.graph.node_weight_mut(node).unwrap().node_type =
+            AnimationNodeType::Clip(binding.clip.clone());
+        node
+    } else {
+        graph.add_clip(binding.clip.clone(), 1.0, graph.root)
+    };
+    cache.insert(cache_key, node);
+    Ok((node, true))
+}
+
 fn initialize(
     world: &mut World,
     token: TimelineToken,
     session: &mut Session,
-    cache: &mut HashMap<
-        (
-            AssetId<AnimationGraph>,
-            TimelineClipKey,
-            AssetId<AnimationClip>,
-        ),
-        AnimationNodeIndex,
-    >,
+    cache: &mut ClipNodes,
 ) -> Result<(), TimelineFailure> {
     validate(world, &session.request, Some(token), true)?;
     if world
@@ -2318,52 +2403,13 @@ fn initialize(
                 .expect("animated transform") = rest.0;
         }
     }
-    // The lookup cache owns only IDs, so a destroyed body graph cannot keep
-    // its asset alive. Drop those obsolete keys when a new session starts;
-    // repeated body rebuilds must not retain their metadata indefinitely.
-    // Keep this out of the per-frame sampling path.
-    {
-        let graphs = world.resource::<Assets<AnimationGraph>>();
-        cache.retain(|(graph, _, _), _| graphs.get(*graph).is_some());
-    }
     let request = &session.request;
     let mut claimed = HashSet::new();
     for track in &request.definition.tracks {
         for clip in &track.clips {
             if let TimelinePayload::Animation { settings, .. } = &clip.payload {
                 let binding = &request.bindings.animations[&clip.key];
-                let cache_key = (binding.graph.id(), clip.key.clone(), binding.clip.id());
-                let mut graphs = world.resource_mut::<Assets<AnimationGraph>>();
-                let graph = graphs
-                    .get_mut(&binding.graph)
-                    .map(|asset| asset.into_inner())
-                    .ok_or_else(|| invalid("animation graph disappeared"))?;
-                let node = cache.get(&cache_key).copied().filter(|node| graph.graph.node_weight(*node)
-                    .is_some_and(|n| matches!(&n.node_type,AnimationNodeType::Clip(handle) if *handle == binding.clip)));
-                let node = node.unwrap_or_else(|| {
-                    // Released slots keep stable graph indices (removing a
-                    // petgraph node would move locomotion nodes). Reuse those
-                    // slots instead of retaining every past clip in the graph.
-                    let free = cache
-                        .iter()
-                        .find(|((id, _, _), node)| {
-                            *id == binding.graph.id()
-                                && graph.graph.node_weight(**node).is_some_and(|n| {
-                                    matches!(n.node_type, AnimationNodeType::Blend)
-                                })
-                        })
-                        .map(|(key, node)| (key.clone(), *node));
-                    let node = if let Some((old_key, node)) = free {
-                        cache.remove(&old_key);
-                        graph.graph.node_weight_mut(node).unwrap().node_type =
-                            AnimationNodeType::Clip(binding.clip.clone());
-                        node
-                    } else {
-                        graph.add_clip(binding.clip.clone(), 1.0, graph.root)
-                    };
-                    cache.insert(cache_key, node);
-                    node
-                });
+                let (node, _) = clip_node(world, cache, &clip.key, binding)?;
                 // The body's own animation keeps playing under the Director's
                 // output; `layer` lays the timeline's clips over it.
                 if claimed.insert(binding.animator) {
