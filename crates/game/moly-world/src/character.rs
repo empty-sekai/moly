@@ -1065,7 +1065,7 @@ pub fn drive(
             MotionKind::TurnL(motion) => format!("turn_l({})", motion.label()),
         };
         let from = old
-            .map(&word)
+            .map(word)
             .unwrap_or_else(|| "未起播".to_owned());
         debug!(
             "[npc unit={}] 动画段 {from} -> {}（{}）",

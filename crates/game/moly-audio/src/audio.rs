@@ -582,13 +582,13 @@ fn parse_volume_settings(text: &str) -> Option<LocalVolumeSettings> {
         let clamp = |v: &serde_json::Value| -> Option<f32> {
             v.as_f64().map(|n| (n as f32).clamp(0.0, 1.0))
         };
-        if let Some(v) = obj.get("Bgm").and_then(&clamp) {
+        if let Some(v) = obj.get("Bgm").and_then(clamp) {
             data.bgm = v;
         }
-        if let Some(v) = obj.get("Se").and_then(&clamp) {
+        if let Some(v) = obj.get("Se").and_then(clamp) {
             data.se = v;
         }
-        if let Some(v) = obj.get("Voice").and_then(&clamp) {
+        if let Some(v) = obj.get("Voice").and_then(clamp) {
             data.voice = v;
         }
         data

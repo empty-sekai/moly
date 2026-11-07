@@ -497,8 +497,8 @@ fn parse_index(
             .load::<Image>(AssetPath::from(format!("moly://phenomena/{}", entry.ramp.file)));
         let overrides = entry.overrides.into_iter().map(|(site, files)| {
             (site, OverridePair {
-                config: files.config.as_deref().map(&load),
-                postprocess: files.postprocess.as_deref().map(&load),
+                config: files.config.as_deref().map(load),
+                postprocess: files.postprocess.as_deref().map(load),
             })
         }).collect();
         pending.push(PendingPhenomenon {

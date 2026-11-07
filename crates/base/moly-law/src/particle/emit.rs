@@ -170,7 +170,7 @@ pub fn burst_check(
         }
     };
     let hits = match burst.cycles {
-        BurstCycles::Finite(n) => (0..n.get()).any(|k| at_cycle(k).is_some_and(&due_at)),
+        BurstCycles::Finite(n) => (0..n.get()).any(|k| at_cycle(k).is_some_and(due_at)),
         BurstCycles::Infinite => {
             // Infinite cycles are not iterated: solve directly for the k that
             // lands in (prev, now], the smallest k of at least 1 with
