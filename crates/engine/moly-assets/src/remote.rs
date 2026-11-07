@@ -55,8 +55,9 @@ pub const MASTER_FIRST_BYTE_MS: i32 = 10_000;
 pub const NATIVE_READ_MS: u64 = 60_000;
 
 /// The admitted bases and repository names. Each configured base is a
-/// canonical HTTPS directory ending in `/`; `None` means the configuration
-/// names none, and that host is not read.
+/// canonical HTTPS directory ending in `/`, or on native a `file://` local
+/// directory in the host's layout; `None` means the configuration names
+/// none, and that host is not read.
 ///
 /// `master` names the master host, whose per-region directory is the
 /// region's (`jp`, `cn`, …). `master_repository` names the template of the
@@ -446,31 +447,64 @@ struct RemoteReader {
 }
 
 impl RemoteReader {
-    /// `host/path` of the request (the web reader prefixes the scheme).
-    fn target(&self, path: &Path) -> Result<PathBuf, AssetReaderError> {
-        let refuse = |reason: String| {
-            AssetReaderError::Io(Arc::new(std::io::Error::other(format!(
-                "remote {:?} read of {}: {reason}",
-                self.remote,
-                path.display()
-            ))))
-        };
+    fn refusal(&self, path: &Path, reason: String) -> AssetReaderError {
+        AssetReaderError::Io(Arc::new(std::io::Error::other(format!(
+            "remote {:?} read of {}: {reason}",
+            self.remote,
+            path.display()
+        ))))
+    }
+
+    /// The admitted base of the host and `path` as a plain relative path.
+    fn admitted(&self, path: &Path) -> Result<(String, String), AssetReaderError> {
         let base = self
             .admission
             .base(self.remote)
-            .map_err(&refuse)?
-            .ok_or_else(|| refuse("no base was admitted".into()))?;
-        let host_and_path = base
-            .strip_prefix("https://")
-            .ok_or_else(|| refuse(format!("the admitted base {base} is not HTTPS")))?;
-        let relative =
-            plain_relative(path).ok_or_else(|| refuse("not a plain relative path".into()))?;
+            .map_err(|reason| self.refusal(path, reason))?
+            .ok_or_else(|| self.refusal(path, "no base was admitted".into()))?;
+        let relative = plain_relative(path)
+            .ok_or_else(|| self.refusal(path, "not a plain relative path".into()))?;
+        Ok((base, relative))
+    }
+
+    /// `host/path` of the request (the web reader prefixes the scheme).
+    fn target(&self, path: &Path) -> Result<PathBuf, AssetReaderError> {
+        let (base, relative) = self.admitted(path)?;
+        let host_and_path = base.strip_prefix("https://").ok_or_else(|| {
+            self.refusal(path, format!("the admitted base {base} is not HTTPS"))
+        })?;
         let joined = join(host_and_path, &relative, |region| {
             self.admission.repository(region)
         })
-        .map_err(refuse)?;
+        .map_err(|reason| self.refusal(path, reason))?;
         Ok(PathBuf::from(joined))
     }
+
+    /// The file `path` is kept in when the admitted base is a `file://`
+    /// directory, or `None` when the base is an HTTPS host.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn local_file(&self, path: &Path) -> Result<Option<PathBuf>, AssetReaderError> {
+        let (base, relative) = self.admitted(path)?;
+        let Some(directory) = file_directory(&base) else {
+            return Ok(None);
+        };
+        let joined = join(directory, &relative, |region| {
+            self.admission.repository(region)
+        })
+        .map_err(|reason| self.refusal(path, reason))?;
+        Ok(Some(PathBuf::from(joined)))
+    }
+}
+
+/// The local directory a `file://` base names, in the host's own layout
+/// (`file:///D:/masters/` is `D:/masters/`, `file:///srv/masters/` is
+/// `/srv/masters/`); `None` when `base` is not a `file://` address.
+pub(crate) fn file_directory(base: &str) -> Option<&str> {
+    let rest = base.strip_prefix("file://")?;
+    let bytes = rest.as_bytes();
+    let drive =
+        bytes.len() > 2 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':';
+    Some(if drive { &rest[1..] } else { rest })
 }
 
 /// The path as `a/b/c` when every component is a plain name of URL-safe
@@ -496,6 +530,10 @@ fn plain_relative(path: &Path) -> Option<String> {
 
 impl AssetReader for RemoteReader {
     async fn read<'a>(&'a self, path: &'a Path) -> Result<impl Reader + 'a, AssetReaderError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(file) = self.local_file(path)? {
+            return Ok(VecReader::new(native::read_file(file).await?));
+        }
         let target = self.target(path)?;
         let url = format!("https://{}", target.display());
         // A master host that does not answer within the bound fails the read
@@ -614,6 +652,22 @@ mod native {
                 .read_to_end(&mut bytes)
                 .map_err(|error| failure(&url, error.into()))?;
             Ok(bytes)
+        })
+        .await
+    }
+
+    /// The bytes of a file below a `file://` base, read on the blocking
+    /// thread pool. A missing file is "not found", as a 404 is.
+    pub(super) async fn read_file(file: PathBuf) -> Result<Vec<u8>, AssetReaderError> {
+        blocking::unblock(move || match std::fs::read(&file) {
+            Ok(bytes) => Ok(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                Err(AssetReaderError::NotFound(file))
+            }
+            Err(error) => Err(AssetReaderError::Io(Arc::new(io::Error::new(
+                error.kind(),
+                format!("local read of {}: {error}", file.display()),
+            )))),
         })
         .await
     }

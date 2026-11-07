@@ -12,7 +12,7 @@ Master tables are read from three sources, tried in this order:
 2. **The master host**, `masters.base` (`MOLY_MASTER_BASE`): a directory per region, `<region>/master/<table>.json` and `<region>/versions/current_version.json`.
 3. **The master mirror**, `masters.mirror` (`MOLY_MASTER_MIRROR_BASE`): the same layout as the master host, tried after it.
 
-Every base is a canonical HTTPS directory ending in `/`; a template must name `{repo}` exactly once, as a whole path segment. A configured base that is neither is refused when the program starts, naming its key.
+Every base is a canonical HTTPS directory ending in `/`; a template must name `{repo}` exactly once, as a whole path segment. The native program also accepts a `file://` directory ending in `/` (for example `file:///D:/masters/{repo}/`), read in the same layout from disk; the part before `{repo}` must exist. A configured base that is none of these is refused when the program starts, naming its key.
 
 A source whose key is not set is skipped: the sources that are configured are tried in the order above, and a table is only absent once each of them has failed. When no master source is configured at all, the master read fails once with a message naming `masters.repository`, `masters.base` and `masters.mirror`. The upstream data version (`versions/current_version.json`) of the asset root's region is logged once per start.
 

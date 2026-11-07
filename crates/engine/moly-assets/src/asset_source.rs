@@ -140,12 +140,37 @@ pub fn validate_asset_selection(
     validate_asset_prefix(base, resource_root(configured_origin, configured_base)?)
 }
 
+/// Whether `base` is a `file://` base: on native, an existing local
+/// directory ending in `/`, read in the host's own layout. The browser reads
+/// HTTPS hosts only. `Ok(false)` when `base` is not a `file://` address.
+fn file_base(key: &str, base: &str) -> Result<bool, String> {
+    let Some(path) = crate::remote::file_directory(base) else {
+        return Ok(false);
+    };
+    if cfg!(target_arch = "wasm32") {
+        return Err(format!(
+            "`{key}` names a file directory, which only the native program reads"
+        ));
+    }
+    let directory = path.split("{repo}").next().unwrap_or(path);
+    if !path.ends_with('/') || !std::path::Path::new(directory).is_dir() {
+        return Err(format!(
+            "`{key}` must name an existing local directory ending in /"
+        ));
+    }
+    Ok(true)
+}
+
 /// One remote base: a configured canonical HTTPS directory like
-/// `resource_base`, or `None` when the key `key` is not set.
+/// `resource_base`, a native `file://` directory, or `None` when the key
+/// `key` is not set.
 fn remote_base(key: &str, configured: Option<&str>) -> Result<Option<String>, String> {
     let Some(base) = configured else {
         return Ok(None);
     };
+    if file_base(key, base)? {
+        return Ok(Some(base.to_owned()));
+    }
     public_asset_parts(base)
         .filter(|(_, path)| is_canonical_directory(path))
         .map(|_| Some(base.to_owned()))
@@ -153,20 +178,27 @@ fn remote_base(key: &str, configured: Option<&str>) -> Result<Option<String>, St
 }
 
 /// A master host whose paths name the region's repository: the configured
-/// template must be a canonical HTTPS directory that names `{repo}` exactly
-/// once, as a whole path segment; `None` when it is not configured.
+/// template must be a canonical HTTPS directory (or a native `file://`
+/// directory) that names `{repo}` exactly once, as a whole path segment;
+/// `None` when it is not configured.
 fn repository_base(key: &str, configured: Option<&str>) -> Result<Option<String>, String> {
     let Some(template) = configured else {
         return Ok(None);
     };
-    let (_, path) = public_asset_parts(template)
-        .filter(|(_, path)| is_canonical_directory(path))
-        .ok_or_else(|| {
-            format!(
-                "`{key}` must be a canonical HTTPS directory ending in /, \
-                 with {{repo}} as a path segment"
-            )
-        })?;
+    let path = match crate::remote::file_directory(template) {
+        Some(path) if file_base(key, template)? => path,
+        _ => {
+            public_asset_parts(template)
+                .filter(|(_, path)| is_canonical_directory(path))
+                .ok_or_else(|| {
+                    format!(
+                        "`{key}` must be a canonical HTTPS directory ending in /, \
+                         with {{repo}} as a path segment"
+                    )
+                })?
+                .1
+        }
+    };
     if path.split('/').filter(|part| *part == "{repo}").count() != 1 {
         return Err(format!(
             "`{key}` must name {{repo}} exactly once, as a whole path segment"
